@@ -1,4 +1,5 @@
 #include "flib/flRevolutionAlloc.h"
+#include "flib/scripting/Syscalls.h"
 
 #include <revolution/DVD.h>
 #include <revolution/OS.h>
@@ -27,7 +28,6 @@ extern "C" {
     void fn_802EDC70();
     void InitSyscall0Page();
     void InitMainRecordTable();
-    void SetSyscallPage1();
 }
 
 extern "C" void flOSInit() {

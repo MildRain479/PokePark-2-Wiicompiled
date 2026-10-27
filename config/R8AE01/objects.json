@@ -92,6 +92,7 @@
         "objects": {
             "flib/ScriptLog.cpp": "Matching",
             "flib/flRevolutionAlloc.cpp": "Matching",
+            "flib/scripting/Vec3Syscalls.cpp": "NonMatching",
             "flib/flSlice2.cpp": "Matching",
             "flib/flOS.cpp": "Matching"
         }
