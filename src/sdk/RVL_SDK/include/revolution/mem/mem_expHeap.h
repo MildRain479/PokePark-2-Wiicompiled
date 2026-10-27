@@ -55,6 +55,7 @@ typedef struct MEMiExpHeapHead {
 struct MEMiHeapHead* MEMCreateExpHeapEx(void* start, u32 size, u16 opt);
 struct MEMiHeapHead* MEMDestroyExpHeap(struct MEMiHeapHead* heap);
 void* MEMAllocFromExpHeapEx(struct MEMiHeapHead* heap, u32 size, s32 align);
+u16 MEMSetAllocModeForExpHeap(struct MEMiHeapHead* heap, u16 mode);
 u32 MEMResizeForMBlockExpHeap(struct MEMiHeapHead* heap, void* memBlock,
                               u32 size);
 void MEMFreeToExpHeap(struct MEMiHeapHead* heap, void* memBlock);

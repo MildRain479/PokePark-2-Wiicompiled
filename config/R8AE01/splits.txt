@@ -83,11 +83,18 @@ RVL_SDK/src/revolution/bte/gki/gki_ppc.c:
 	.text       start:0x8025F6B0 end:0x8025F9B4 align:16
 
 flib/ScriptLog.cpp:
-	.text       start:0x802EC130 end:0x802EC8E0 align:16
+	.text       start:0x802EC130 end:0x802EC930 align:16
 
 flib/flRevolutionAlloc.cpp:
-	.text       start:0x802EC8E0 end:0x802ECBE0 align:16
+	.text       start:0x802EC930 end:0x802ECBE0 align:16
 	.ctors      start:0x8030686C end:0x80306870
+	.data       start:0x8035F310 end:0x8035F3A0
+	.bss        start:0x80480CB0 end:0x80480D18
+	.sdata      start:0x80486220 end:0x80486228
+
+flib/flMemory.cpp:
+	.text       start:0x802ECBE0 end:0x802ED900 align:16
+	.ctors      start:0x80306870 end:0x80306874
 
 flib/scripting/core_syscalls.cpp:
 	.text       start:0x802EF620 end:0x802F1914 align:16

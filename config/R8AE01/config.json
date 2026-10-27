@@ -79,7 +79,8 @@
         "game": {
             "base": "base",
             "flags": [
-                "-func_align 16"
+                "-func_align 16",
+                "-str reuse"
             ]
         }
     }

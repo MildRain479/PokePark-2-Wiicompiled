@@ -90,6 +90,7 @@
         "cflags": "game",
         "src_dir": "src",
         "objects": {
+            "flib/flRevolutionAlloc.cpp": "Matching",
             "flib/flOS.cpp": "Matching"
         }
     }

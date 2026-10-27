@@ -1,3 +1,5 @@
+#include "flib/flRevolutionAlloc.h"
+
 #include <revolution/DVD.h>
 #include <revolution/OS.h>
 #include <revolution/PAD.h>
@@ -19,12 +21,7 @@ public:
     u8 _unk[0x4C];
 };
 
-namespace flRevolution {
-    void clear();
-}
-
 extern "C" {
-    void initMemoryAlloc();
     void fn_802ED900(int);
     void fn_802ED910();
     void fn_802EDC70();
