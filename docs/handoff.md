@@ -34,6 +34,13 @@ separate Vec-sized temporaries). These forms did not reproduce it:
 - by-value getters or setters
 - a discarded `SyscallFloatResult`, pointer-cast and union versions
 - a float→word→float round trip
+- a member-wise-copying temporary per component, in either order, or as
+  named temps. These load all three components each time; the original
+  loads each component only once. The slots line up with three Vec
+  temporaries at 0x8/0x14/0x20, each keeping only the component read
+  from it, so whatever built them stored a single field. Only contrived
+  code ("write one field of a throwaway Vec, read it back") seems likely
+  to match, and that would be a fake match.
 
 ## Compiler flags (game code, `config.json` "game")
 
