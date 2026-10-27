@@ -75,6 +75,12 @@
                 "-func_align 16",
                 "-i src/sdk/RVL_SDK/include/"
             ]
+        },
+        "game": {
+            "base": "base",
+            "flags": [
+                "-func_align 16"
+            ]
         }
     }
 }
