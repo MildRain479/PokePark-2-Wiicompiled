@@ -84,6 +84,10 @@ RVL_SDK/src/revolution/bte/gki/gki_ppc.c:
 
 flib/ScriptLog.cpp:
 	.text       start:0x802EC130 end:0x802EC930 align:16
+	.data       start:0x8035F2F8 end:0x8035F310
+	.bss        start:0x804808B0 end:0x80480CB0
+	.sdata      start:0x80486210 end:0x80486220
+	.sbss       start:0x80487390 end:0x804873B0
 
 flib/flRevolutionAlloc.cpp:
 	.text       start:0x802EC930 end:0x802ECBE0 align:16
