@@ -1,3 +1,4 @@
+#include "revolution/os/__ppc_eabi_init.h"
 #include <revolution/BASE.h>
 #include <revolution/OS.h>
 

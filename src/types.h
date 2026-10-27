@@ -5,9 +5,12 @@
 #include <stdarg.h>
 #include <stddef.h>
 #else
+// SDK headers are often included inside extern "C" blocks
+extern "C++" {
 #include <cstdarg>
 #include <cstddef>
 #include <new>
+}
 #endif
 
 #include "decomp.h"

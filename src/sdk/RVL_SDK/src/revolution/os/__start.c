@@ -1,5 +1,6 @@
 
 #include "PowerPC_EABI_Support/MetroTRK/dolphin_trk.h"
+#include "revolution/os/__ppc_eabi_init.h"
 #include <revolution/DB.h>
 #include <revolution/DVD.h>
 #include <revolution/OS.h>

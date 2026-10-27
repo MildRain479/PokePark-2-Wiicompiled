@@ -1,9 +1,8 @@
-#include <types.h>
-
 #include <revolution/DVD.h>
 #include <revolution/OS.h>
 #include <revolution/PAD.h>
 #include <revolution/VI.h>
+#include <stdlib.h>
 
 // TODO: Move these declarations into flib headers once their TUs are decompiled.
 // Class layouts and parameter types are guesses based on call sites.
@@ -25,9 +24,6 @@ namespace flRevolution {
 }
 
 extern "C" {
-    // MSL's stdlib.h doesn't compile as C++ yet
-    void srand(unsigned int seed);
-
     void initMemoryAlloc();
     void fn_802ED900(int);
     void fn_802ED910();
