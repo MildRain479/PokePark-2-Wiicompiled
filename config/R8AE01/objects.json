@@ -91,6 +91,7 @@
         "src_dir": "src",
         "objects": {
             "flib/flRevolutionAlloc.cpp": "Matching",
+            "flib/flSlice2.cpp": "Matching",
             "flib/flOS.cpp": "Matching"
         }
     }

@@ -80,7 +80,8 @@
             "base": "base",
             "flags": [
                 "-func_align 16",
-                "-str reuse"
+                "-str reuse",
+                "-RTTI on"
             ]
         }
     }

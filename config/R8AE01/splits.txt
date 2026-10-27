@@ -108,6 +108,8 @@ flib/scripting/Vec3Syscalls.cpp:
 flib/flSlice2.cpp:
 	.text       start:0x802F3130 end:0x802F33D0 align:16
 	.ctors      start:0x80306878 end:0x8030687C
+	.data       start:0x8036C5A0 end:0x8036C5B0
+	.sdata      start:0x80486270 end:0x80486280
 	.sbss       start:0x804873C8 end:0x804873D0
 
 flib/flOS.cpp:
