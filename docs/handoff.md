@@ -64,11 +64,13 @@ separate Vec-sized temporaries). These forms did not reproduce it:
 
 ### Open problems: `flMemory.cpp`
 
-- **`flMemory::Allocate` (98.4%).** Only register assignment differs: the
+- **`flMemory::Allocate` (99.0%).** Only register assignment differs: the
   original uses mask→r7, minSize→r8 and chunkSize→r5. The best
   declaration order so far is `mask, chunk, minSize, chunkSize`, declared
   up front. The loop temporaries (rest, after, remainder, data, aligned)
-  have not been permuted yet.
+  are now declared first, in the order rest, after, remainder, aligned,
+  data (98.4% to 99.0%); re-permuting the four main locals on top found
+  nothing better.
 - **`flMemoryManager::free` (99.4%).** The first header load (the chunk
   passed to `Free`) should be in r28 and the guard pointer in r31; mine are
   swapped. Dropping the guard local or reordering declarations did not

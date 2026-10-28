@@ -197,6 +197,11 @@ void flMemory::Free(void* ptr) {
 }
 
 void* flMemory::Allocate(int size, u32 align) {
+    int rest;
+    flMemoryChunk* after;
+    flMemoryChunk* remainder;
+    u32* aligned;
+    u32* data;
     u32 mask;
     flMemoryChunk* chunk;
     int minSize;
@@ -229,10 +234,10 @@ void* flMemory::Allocate(int size, u32 align) {
             continue;
         }
 
-        int rest = chunk->size - chunkSize;
-        flMemoryChunk* after = CHUNK_AT(chunk, chunk->size);
+        rest = chunk->size - chunkSize;
+        after = CHUNK_AT(chunk, chunk->size);
         if (rest >= minSize) {
-            flMemoryChunk* remainder = CHUNK_AT(chunk, chunkSize);
+            remainder = CHUNK_AT(chunk, chunkSize);
             remainder->size = rest;
             remainder->prevFree = (flMemoryChunk*)1;
             remainder->prev = chunk->prev;
@@ -250,9 +255,9 @@ void* flMemory::Allocate(int size, u32 align) {
             after->prevFree = NULL;
         }
 
-        u32* data = (u32*)((u8*)chunk + 8);
+        data = (u32*)((u8*)chunk + 8);
         chunk->prevFree = NULL;
-        u32* aligned = (u32*)(((u32)data + mask) & ~mask);
+        aligned = (u32*)(((u32)data + mask) & ~mask);
         while (data < aligned) {
             *data++ = 0xFFFFFFFF;
         }
