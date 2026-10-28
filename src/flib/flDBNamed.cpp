@@ -33,12 +33,12 @@ RecordTable* GetOrCreateNamedRT(const char* name, int nameLength) {
 }
 
 RTEntry* FindEntryByName(RecordTable* table, const char* name) {
-    RTEntry* entry;
+    int cmp;
     u32 nameOffset;
+    RTEntry* entry;
     int len;
     int pos;
     int half;
-    int cmp;
 
     nameOffset = GetFieldDef(table, "Name")->offset;
     len = table->entries.count;

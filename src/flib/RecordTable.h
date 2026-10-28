@@ -41,9 +41,8 @@ struct RTArray {
     void Destroy() {
         T* d = data;
         int n = count;
-        T* p = d;
-        for (int i = 0; i < n; i++, p++) {
-            p->~T();
+        for (int i = 0; i < n; i++) {
+            d[i].~T();
         }
         if (d != NULL) {
             RTAllocator()->free(d);
@@ -57,11 +56,21 @@ struct RTArray {
         count = 0;
     }
 
+    // Removes an element by moving the last element into its place.
+    void RemoveSwap(int index) {
+        data[index].~T();
+        count--;
+        if (index < count) {
+            memcpy(&data[index], &data[count], sizeof(T));
+        }
+    }
+
     T* Append() {
         if (data == NULL || count >= capacity) {
+            T* newData;
             int oldCapacity = capacity;
             capacity = oldCapacity * 2;
-            T* newData = (T*)RTAllocator()->allocate(oldCapacity * 2 * sizeof(T), 4);
+            newData = (T*)RTAllocator()->allocate(oldCapacity * 2 * sizeof(T), 4);
             if (data != NULL) {
                 memcpy(newData, data, oldCapacity * sizeof(T));
                 if (data != NULL) {
@@ -94,6 +103,7 @@ struct RTEntry {
     ~RTEntry() { Free(); }
 
     inline void Free();
+    inline void Init(RecordTable* table);
 
     void SetEmbeddedStringField(const char* name, const char* value);
     void SetAllocatedStringField(const char* name, const char* value);
@@ -145,7 +155,9 @@ extern "C" {
 extern RecordTable* Module2RT_Table;
 
 inline RecordTable::~RecordTable() {
-    RecordTableClear();
+    if (this != NULL) {
+        RecordTableClear();
+    }
 }
 
 // Frees the entry's data, along with any heap-allocated strings in it.
@@ -168,6 +180,13 @@ inline void RTEntry::Free() {
             data = NULL;
         }
     }
+}
+
+inline void RTEntry::Init(RecordTable* table) {
+    this->table = table;
+    u32 size = table->entrySize;
+    data = (u8*)RTAllocator()->allocate(size, 4);
+    memset(data, 0, size);
 }
 
 template <typename T>

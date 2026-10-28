@@ -3,11 +3,12 @@
 #include <string.h>
 
 void RTEntry::SetEmbeddedStringField(const char* name, const char* value) {
+    int size;
     RTFieldDef* def = GetFieldDef(table, name);
     char* str = (char*)(data + def->offset);
     str[0] = '\0';
     if (value != NULL) {
-        u32 size = def->arraySize;
+        size = def->arraySize;
         strncpy(str, value, size);
         str[size - 1] = '\0';
     }
@@ -89,13 +90,19 @@ void AddField(RecordTable* table, const char* name, int type, int arraySize) {
 }
 
 RTFieldDef* GetFieldDef(RecordTable* table, const char* name) {
-    int len = table->fields.count;
+    RTFieldDef* def;
+    int len;
+    int pos;
+    int half;
+    int cmp;
+
+    len = table->fields.count;
     if (len != 0) {
-        int pos = 0;
+        pos = 0;
         while (len > 1) {
-            int half = len >> 1;
-            RTFieldDef* def = &table->fields.data[pos + half];
-            int cmp = strcmp(def->name, name);
+            half = len >> 1;
+            def = &table->fields.data[pos + half];
+            cmp = strcmp(def->name, name);
             if (cmp > 0) {
                 len = half;
             } else if (cmp == 0) {
@@ -105,7 +112,7 @@ RTFieldDef* GetFieldDef(RecordTable* table, const char* name) {
                 pos += half;
             }
         }
-        RTFieldDef* def = &table->fields.data[pos];
+        def = &table->fields.data[pos];
         if (strcmp(def->name, name) == 0) {
             return def;
         }
@@ -115,10 +122,7 @@ RTFieldDef* GetFieldDef(RecordTable* table, const char* name) {
 
 RTEntry* RecordTableAllocNewEntry(RecordTable* table) {
     RTEntry* entry = table->entries.Append();
-    entry->table = table;
-    u32 size = table->entrySize;
-    entry->data = (u8*)RTAllocator()->allocate(size, 4);
-    memset(entry->data, 0, size);
+    entry->Init(table);
     return entry;
 }
 
@@ -130,22 +134,14 @@ RTEntry* RecordTableAddElement(RecordTable* table, int index) {
     }
 
     RTEntry* entry = &table->entries.data[index];
-    entry->table = table;
-    u32 size = table->entrySize;
-    entry->data = (u8*)RTAllocator()->allocate(size, 4);
-    memset(entry->data, 0, size);
+    entry->Init(table);
     return entry;
 }
 
 // Removes an entry by moving the last entry into its place.
 void RecordTableDeleteEntry(RecordTable* table, RTEntry* entry) {
     entry->Free();
-    int index = entry - table->entries.data;
-    table->entries.data[index].~RTEntry();
-    int last = --table->entries.count;
-    if (index < last) {
-        memcpy(&table->entries.data[index], &table->entries.data[last], sizeof(RTEntry));
-    }
+    table->entries.RemoveSwap(entry - table->entries.data);
 }
 
 // Removes an entry and shifts the following entries down, keeping them sorted.
