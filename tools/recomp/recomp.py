@@ -119,7 +119,7 @@ def emit_function(dol, f, entries, switch, stats, hooked=False):
     # the patch source defines f_XXXXXXXX, so every direct and indirect
     # call in the game reaches the patch.
     suffix = "_orig" if hooked else ""
-    lines = [f"/* {f.name} */", f"void f_{f.start:08X}{suffix}(ppc_t* c) {{"]
+    lines = [f"/* {f.name} */", f"void f_{f.start:08X}{suffix}(ppc_t* c) {{", f"    PPC_TRACE({h32(f.start)});"]
     missing = 0
     for addr in range(f.start, f.end, 4):
         ins = dol.u32(addr)

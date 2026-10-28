@@ -60,23 +60,67 @@ MSVC on Windows and `cc`/`c++` elsewhere.
   (0xC...) views together, and keeps MEM2 and the locked cache separate.
   Loads and stores byte-swap.
 
-## Not done yet (what it takes to boot the game)
+## Booting
 
-The game does not run yet. What's missing, roughly in the order the boot
-path needs it:
+```
+python tools/recomp/build.py --run boot          # boots main.dol (10 s watchdog)
+RECOMP_HLE_LOG=1 build/recomp/boot.exe orig/R8AE01/sys/main.dol 20
+```
 
-- **Threads and exceptions.** `OSLoadContext` and `OSSwitchThread` resume
-  threads with `rfi`, which a C call stack can't express. These need
-  host threads or fibers behind hooks. Interrupts (VI retrace, DSP, DVD)
-  need host-driven callbacks.
-- **Hardware.** Writes to the `0xCC`/`0xCD` hardware registers land in
-  plain memory. Each subsystem needs a high-level replacement at the SDK
-  boundary:
-  - GX (the graphics FIFO) → the Vulkan/OpenGL renderer;
-  - DVD → reads from the disc image;
-  - PAD/WPAD → host controllers;
-  - AX/DSP → host audio;
-  - NAND → save files.
+The boot harness (`recomp/boot/boot.c`) sets up low memory the way the
+system menu and apploader leave it, then runs the game's own `__start`.
+
+It needs the disc's files in `orig/R8AE01/disc` (git-ignored), extracted
+from your copy with dtk:
+- `sys/boot.bin`, `bi2.bin`, `apploader.img` and `fst.bin`;
+- `tmd.bin`;
+- the `files/` tree.
+
+The THP movies (`files/Thp`, 667 MB) are optional for now.
+
+**Where it gets to:**
+1. OS init: memory, caches, interrupts, alarms, threads.
+2. IOS: STM, ES and FS requests are answered.
+3. The game runs six threads.
+4. It loads its data through its own DVD library: the sound archive, the
+   Home Button Menu, messages, the strap-screen resources and the first
+   attraction.
+5. It runs `MainLoop` every retrace, updating nw4r scenes and cameras.
+
+Nothing is drawn or heard yet.
+
+When the watchdog stops a run, it prints:
+- the last 200 functions entered;
+- a backtrace of the running thread;
+- where every other thread is waiting.
+
+`RECOMP_HLE_LOG=1` logs device requests and disc reads; `2` also logs
+every thread switch with a backtrace.
+
+**How the hardware is replaced** (`recomp/patches/`, all through
+`hooks.txt`):
+
+| File | Replaces |
+|---|---|
+| `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
+| `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
+| `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. NAND files don't exist yet. |
+| `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
+| `hle_exi.c` | EXI: no devices. |
+| `hle_bt.c` | Bluetooth: reported ready, with no remotes. |
+| `hle_audio.c` | The DSP/AI start-up handshakes are skipped, so there is no sound. |
+| `hle_gx.c` | `GXDrawDone` returns at once, since there is no GPU. |
+
+## Not done yet
+
+- **Graphics.** GX commands go to the write-gather pipe at `0xCC008000`,
+  which is plain memory, so they are dropped. The renderer needs to
+  capture writes to that address and decode the command stream into
+  Vulkan/OpenGL draws. This is the next big piece.
+- **Input.** WPAD/KPAD need a host replacement that feeds controllers in
+  as Wii Remote and Nunchuk data.
+- **Audio.** AX must be mixed on the host instead of on the DSP.
+- **Saves.** NAND file access (`/dev/fs`, ISFS) needs host files.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**
   - Fused multiply-add is not fused.

@@ -73,6 +73,20 @@ static inline double ld_f64(uint32_t a) { return bits_f64(LD64(a)); }
 static inline void st_f32(uint32_t a, double v) { ST32(a, f32_bits((float)v)); }
 static inline void st_f64(uint32_t a, double v) { ST64(a, f64_bits(v)); }
 
+/* Function-entry trace: a ring of the most recent guest functions entered,
+ * printed when the runtime stops on an error. Compiled out unless
+ * RECOMP_TRACE is defined. */
+#ifdef RECOMP_TRACE
+extern uint32_t g_trace[256];
+extern unsigned g_trace_pos;
+#define PPC_TRACE(a) (g_trace[g_trace_pos++ & 255] = (a))
+#else
+#define PPC_TRACE(a) ((void)0)
+#endif
+void ppc_dump_trace(void);
+void ppc_backtrace(ppc_t* c);
+const char* ppc_func_name(uint32_t addr);
+
 static inline uint32_t ROTL(uint32_t x, uint32_t n) { n &= 31; return n ? (x << n) | (x >> (32 - n)) : x; }
 
 /* Condition register: PowerPC numbers bits from the MSB, so CR bit b is
@@ -140,6 +154,12 @@ void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i);
 uint32_t ppc_mfspr(ppc_t* c, int spr);
 void ppc_mtspr(ppc_t* c, int spr, uint32_t v);
 uint32_t ppc_mftb(ppc_t* c, int tbr);
+
+/* Guest time base (60.75 MHz) and the decrementer deadline. */
+uint64_t ppc_timebase(void);
+int ppc_dec_deadline(uint64_t* deadline);
+void ppc_dec_disarm(void);
+#define PPC_TB_HZ 60750000ull
 
 void ppc_icall(ppc_t* c, uint32_t addr);
 void ppc_unresolved(ppc_t* c, uint32_t addr);

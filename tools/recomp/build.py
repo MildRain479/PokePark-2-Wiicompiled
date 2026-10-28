@@ -1,8 +1,9 @@
-"""Builds the recompiled code and the test harness.
+"""Builds the recompiled code, the test harness and the boot harness.
 
 Usage:
-    python tools/recomp/build.py            # build build/recomp/test_recomp(.exe)
-    python tools/recomp/build.py --run      # ...and run it against orig/R8AE01/sys/main.dol
+    python tools/recomp/build.py                 # build both targets
+    python tools/recomp/build.py --run test      # ...and run the tests
+    python tools/recomp/build.py --run boot      # ...and boot main.dol
 
 Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 """
@@ -16,6 +17,18 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 OUT = os.path.join(ROOT, "build", "recomp")
 GEN = os.path.join(OUT, "gen")
+DOL = os.path.join(ROOT, "orig", "R8AE01", "sys", "main.dol")
+
+TARGETS = {
+    "test": [
+        os.path.join(ROOT, "recomp", "tests", "test_recomp.cpp"),
+        # Decompiled game code, built natively as the reference.
+        os.path.join(ROOT, "src", "flib", "CodepointConvert.cpp"),
+        os.path.join(ROOT, "src", "flib", "FName.cpp"),
+    ],
+    "boot": sorted(glob.glob(os.path.join(ROOT, "recomp", "boot", "*.c"))),
+}
+DEFINES = ["RECOMP_TRACE"]
 
 
 def vcvars():
@@ -26,59 +39,85 @@ def vcvars():
     return os.path.join(path, "VC", "Auxiliary", "Build", "vcvars64.bat")
 
 
-def build_msvc(sources_c, sources_cpp, exe, opt):
-    objdir = os.path.join(OUT, "obj")
-    os.makedirs(objdir, exist_ok=True)
+def stale(src, obj):
+    return not os.path.exists(obj) or os.path.getmtime(obj) < os.path.getmtime(src)
+
+
+def build_msvc(common, targets, opt):
     inc = f'/I"{os.path.join(ROOT, "recomp", "runtime")}" /I"{GEN}" /I"{os.path.join(ROOT, "src")}"'
+    defs = " ".join(f"/D{d}" for d in DEFINES)
     # The generated code relies on wrapping unsigned arithmetic only.
-    common = f"/nologo {opt} /MP /W0 /fp:precise /Fo\"{objdir}\\\\\" {inc}"
+    flags = f"/nologo {opt} /MP /W0 /fp:precise /Zi {defs} {inc}"
     bat = os.path.join(OUT, "build.bat")
+    objdir = os.path.join(OUT, "obj")
     with open(bat, "w") as f:
-        f.write(f'@call "{vcvars()}" >nul\n')
-        f.write(f"cl {common} /c /TC " + " ".join(f'"{s}"' for s in sources_c) + " || exit /b 1\n")
-        f.write(f"cl {common} /c /TP /EHsc /std:c++17 " + " ".join(f'"{s}"' for s in sources_cpp) + " || exit /b 1\n")
-        f.write(f'link /nologo /OUT:"{exe}" "{objdir}\\*.obj" || exit /b 1\n')
+        f.write(f'@call "{vcvars()}" >nul 2>nul\n')
+
+        def compile_(srcs, odir, lang):
+            os.makedirs(odir, exist_ok=True)
+            todo = [s for s in srcs if stale(s, os.path.join(odir, os.path.splitext(os.path.basename(s))[0] + ".obj"))]
+            if todo:
+                extra = "/TC" if lang == "c" else "/TP /EHsc /std:c++17"
+                f.write(f'cl {flags} {extra} /Fd"{odir}\\\\" /Fo"{odir}\\\\" /c ' +
+                        " ".join(f'"{s}"' for s in todo) + " || exit /b 1\n")
+
+        compile_(common, objdir, "c")
+        for name, srcs in targets.items():
+            tdir = os.path.join(objdir, name)
+            compile_([s for s in srcs if s.endswith(".c")], tdir, "c")
+            compile_([s for s in srcs if not s.endswith(".c")], tdir, "cpp")
+            exe = os.path.join(OUT, name + ".exe")
+            f.write(f'link /nologo /DEBUG /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" || exit /b 1\n')
     subprocess.check_call(["cmd", "/c", bat])
 
 
-def build_cc(sources_c, sources_cpp, exe, opt):
+def build_cc(common, targets, opt):
     inc = ["-I", os.path.join(ROOT, "recomp", "runtime"), "-I", GEN, "-I", os.path.join(ROOT, "src")]
+    defs = [f"-D{d}" for d in DEFINES]
     objdir = os.path.join(OUT, "obj")
-    os.makedirs(objdir, exist_ok=True)
-    objs = []
-    for s in sources_c + sources_cpp:
-        o = os.path.join(objdir, os.path.basename(s) + ".o")
-        cmd = (["cc", "-std=c99"] if s.endswith(".c") else ["c++", "-std=c++17"]) + [opt, "-w", "-c", s, "-o", o] + inc
-        subprocess.check_call(cmd)
-        objs.append(o)
-    subprocess.check_call(["c++", "-o", exe] + objs + ["-lm"])
+
+    def compile_(srcs, odir):
+        os.makedirs(odir, exist_ok=True)
+        objs = []
+        for s in srcs:
+            o = os.path.join(odir, os.path.basename(s) + ".o")
+            if stale(s, o):
+                cmd = (["cc", "-std=c99"] if s.endswith(".c") else ["c++", "-std=c++17"])
+                subprocess.check_call(cmd + [opt, "-g", "-w", "-c", s, "-o", o] + inc + defs)
+            objs.append(o)
+        return objs
+
+    common_objs = compile_(common, objdir)
+    for name, srcs in targets.items():
+        objs = compile_(srcs, os.path.join(objdir, name))
+        subprocess.check_call(["c++", "-o", os.path.join(OUT, name)] + common_objs + objs + ["-lm", "-lpthread"])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", action="store_true")
+    ap.add_argument("--run", choices=sorted(TARGETS))
     ap.add_argument("--opt", default=None, help="optimization flag (default /O2 or -O2)")
+    ap.add_argument("args", nargs="*", help="extra arguments for --run")
     args = ap.parse_args()
 
     gen = sorted(glob.glob(os.path.join(GEN, "*.c")))
     if not gen:
         sys.exit("run tools/recomp/recomp.py first")
-    sources_c = gen + [os.path.join(ROOT, "recomp", "runtime", "runtime.c")]
-    sources_c += sorted(glob.glob(os.path.join(ROOT, "recomp", "patches", "*.c")))
-    sources_cpp = [
-        os.path.join(ROOT, "recomp", "tests", "test_recomp.cpp"),
-        # Decompiled game code, built natively as the reference.
-        os.path.join(ROOT, "src", "flib", "CodepointConvert.cpp"),
-        os.path.join(ROOT, "src", "flib", "FName.cpp"),
-    ]
-    exe = os.path.join(OUT, "test_recomp" + (".exe" if os.name == "nt" else ""))
+    common = gen + sorted(glob.glob(os.path.join(ROOT, "recomp", "runtime", "*.c")))
+    common += sorted(glob.glob(os.path.join(ROOT, "recomp", "patches", "*.c")))
+    # Headers aren't tracked; a changed header rebuilds everything.
+    headers = glob.glob(os.path.join(ROOT, "recomp", "runtime", "*.h")) + [os.path.join(GEN, "recomp_funcs.h")]
+    newest = max(os.path.getmtime(h) for h in headers if os.path.exists(h))
+    for o in glob.glob(os.path.join(OUT, "obj", "**", "*.o*"), recursive=True):
+        if os.path.getmtime(o) < newest:
+            os.remove(o)
     if os.name == "nt":
-        build_msvc(sources_c, sources_cpp, exe, args.opt or "/O2")
+        build_msvc(common, TARGETS, args.opt or "/O2")
     else:
-        build_cc(sources_c, sources_cpp, exe, args.opt or "-O2")
-    print("built", exe)
+        build_cc(common, TARGETS, args.opt or "-O2")
     if args.run:
-        sys.exit(subprocess.call([exe, os.path.join(ROOT, "orig", "R8AE01", "sys", "main.dol")]))
+        exe = os.path.join(OUT, args.run + (".exe" if os.name == "nt" else ""))
+        sys.exit(subprocess.call([exe, DOL] + args.args))
 
 
 if __name__ == "__main__":

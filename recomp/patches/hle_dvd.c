@@ -1,0 +1,167 @@
+/* The disc, served from files extracted from the user's own copy (see
+ * recomp/README.md). The game's DVD library is left as is: it reads the
+ * data partition through /dev/di (hle_ios.c), and those reads are mapped
+ * back to files through the disc's file table (FST). */
+#include <stdlib.h>
+#include <string.h>
+
+#include "hle.h"
+
+typedef struct Region {
+    uint64_t offset, size; /* in the data partition */
+    char* path;            /* host file */
+} Region;
+
+static char sRoot[512];
+static Region* sRegions;
+static int sRegionCount, sRegionCap;
+static uint8_t sBootBin[0x440];
+static uint8_t* sFst;
+static uint32_t sFstSize;
+
+static uint32_t be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void add_region(uint64_t offset, uint64_t size, const char* path) {
+    if (sRegionCount == sRegionCap) {
+        sRegionCap = sRegionCap ? sRegionCap * 2 : 512;
+        sRegions = (Region*)realloc(sRegions, sRegionCap * sizeof(Region));
+    }
+    sRegions[sRegionCount].offset = offset;
+    sRegions[sRegionCount].size = size;
+    sRegions[sRegionCount].path = _strdup(path);
+    sRegionCount++;
+}
+
+static uint8_t* read_file(const char* path, uint32_t* size) {
+    FILE* f = fopen(path, "rb");
+    uint8_t* data;
+    long n;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    data = (uint8_t*)malloc(n ? n : 1);
+    if (fread(data, 1, n, f) != (size_t)n) {
+        free(data);
+        data = NULL;
+    }
+    fclose(f);
+    if (size) *size = (uint32_t)n;
+    return data;
+}
+
+/* Walks the FST, adding a region for every file. Wii FSTs store file
+ * offsets divided by 4. */
+static void add_fst_files(void) {
+    uint32_t count = be32(sFst + 8);
+    const char* names = (const char*)sFst + count * 12;
+    uint32_t dir_end[64];
+    char dir_path[64][256];
+    int depth = 0;
+    uint32_t i;
+    strcpy(dir_path[0], "files");
+    dir_end[0] = count;
+    for (i = 1; i < count; i++) {
+        const uint8_t* e = sFst + i * 12;
+        const char* name = names + (be32(e) & 0xFFFFFF);
+        char path[512];
+        while (depth > 0 && i >= dir_end[depth]) depth--;
+        if (e[0]) {
+            if (depth + 1 < 64) {
+                depth++;
+                snprintf(dir_path[depth], sizeof(dir_path[depth]), "%s/%s", dir_path[depth - 1], name);
+                dir_end[depth] = be32(e + 8);
+            }
+        } else {
+            snprintf(path, sizeof(path), "%s/%s/%s", sRoot, dir_path[depth], name);
+            add_region((uint64_t)be32(e + 4) << 2, be32(e + 8), path);
+        }
+    }
+}
+
+int hle_dvd_init(const char* root) {
+    uint8_t* boot;
+    char path[600];
+    uint32_t size;
+    strncpy(sRoot, root, sizeof(sRoot) - 1);
+    snprintf(path, sizeof(path), "%s/sys/boot.bin", sRoot);
+    boot = read_file(path, &size);
+    if (!boot || size < sizeof(sBootBin)) {
+        HLE_WARN("no disc at %s (extract it with dtk; see recomp/README.md)", sRoot);
+        return -1;
+    }
+    memcpy(sBootBin, boot, sizeof(sBootBin));
+    free(boot);
+    snprintf(path, sizeof(path), "%s/sys/fst.bin", sRoot);
+    sFst = read_file(path, &sFstSize);
+    if (!sFst) return -1;
+    /* The system area, then every file. */
+    snprintf(path, sizeof(path), "%s/sys/boot.bin", sRoot);
+    add_region(0, 0x440, path);
+    snprintf(path, sizeof(path), "%s/sys/bi2.bin", sRoot);
+    add_region(0x440, 0x2000, path);
+    snprintf(path, sizeof(path), "%s/sys/apploader.img", sRoot);
+    add_region(0x2440, 0x3B000, path);
+    snprintf(path, sizeof(path), "%s/sys/fst.bin", sRoot);
+    add_region((uint64_t)be32(sBootBin + 0x424) << 2, sFstSize, path);
+    add_fst_files();
+    HLE_LOG("disc: %d files from %s", sRegionCount, sRoot);
+    return 0;
+}
+
+/* What the apploader leaves in memory: the disc header at 0x80000000 and
+ * the FST at the top of MEM1, just below the arena. */
+void hle_dvd_boot_setup(void) {
+    uint32_t arena_hi = LD32(0x80000034);
+    uint32_t fst_addr = (arena_hi - sFstSize) & ~31u;
+    if (!sFst) return;
+    memcpy(MA(0x80000000), sBootBin, 0x20);
+    memcpy(MA(fst_addr), sFst, sFstSize);
+    ST32(0x80000034, fst_addr); /* arena hi */
+    ST32(0x80000038, fst_addr); /* FST */
+    ST32(0x8000003C, sFstSize); /* max FST size */
+    ST32(0x80003110, fst_addr); /* MEM1 arena end */
+}
+
+/* Copies len bytes at a data-partition offset to guest memory. */
+int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
+    uint64_t end = offset + len;
+    int i, ok = 1;
+    memset(MA(dst), 0, len);
+    for (i = 0; i < sRegionCount; i++) {
+        const Region* r = &sRegions[i];
+        uint64_t lo = offset > r->offset ? offset : r->offset;
+        uint64_t hi = end < r->offset + r->size ? end : r->offset + r->size;
+        FILE* f;
+        if (lo >= hi) continue;
+        f = fopen(r->path, "rb");
+        if (!f) {
+            HLE_WARN("disc read needs %s, which is missing", r->path);
+            ok = 0;
+            continue;
+        }
+        _fseeki64(f, (int64_t)(lo - r->offset), SEEK_SET);
+        if (fread(MA(dst + (uint32_t)(lo - offset)), 1, (size_t)(hi - lo), f) != hi - lo) ok = 0;
+        fclose(f);
+        HLE_LOG("disc read %08llX+%X: %s", (unsigned long long)lo, (unsigned)(hi - lo), r->path + strlen(sRoot) + 1);
+    }
+    return ok;
+}
+
+/* The partition's TMD, which DVDLowOpenPartition returns. */
+uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max) {
+    char path[600];
+    uint32_t size;
+    uint8_t* tmd;
+    snprintf(path, sizeof(path), "%s/tmd.bin", sRoot);
+    tmd = read_file(path, &size);
+    if (!tmd) return 0;
+    if (size > max) size = max;
+    memcpy(MA(dst), tmd, size);
+    free(tmd);
+    return size;
+}
+
+const uint8_t* hle_dvd_disc_id(void) { return sBootBin; }

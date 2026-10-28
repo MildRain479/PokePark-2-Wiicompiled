@@ -4,3 +4,16 @@
 # the game then reaches.
 
 0x802F3464 strlen  # example_hook.c: counts calls, then runs the original
+0x802144F0 EXISync  # hle_exi.c: transfers complete instantly
+0x80208330 __OSInitAudioSystem  # hle_audio.c: skip the DSP handshake
+0x8020D310 OSEnableInterrupts  # hle_irq.c: deliver queued completions
+0x8020D330 OSRestoreInterrupts  # hle_irq.c: deliver queued completions
+0x802408F0 __ios_Ipc2  # hle_ios.c: answer IOS requests on the host
+0x802104B0 SelectThread  # hle_thread.c: guest threads run on host fibers
+0x80209080 OSLoadContext  # hle_thread.c
+0x80209000 OSSaveContext  # hle_thread.c
+0x80260FC0 BTA_Init  # hle_bt.c: no Bluetooth adapter
+0x8025A870 WUDGetStatus  # hle_bt.c: report Bluetooth as ready
+0x8022F080 __AI_SRC_INIT  # hle_audio.c: no audio hardware to calibrate
+0x80231080 __AXOutInitDSP  # hle_audio.c: no DSP; audio is silent for now
+0x80220890 GXDrawDone  # hle_gx.c: no GPU yet

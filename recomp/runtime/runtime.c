@@ -23,8 +23,7 @@ static const struct {
     uint32_t base, size;
 } kRegions[] = {
     {0x00000000u, 0x01800000u},
-    {0x0C000000u, 0x01000000u},
-    {0x0D000000u, 0x00800000u},
+    {0x0C000000u, 0x02000000u}, /* GameCube-era registers and Hollywood's (0xCD800000) */
     {0x10000000u, 0x04000000u},
     {0x20000000u, 0x00004000u},
 };
@@ -114,21 +113,98 @@ void ppc_icall(ppc_t* c, uint32_t addr) {
     else fn(c);
 }
 
+#ifdef RECOMP_TRACE
+uint32_t g_trace[256];
+unsigned g_trace_pos;
+#endif
+
+/* Name of the function containing addr, for diagnostics. */
+const char* ppc_func_name(uint32_t addr) {
+    unsigned lo = 0, hi = ppc_func_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (ppc_func_table[mid].addr <= addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo ? ppc_func_table[lo - 1].name : "?";
+}
+
+void ppc_dump_trace(void) {
+#ifdef RECOMP_TRACE
+    /* Snapshot the position: the watchdog dumps while the game runs. */
+    unsigned end = g_trace_pos;
+    unsigned i, n = end < 200 ? end : 200;
+    fprintf(stderr, "last %u functions entered (oldest first):\n", n);
+    for (i = end - n; i != end; i++) {
+        uint32_t a = g_trace[i & 255];
+        fprintf(stderr, "  %08X %s\n", a, ppc_func_name(a));
+    }
+#endif
+}
+
+/* Walks the guest stack's back chain. Each frame starts with a pointer to
+ * the caller's frame, and a function saves its return address 4 bytes
+ * into its caller's frame. */
+void ppc_backtrace(ppc_t* c) {
+    uint32_t sp = c->r[1];
+    int depth;
+    fprintf(stderr, "guest backtrace (lr %08X %s):\n", c->lr, ppc_func_name(c->lr));
+    for (depth = 0; depth < 24; depth++) {
+        uint32_t next, ra;
+        if (sp < 0x80000000u || sp >= 0x81800000u) break;
+        next = LD32(sp);
+        if (next < 0x80000000u || next >= 0x81800000u || next <= sp) break;
+        ra = LD32(next + 4);
+        fprintf(stderr, "  %08X %s\n", ra, ppc_func_name(ra));
+        sp = next;
+    }
+}
+
 static void fatal(const char* what, uint32_t addr, uint32_t extra) {
-    fprintf(stderr, "recomp: %s at %08X (%08X)\n", what, addr, extra);
+    fprintf(stderr, "recomp: %s at %08X [%s] (%08X)\n", what, addr, ppc_func_name(addr), extra);
+    ppc_dump_trace();
     exit(1);
 }
 
 void ppc_unresolved(ppc_t* c, uint32_t addr) { fatal("call to unknown address", addr, c->lr); }
 void ppc_unimpl(ppc_t* c, uint32_t addr, uint32_t ins) { (void)c; fatal("untranslated instruction", addr, ins); }
 void ppc_trap(ppc_t* c, uint32_t addr) { fatal("trap", addr, c->lr); }
-void ppc_syscall(ppc_t* c) { fatal("sc", c->lr, 0); }
-void ppc_rfi(ppc_t* c) { fatal("rfi (exception return / context switch)", c->spr[26], c->spr[27]); }
+/* The only system call the RVL OS installs (__OSSystemCallVector) syncs
+ * the instruction pipeline and caches, which needs nothing here. */
+void ppc_syscall(ppc_t* c) { (void)c; }
+/* rfi continues at SRR0 with MSR = SRR1. The SDK uses it to enter real
+ * mode (RealMode -> BATConfig) and to come back from it; returning to
+ * the caller's return address is treated as a plain return. Thread
+ * switches (OSLoadContext) are handled by hooks, not here. */
+void ppc_rfi(ppc_t* c) {
+    uint32_t target = c->spr[26];
+    ppc_func fn;
+    c->msr = c->spr[27];
+    if (target < 0x01800000u) target |= 0x80000000u; /* physical -> cached virtual */
+    if (target == c->lr) return;
+    fn = ppc_lookup(target);
+    if (!fn) fatal("rfi to unknown address", target, c->lr);
+    fn(c);
+}
 
 /* ------------------------------------------------------------------------ */
 /* Special-purpose registers */
 
+/* Decrementer: counts down at the time-base rate; the exception is taken
+ * when it passes zero. Only the deadline is tracked. */
+static uint64_t sDecDeadline;
+static int sDecArmed;
+
+int ppc_dec_deadline(uint64_t* deadline) {
+    if (!sDecArmed) return 0;
+    *deadline = sDecDeadline;
+    return 1;
+}
+
+void ppc_dec_disarm(void) { sDecArmed = 0; }
+
 uint32_t ppc_mfspr(ppc_t* c, int spr) {
+    if (spr == 22) return sDecArmed ? (uint32_t)(sDecDeadline - ppc_timebase()) : 0xFFFFFFFFu;
     if (spr == 1) return (c->xer_so << 31) | (c->xer_ca << 29) | (c->xer_low & 0x7F);
     if (spr >= 912 && spr <= 919) return c->gqr[spr - 912];
     return c->spr[spr];
@@ -141,13 +217,17 @@ void ppc_mtspr(ppc_t* c, int spr, uint32_t v) {
         c->xer_low = v & 0x7F;
     } else if (spr >= 912 && spr <= 919) {
         c->gqr[spr - 912] = v;
+    } else if (spr == 22) {
+        /* A negative value means the exception is already pending. */
+        sDecDeadline = ppc_timebase() + (uint64_t)(int64_t)(int32_t)v;
+        sDecArmed = 1;
     } else {
         c->spr[spr] = v;
     }
 }
 
 /* The time base runs at a quarter of the 243 MHz bus clock. */
-uint32_t ppc_mftb(ppc_t* c, int tbr) {
+uint64_t ppc_timebase(void) {
     uint64_t ticks;
 #ifdef _WIN32
     LARGE_INTEGER now, freq;
@@ -159,6 +239,11 @@ uint32_t ppc_mftb(ppc_t* c, int tbr) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     ticks = (uint64_t)ts.tv_sec * 60750000ull + (uint64_t)ts.tv_nsec * 60750000ull / 1000000000ull;
 #endif
+    return ticks;
+}
+
+uint32_t ppc_mftb(ppc_t* c, int tbr) {
+    uint64_t ticks = ppc_timebase();
     (void)c;
     return tbr == 269 ? (uint32_t)(ticks >> 32) : (uint32_t)ticks;
 }
