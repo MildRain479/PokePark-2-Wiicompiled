@@ -14,14 +14,17 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/flSlice2.cpp` | Matching |
 | `flib/ScriptLog.cpp` | Matching |
 | `flib/FName.cpp` | Matching (`Demangle_FName`, `FName_encoding`, two empty stubs) |
+| `flib/CodepointConvert.cpp` | Matching (`EncodeCodepoint`, `UnicodeToSJIS`, the Unicode→Shift-JIS tables) |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
 | `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
 | `flib/flMemory.cpp` | NonMatching: 18/21 functions; all data sections match |
 
-`flib/CodepointConvert.cpp` (0x802EDA20-0x802EDC50) is split but has no
-source yet. Other flib code (the record table, the
-`LookupFunctionInSymbolTable` area) sits in auto units up to 0x802F3130
-and still needs splitting.
+`flib/scripting/fscript.cpp` (0x802EDC50-0x802EF620: the script
+interpreter, `fscript::Run`, `LookupFunctionInSymbolTable_impl`, the
+syscall pages) is split, with `.text` only, to keep the alignment. It
+has no source yet; its data (0x8036C098-0x8036C220: an "endian error"
+string, a table and two jump tables) is still unsplit. Other flib code
+(the record table) sits in auto units up to 0x802F3130.
 
 ### Open problem: `Vec3CopySyscall`
 
@@ -98,6 +101,16 @@ Lessons from `FName.cpp`:
   compiled to a rotated loop (81-86%).
 - Locals were declared up front in the order `value, j, full, i`. A
   4-way permutation search found it.
+
+Lessons from `CodepointConvert.cpp`:
+- The 52 KB of tables live in `UnicodeToSJIS.inc`, generated from dtk's
+  data asm by a script that is not in the repo.
+- Two kanji in the Shift-JIS→Unicode table in `.rodata` (0x80311654)
+  looked like a pointer into these tables, so that relocation is now
+  blocked in `config.yml`. dtk still re-adds a label there
+  (`lbl_803691CE`, inside `sUnicodeToSJIS_8D`) every time it runs, so
+  objdiff shows that table at 75%, although its bytes match and the DOL
+  hash is OK.
 
 Experiment scripts used `score()` from a small helper: write a variant,
 build the object, run objdiff-cli, and read `match_percent`. Recreate it

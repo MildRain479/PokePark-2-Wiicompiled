@@ -1,16 +1,11 @@
 #include "flib/ScriptLog.h"
 
+#include "flib/CodepointConvert.h"
+
 #include <stdio.h>
 #include <string.h>
 
 typedef void (*ScriptLogCallback)(const char* msg, void* arg1, void* arg2);
-
-// TODO: These live in a TU that isn't decompiled yet; use C names until the
-// real signatures are known.
-extern "C" {
-    s32 fn_802EDC10(s32 codepoint);
-    int fn_802EDA20(char* dst, s32 codepoint, int encoding);
-}
 
 static char sLogBuffer[0x400];
 
@@ -139,7 +134,7 @@ void LogWrite2(const char* fmt, ...) {
         int len = Utf8CharLength((const u8*)src);
         s32 codepoint = Utf8Decode(src);
         src += len;
-        dst += fn_802EDA20(dst, fn_802EDC10(codepoint), 3);
+        dst += EncodeCodepoint(dst, UnicodeToSJIS(codepoint), ENCODING_SJIS);
     }
     *dst = '\0';
 
