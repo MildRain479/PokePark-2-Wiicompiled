@@ -13,13 +13,15 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/flRevolutionAlloc.cpp` | Matching |
 | `flib/flSlice2.cpp` | Matching |
 | `flib/ScriptLog.cpp` | Matching |
+| `flib/FName.cpp` | Matching (`Demangle_FName`, `FName_encoding`, two empty stubs) |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
 | `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
 | `flib/flMemory.cpp` | NonMatching: 18/21 functions; all data sections match |
 
-Other flib code (the record table, `Demangle_FName`, the
-`LookupFunctionInSymbolTable` area) sits in auto units between
-0x802ED900 and 0x802F3130 and still needs splitting.
+`flib/CodepointConvert.cpp` (0x802EDA20-0x802EDC50) is split but has no
+source yet. Other flib code (the record table, the
+`LookupFunctionInSymbolTable` area) sits in auto units up to 0x802F3130
+and still needs splitting.
 
 ### Open problem: `Vec3CopySyscall`
 
@@ -90,9 +92,19 @@ Lessons from this file:
 - Assigning inside the condition (`if ((a->next = b->next) != NULL)
   a->next->prev = a;`) reproduces the original's re-load after the store.
 
+Lessons from `FName.cpp`:
+- A loop tested at the top, with its increments in a separate block
+  before the test, came only from a `goto`. Every `for`/`while` form
+  compiled to a rotated loop (81-86%).
+- Locals were declared up front in the order `value, j, full, i`. A
+  4-way permutation search found it.
+
 Experiment scripts used `score()` from a small helper: write a variant,
 build the object, run objdiff-cli, and read `match_percent`. Recreate it
-when needed. It is not in the repo.
+when needed. It is not in the repo. Once, a hand-written copy of a
+variant scored 69% while the script's copy scored 98%, and the cause was
+never found. Before trusting a score, rebuild from the exact file and
+delete the `.o` first.
 
 ## Compiler flags (game code, `config.json` "game")
 

@@ -103,6 +103,13 @@ flib/flMemory.cpp:
 	.bss        start:0x80480D18 end:0x80480D70
 	.sdata      start:0x80486228 end:0x80486238
 
+flib/FName.cpp:
+	.text       start:0x802ED900 end:0x802EDA20 align:16
+	.data       start:0x8035F470 end:0x8035F498
+
+flib/CodepointConvert.cpp:
+	.text       start:0x802EDA20 end:0x802EDC50 align:16
+
 flib/scripting/core_syscalls.cpp:
 	.text       start:0x802EF620 end:0x802F1914 align:16
 	.data       start:0x8036C220 end:0x8036C470
