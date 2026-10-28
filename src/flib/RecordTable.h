@@ -65,6 +65,8 @@ struct RTArray {
         }
     }
 
+    int Count() const { return count; }
+
     T* Append() {
         if (data == NULL || count >= capacity) {
             T* newData;

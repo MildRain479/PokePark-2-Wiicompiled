@@ -54,7 +54,7 @@ void RecordTableAllocator::free(void* ptr) {
 }
 
 void AddField(RecordTable* table, const char* name, int type, int arraySize) {
-    int count = table->fields.count;
+    int count = table->fields.Count();
 
     // Find the insertion point that keeps the fields sorted by name.
     int len = count;
@@ -65,23 +65,25 @@ void AddField(RecordTable* table, const char* name, int type, int arraySize) {
         if (cmp > 0) {
             len = half;
         } else if (cmp == 0) {
-            pos = pos + half + 1;
+            pos += half + 1;
             break;
         } else {
             len -= half + 1;
-            pos = pos + half + 1;
+            pos += half + 1;
         }
     }
 
     table->fields.Append();
-    if (count - pos != 0) {
-        memmove(&table->fields.data[pos + 1], &table->fields.data[pos], (count - pos) * sizeof(RTFieldDef));
+    int moveCount = count - pos;
+    if (moveCount != 0) {
+        memmove(&table->fields.data[pos + 1], &table->fields.data[pos], moveCount * sizeof(RTFieldDef));
     }
 
     RTFieldDef* def = &table->fields.data[pos];
     def->type = type;
     def->arraySize = arraySize;
-    char* str = (char*)RTAllocator()->allocate(strlen(name) + 1, 4);
+    u32 nameSize = strlen(name) + 1;
+    char* str = (char*)RTAllocator()->allocate(nameSize, 4);
     strcpy(str, name);
     def->name = str;
     def->size = RecordTable::ElementSizes[type].size;
@@ -127,10 +129,11 @@ RTEntry* RecordTableAllocNewEntry(RecordTable* table) {
 }
 
 RTEntry* RecordTableAddElement(RecordTable* table, int index) {
-    int count = table->entries.count;
+    int count = table->entries.Count();
     table->entries.Append();
-    if (count - index != 0) {
-        memmove(&table->entries.data[index + 1], &table->entries.data[index], (count - index) * sizeof(RTEntry));
+    int moveCount = count - index;
+    if (moveCount != 0) {
+        memmove(&table->entries.data[index + 1], &table->entries.data[index], moveCount * sizeof(RTEntry));
     }
 
     RTEntry* entry = &table->entries.data[index];
@@ -153,6 +156,12 @@ void RemoveSortedEntry(RecordTable* table, RTEntry* entry) {
     if (index < count) {
         memmove(&table->entries.data[index], &table->entries.data[index + 1], (count - index) * sizeof(RTEntry));
     }
+}
+
+// TODO: Not in the shipped game, so presumably dead-stripped. Something in
+// this file used "Ptr" before "Name", which puts "Ptr" first in .sdata.
+void* GetEntryPtr(RTEntry* entry) {
+    return GetRTField<void*>(entry, "Ptr");
 }
 
 static RecordTable* MetaTable;

@@ -84,19 +84,19 @@ RTEntry* AddNamedEntry(RecordTable* table, const char* name) {
     u32 nameOffset = GetFieldDef(table, "Name")->offset;
 
     // Find the insertion point that keeps the entries sorted by name.
-    int pos = 0;
     int len = table->entries.count;
+    int pos = 0;
     while (len > 0) {
         int half = len >> 1;
         int cmp = strcmp((char*)table->entries.data[pos + half].data + nameOffset, name);
         if (cmp > 0) {
             len = half;
         } else if (cmp == 0) {
-            pos = pos + half + 1;
+            pos += half + 1;
             break;
         } else {
             len -= half + 1;
-            pos = pos + half + 1;
+            pos += half + 1;
         }
     }
 
