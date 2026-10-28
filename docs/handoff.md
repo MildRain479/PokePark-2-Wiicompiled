@@ -15,8 +15,8 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/ScriptLog.cpp` | Matching |
 | `flib/FName.cpp` | Matching (`Demangle_FName`, `FName_encoding`, two empty stubs) |
 | `flib/CodepointConvert.cpp` | Matching (`EncodeCodepoint`, `UnicodeToSJIS`, the Unicode→Shift-JIS tables) |
-| `flib/flDB.cpp` | NonMatching: .text 98.2%; 6/17 functions match; .data, .ctors and .sbss match |
-| `flib/flDBNamed.cpp` | NonMatching: .text 98.5%; 9/11 functions match; all data matches |
+| `flib/flDB.cpp` | NonMatching: .text 99.5%; 13/17 functions match; all data matches |
+| `flib/flDBNamed.cpp` | NonMatching: .text 99.8%; 10/11 functions match; all data matches |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
 | `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
 | `flib/flMemory.cpp` | NonMatching: 18/21 functions; all data sections match |
@@ -121,18 +121,41 @@ Lessons from `CodepointConvert.cpp`:
 `RecordTable` is now two `RTArray<T>` members (fields, entries) plus
 `entrySize`. The structure is confirmed by the inlined member destructors
 in `DeleteRecordTable`, whose `this` checks include `addic. r0, r31, 0xc`.
-What's left:
-- **Register allocation** in most functions. The inlined `RTEntry::Free`,
-  `RTArray::Destroy` and the binary searches use the right instructions
-  in the wrong registers. Hoisting and permuting locals helped
-  `FindEntryByName` (97.8% to 99.2%).
-- **`AddField` / `AddNamedEntry` (~95%).** The original recomputes
-  `pos + half` in each branch; mine keeps it in a register, which needs
-  an extra saved register and a bigger frame.
-- **flDB `.sdata` order.** The original has "Ptr" before "Name"; mine is
-  the reverse. Nothing in the TU uses "Ptr" first, so the cause is unknown.
+What's left is register coloring only; every instruction is otherwise
+right:
+- **Functions that inline `RTEntry::Free` / `RTArray::Destroy`:**
+  `RecordTableClear` (98.9%), `RecordTableDeleteEntry` (99.6%),
+  `RemoveSortedEntry` (99.0%) and `DeleteRecordTable` (98.3%). The loop
+  counters, element pointers and counts of the inlined loops land in
+  permuted registers (r21-r26). These did not move them:
+  - permuting the declarations inside `Free`
+  - `Count()` inside `Free` / `Destroy` / `RecordTableClear`
+  - pointer vs. index iteration in `Destroy` (each helps one function
+    and hurts another)
+  - a copy of `Free`'s body inside `~RTEntry`
+  - every form of `RemoveSwap`
+- **`FindEntryByName` (99.2%).** `nameOffset` and `entry` (r31/r30) are
+  swapped. No declaration order changes it, nor does using a
+  `RTFieldDef*` local, a helper, or loading `len` first. `GetFieldDef`,
+  with the same search, matched once `def` was declared first.
 
 Lessons:
+- **Reloads.** When the original reloads a member that mine keeps in a
+  register, read it through a `const` getter (`int count =
+  table->fields.Count();`). That blocks MWCC's reuse of the load.
+- **Recomputed sums.** `pos += half + 1` reproduces the original's
+  `add; addi` recomputation of `pos + half`. MWCC reassociates it only
+  after CSE, whereas `pos = pos + half + 1` is shared with the index.
+- **Missing literal users.** flDB's .sdata has "Ptr" before "Name"
+  because some function that used "Ptr" first was dead-stripped from the
+  shipped game. `GetEntryPtr` is a stand-in for it; the linker should
+  strip it again (to confirm once the unit links).
+- **Extra null checks.** `DeleteRecordTable` has three nested null checks
+  on the table; an explicit `if (this != NULL)` in `~RecordTable` gives
+  the third.
+- **Small locals.** A `moveCount` local for memmove sizes, `int` (not
+  `u32`) for `SetEmbeddedStringField`'s size, a `nameSize` local for
+  `strlen + 1`, and an inline `RTEntry::Init` each fixed one function.
 - **RTTI.** flib units with vtables need `-RTTI off` (per-object
   `extra_cflags`). The original vtable header words are zero.
 - **Devirtualization.** Calls on the global allocator are true virtual
