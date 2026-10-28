@@ -96,8 +96,8 @@ git-ignored, and is created on first run.
    keyboard or an Xbox-style controller. Pressing 2 leads to the save
    slots, picture choice and the following menus.
 
-Sound plays through waveOut (`recomp/boot/audio_win32.c`, about 150 ms
-of latency): the title movie's soundtrack, menu music and sound effects.
+Sound plays through waveOut (`recomp/boot/audio_win32.c`, about 85 ms
+buffered): the title movie's soundtrack, menu music and sound effects.
 There is no reverb or other effects yet, and the Wii Remote speaker is
 silent.
 

@@ -166,8 +166,11 @@ void hle_deliver(ppc_t* c) {
             int t = timer_due();
             uint64_t now = ppc_timebase();
             sTimers[t].next += sTimers[t].period;
-            /* After a long stall, resume the cadence instead of bursting. */
-            if ((int64_t)(now - sTimers[t].next) > (int64_t)(8 * sTimers[t].period)) sTimers[t].next = now + sTimers[t].period;
+            /* Ticks delayed by a short stall are caught up (each audio
+             * tick is 3 ms of sound, so skipping them would cut the
+             * sound); after a long one (over 250 ms), the cadence resumes
+             * instead of bursting. */
+            if ((int64_t)(now - sTimers[t].next) > (int64_t)(PPC_TB_HZ / 4)) sTimers[t].next = now + sTimers[t].period;
             sTimers[t].fire(c);
         } else if (retrace_due()) {
             sNextRetrace += kRetracePeriod;

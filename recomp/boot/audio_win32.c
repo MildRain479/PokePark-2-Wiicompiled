@@ -1,11 +1,14 @@
 /* Sound output through waveOut. The DSP HLE hands over 3 ms frames as AX
- * mixes them; they are gathered into blocks and queued to the device,
- * which plays them back to back.
+ * mixes them; they are gathered into 12 ms blocks and queued to the
+ * device, which plays them back to back.
  *
- * The game's audio timer runs on host time, so it keeps pace with the
- * device. If the game stalls and the queue runs dry there is a gap; if
- * frames come faster than they play (after a stall, the timer catches up)
- * the excess is dropped, so latency stays near BLOCKS * BLOCK_FRAMES.
+ * The game's audio timer runs on host time, so on average it keeps pace
+ * with the device, but its ticks arrive in bursts whenever the game holds
+ * off interrupts. Playback therefore starts only once PRIME_BLOCKS are
+ * queued, which absorbs that much jitter; if the queue still runs dry (a
+ * long stall), the device pauses and primes again, so a stall costs one
+ * gap instead of a run of crackles. Frames that arrive with the queue full
+ * are dropped, which bounds the latency at BLOCKS blocks.
  *
  * RECOMP_AUDIO=0 turns sound off. */
 #define WIN32_LEAN_AND_MEAN
@@ -19,20 +22,37 @@
 
 #pragma comment(lib, "winmm.lib")
 
-#define BLOCK_FRAMES 768 /* 24 ms */
-#define BLOCKS 6
+#define BLOCK_FRAMES 384 /* 12 ms */
+#define BLOCKS 16
+#define PRIME_BLOCKS 7 /* 84 ms */
 
 static HWAVEOUT sOut;
 static WAVEHDR sHdr[BLOCKS];
 static int16_t sData[BLOCKS][BLOCK_FRAMES * 2];
-static int sFill;  /* block being filled */
+static int sFill;   /* block being filled */
 static int sFrames; /* frames in it */
+static int sPriming = 1;
+
+static int busy(const WAVEHDR* h) { return (h->dwFlags & WHDR_INQUEUE) && !(h->dwFlags & WHDR_DONE); }
+
+static int queued(void) {
+    int i, n = 0;
+    for (i = 0; i < BLOCKS; i++) n += busy(&sHdr[i]);
+    return n;
+}
 
 static void push(const int16_t* lr, int frames) {
     while (frames > 0) {
         WAVEHDR* h = &sHdr[sFill];
         int n;
-        if (!(h->dwFlags & WHDR_DONE) && (h->dwFlags & WHDR_INQUEUE)) return; /* queue full: drop */
+        if (sFrames == 0) {
+            if (busy(h)) return; /* queue full: drop */
+            if (!sPriming && queued() == 0) {
+                /* Ran dry: hold the device until the queue is primed. */
+                waveOutPause(sOut);
+                sPriming = 1;
+            }
+        }
         n = BLOCK_FRAMES - sFrames;
         if (n > frames) n = frames;
         memcpy(&sData[sFill][sFrames * 2], lr, (size_t)n * 4);
@@ -44,6 +64,10 @@ static void push(const int16_t* lr, int frames) {
             waveOutWrite(sOut, h, sizeof(*h));
             sFill = (sFill + 1) % BLOCKS;
             sFrames = 0;
+            if (sPriming && queued() >= PRIME_BLOCKS) {
+                sPriming = 0;
+                waveOutRestart(sOut);
+            }
         }
     }
 }
@@ -64,7 +88,9 @@ void audio_init(void) {
         fprintf(stderr, "audio: no output device; running without sound\n");
         return;
     }
-    fprintf(stderr, "audio: waveOut, %d Hz stereo, %d ms latency\n", HOST_AUDIO_RATE, BLOCKS * BLOCK_FRAMES * 1000 / HOST_AUDIO_RATE);
+    fprintf(stderr, "audio: waveOut, %d Hz stereo, %d ms buffered\n", HOST_AUDIO_RATE,
+            PRIME_BLOCKS * BLOCK_FRAMES * 1000 / HOST_AUDIO_RATE);
+    waveOutPause(sOut);
     for (i = 0; i < BLOCKS; i++) {
         sHdr[i].lpData = (LPSTR)sData[i];
         sHdr[i].dwBufferLength = sizeof(sData[i]);
