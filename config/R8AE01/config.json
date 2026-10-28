@@ -81,7 +81,8 @@
             "flags": [
                 "-func_align 16",
                 "-str reuse",
-                "-RTTI on"
+                "-RTTI on",
+                "-inline noauto"
             ]
         }
     }

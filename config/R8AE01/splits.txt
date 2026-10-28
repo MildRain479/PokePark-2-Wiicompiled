@@ -99,6 +99,9 @@ flib/flRevolutionAlloc.cpp:
 flib/flMemory.cpp:
 	.text       start:0x802ECBE0 end:0x802ED900 align:16
 	.ctors      start:0x80306870 end:0x80306874
+	.data       start:0x8035F3A0 end:0x8035F470
+	.bss        start:0x80480D18 end:0x80480D70
+	.sdata      start:0x80486228 end:0x80486238
 
 flib/scripting/core_syscalls.cpp:
 	.text       start:0x802EF620 end:0x802F1914 align:16

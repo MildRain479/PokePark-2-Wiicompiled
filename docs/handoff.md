@@ -15,7 +15,7 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/ScriptLog.cpp` | Matching |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
 | `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
-| `flib/flMemory.cpp` | Split only (needed for alignment), still asm |
+| `flib/flMemory.cpp` | NonMatching: 18/21 functions; all data sections match |
 
 Other flib code (the record table, `Demangle_FName`, the
 `LookupFunctionInSymbolTable` area) sits in auto units between
@@ -61,6 +61,32 @@ separate Vec-sized temporaries). These forms did not reproduce it:
 - **`stack_vprintf_d_specifier` (91.8%).** The left-aligned padding loop and
   the register reuse differ. Writing the negative flag before the
   terminator store got it from 83% to 92%.
+
+### Open problems: `flMemory.cpp`
+
+- **`flMemory::Allocate` (98.4%).** Only register assignment differs: the
+  original uses mask→r7, minSize→r8 and chunkSize→r5. The best
+  declaration order so far is `mask, chunk, minSize, chunkSize`, declared
+  up front. The loop temporaries (rest, after, remainder, data, aligned)
+  have not been permuted yet.
+- **`flMemoryManager::free` (99.4%).** The first header load (the chunk
+  passed to `Free`) should be in r28 and the guard pointer in r31; mine are
+  swapped. Dropping the guard local or reordering declarations did not
+  help.
+- **`__sinit_\flMemory_cpp` (88%).** The original stores `mInitialized`
+  through the `this` register (`stw r0, 0(r31)`). Mine stores through
+  `gMemoryManager@l(r30)` and keeps r30 alive. Changing the constructor
+  form (`this->`, a helper, an out-of-class inline) changed nothing.
+
+Lessons from this file:
+- Game code is built with `-inline noauto`. Without it, the compiler inlines
+  earlier non-`inline` functions, such as `flMutex::Init` into the manager.
+- `flMutex`'s destructor checks `mInitialized` twice; the second check is an
+  inlined base-class destructor (`flMutexBase`).
+- The 4 zero bytes after `"HEAP::Alloc Size=%d"` come from a 0x18-byte
+  `char` array (`sHeapAllocFormat`), not from a separate object.
+- Assigning inside the condition (`if ((a->next = b->next) != NULL)
+  a->next->prev = a;`) reproduces the original's re-load after the store.
 
 Experiment scripts used `score()` from a small helper: write a variant,
 build the object, run objdiff-cli, and read `match_percent`. Recreate it
