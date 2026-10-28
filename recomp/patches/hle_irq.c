@@ -117,6 +117,32 @@ void hle_raise_interrupt_ex(int n, void (*before)(uint32_t data), uint32_t data)
 
 void hle_raise_interrupt(int n) { hle_raise_interrupt_ex(n, NULL, 0); }
 
+/* Periodic device timers (audio DMA, ...), driven from host time. */
+#define MAX_TIMERS 4
+static struct {
+    int active;
+    uint64_t next, period;
+    void (*fire)(ppc_t* c);
+} sTimers[MAX_TIMERS];
+
+void hle_timer_start(int id, uint64_t period, void (*fire)(ppc_t* c)) {
+    sTimers[id].period = period ? period : 1;
+    sTimers[id].fire = fire;
+    if (!sTimers[id].active) sTimers[id].next = ppc_timebase() + sTimers[id].period;
+    sTimers[id].active = 1;
+}
+
+void hle_timer_stop(int id) { sTimers[id].active = 0; }
+
+static int timer_due(void) {
+    uint64_t now = ppc_timebase();
+    int i;
+    for (i = 0; i < MAX_TIMERS; i++) {
+        if (sTimers[i].active && (int64_t)(now - sTimers[i].next) >= 0) return i;
+    }
+    return -1;
+}
+
 void hle_deliver(ppc_t* c) {
     /* Interrupts are off inside a handler; a thread the handler switched
      * to takes them as usual. */
@@ -136,6 +162,13 @@ void hle_deliver(ppc_t* c) {
         } else if (dec_expired()) {
             ppc_dec_disarm();
             hle_interrupt(c, kDecrementerHandler, EXC_DECREMENTER, LD32(0x800000D4));
+        } else if (timer_due() >= 0) {
+            int t = timer_due();
+            uint64_t now = ppc_timebase();
+            sTimers[t].next += sTimers[t].period;
+            /* After a long stall, resume the cadence instead of bursting. */
+            if ((int64_t)(now - sTimers[t].next) > (int64_t)(8 * sTimers[t].period)) sTimers[t].next = now + sTimers[t].period;
+            sTimers[t].fire(c);
         } else if (retrace_due()) {
             sNextRetrace += kRetracePeriod;
             g_retrace_count++;
@@ -151,7 +184,7 @@ void hle_deliver(ppc_t* c) {
 int hle_wait_for_event(ppc_t* c) {
     uint64_t deadline = 0, dec;
     int have = 0;
-    if (sHead == sTail && !dec_expired() && !retrace_due()) {
+    if (sHead == sTail && !dec_expired() && !retrace_due() && timer_due() < 0) {
         if (ppc_dec_deadline(&dec)) {
             deadline = dec;
             have = 1;
@@ -159,6 +192,15 @@ int hle_wait_for_event(ppc_t* c) {
         if (interrupt_handler(INTERRUPT_PI_VI) && (!have || (int64_t)(sNextRetrace - deadline) < 0)) {
             deadline = sNextRetrace;
             have = 1;
+        }
+        {
+            int i;
+            for (i = 0; i < MAX_TIMERS; i++) {
+                if (sTimers[i].active && (!have || (int64_t)(sTimers[i].next - deadline) < 0)) {
+                    deadline = sTimers[i].next;
+                    have = 1;
+                }
+            }
         }
         if (!have) return 0;
         /* Sleep until the next timer event. */

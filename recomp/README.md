@@ -76,19 +76,25 @@ from your copy with dtk:
 - `tmd.bin`;
 - the `files/` tree.
 
-The THP movies (`files/Thp`, 667 MB) are optional for now.
+The THP movies (`files/Thp`, 667 MB) are needed from the title screen on.
+
+Save data (the console's NAND) lives in `orig/R8AE01/nand`, also
+git-ignored, and is created on first run.
 
 **Where it gets to:**
 1. OS init: memory, caches, interrupts, alarms, threads.
 2. IOS: STM, ES and FS requests are answered.
 3. The game runs six threads.
 4. It loads its data through its own DVD library.
-5. It draws the Wii Strap safety screen, then the "Loading..." screen
-   with an animated 3D Pikachu, in a window through OpenGL.
+5. It draws the Wii Strap safety screen, then "Loading..." with an
+   animated 3D Pikachu, in a window through OpenGL.
+6. It creates its save files and copies the Pokémon resources into a
+   cache on the NAND.
+7. It reaches the title screen, with its THP movie background.
+8. It then shows "Communications with the Wii Remote have been
+   interrupted", because no remote is connected. Input is next.
 
-It then stays on "Loading...": the sound manager waits on nw4r's sound
-system, which only advances on AX audio-frame callbacks. Those need the
-AX/DSP replacement (see "Not done yet").
+There is no sound yet: AX frames run on time, but nothing is mixed.
 
 The game's own `OSReport` output, including the SDK banners and the
 heap sizes, is printed to stderr.
@@ -104,6 +110,8 @@ Diagnostics:
   backtrace for each large allocation.
 - `RECOMP_WATCH=<address>[,<length>]` stops on the first write to a guest
   memory range, with a trace and backtrace.
+- `RECOMP_PEEK=<address>,<length>` dumps guest memory when the watchdog
+  stops a run.
 - `RECOMP_GX_LOG=1` logs every presented frame with draw counts.
 - `RECOMP_GX_DEBUG_FRAME=<n>` prints each draw of frame n: viewport, TEV
   stages and the first vertices.
@@ -120,11 +128,12 @@ Diagnostics:
 |---|---|
 | `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
 | `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
-| `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. NAND files don't exist yet. |
+| `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. |
+| `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no remotes. |
-| `hle_audio.c` | The DSP/AI start-up handshakes are skipped, so there is no sound. |
+| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick marks the DSP's frame done and runs AX's frame callback, so AX and nw4r's sound thread advance on time. Nothing is mixed yet. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
 
@@ -180,13 +189,13 @@ Not implemented yet:
 
 ## Not done yet
 
-- **Audio, needed to get past loading.** AX must run its 5 ms frame
-  callbacks, at first silently and then mixed on the host, instead of on
-  the DSP.
+- **Input, needed past the title screen.** WPAD/KPAD need a host
+  replacement that feeds controllers in as a connected Wii Remote and
+  Nunchuk.
+- **Sound.** AX voices must be mixed on the host: decode their samples
+  (ADPCM/PCM), advance their positions, apply volumes and effects, and
+  play the result. Today nothing advances voices.
 - **Graphics features.** See the list above.
-- **Input.** WPAD/KPAD need a host replacement that feeds controllers in
-  as Wii Remote and Nunchuk data.
-- **Saves.** NAND file access (`/dev/fs`, ISFS) needs host files.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**
   - Fused multiply-add is not fused.

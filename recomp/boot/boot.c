@@ -14,6 +14,7 @@
 
 int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
+void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
 
 static ppc_t* gCpu;
@@ -67,6 +68,19 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     ppc_dump_trace();
     if (gCpu) ppc_backtrace(gCpu);
     hle_dump_threads();
+    {
+        /* RECOMP_PEEK=<address>,<length>: dump guest memory on timeout. */
+        const char* p = getenv("RECOMP_PEEK");
+        if (p) {
+            char* end;
+            uint32_t addr = (uint32_t)strtoul(p, &end, 16), len = *end == ',' ? (uint32_t)strtoul(end + 1, NULL, 16) : 0x40, i;
+            for (i = 0; i < len; i += 4) {
+                if (i % 16 == 0) fprintf(stderr, "\n  %08X:", addr + i);
+                fprintf(stderr, " %08X", LD32(addr + i));
+            }
+            fputc(10, stderr);
+        }
+    }
     fflush(stderr);
     ExitProcess(4);
     return 0;
@@ -145,6 +159,9 @@ int main(int argc, char** argv) {
         if (slash) strcpy(slash + 1, "disc");
         else strcpy(root, "disc");
         if (hle_dvd_init(root) == 0) hle_dvd_boot_setup();
+        /* Saves live in "nand" beside "disc". */
+        strcpy(root + strlen(root) - 4, "nand");
+        hle_nand_set_root(root);
     }
     {
         /* RECOMP_WATCH=<guest address>[,<length>]: stop on the first write

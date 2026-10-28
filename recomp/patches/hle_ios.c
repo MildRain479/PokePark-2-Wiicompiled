@@ -21,14 +21,26 @@ static const uint32_t kIosHeapSda = 0xFFFFA79C; /* r13-relative: hid of the IPC 
 /* Title ID of PokePark Wii (USA): 00010000-R8AE. */
 static const uint32_t kTitleHi = 0x00010000, kTitleLo = 0x52384145;
 
+/* NAND files (hle_nand.c). */
+FILE* hle_nand_open(const char* nand, int mode, int32_t* err);
+int32_t hle_nand_read(FILE* f, uint32_t dst, uint32_t len);
+int32_t hle_nand_write(FILE* f, uint32_t src, uint32_t len);
+int32_t hle_nand_seek(FILE* f, int32_t offset, int32_t whence);
+int32_t hle_nand_file_stats(FILE* f, uint32_t out);
+int32_t hle_nand_ioctl(uint32_t type, uint32_t in, uint32_t out, uint32_t outsize);
+int32_t hle_nand_ioctlv(uint32_t type, uint32_t vec, uint32_t nin, uint32_t nout);
+
+/* Open descriptors: a device path, or a NAND file with its host file. */
 #define MAX_FDS 32
 static char sFds[MAX_FDS][64];
+static FILE* sFiles[MAX_FDS];
 
 static int alloc_fd(const char* path) {
     int i;
     for (i = 0; i < MAX_FDS; i++) {
         if (!sFds[i][0]) {
             strncpy(sFds[i], path, sizeof(sFds[i]) - 1);
+            sFiles[i] = NULL;
             return i;
         }
     }
@@ -59,9 +71,22 @@ static int32_t ios_open(uint32_t req) {
             return fd;
         }
     }
-    /* NAND files: none exist yet (no save data, no SYSCONF). */
-    HLE_WARN("IOS_Open(\"%s\", %u): no such file", path, LD32(req + 0x10));
-    return IPC_ENOENT;
+    {
+        int32_t err;
+        FILE* f = hle_nand_open(path, (int)LD32(req + 0x10), &err);
+        int fd;
+        if (!f) {
+            HLE_LOG("IOS_Open(\"%s\", %u) = %d", path, LD32(req + 0x10), err);
+            return err;
+        }
+        fd = alloc_fd(path);
+        if (fd < 0) {
+            fclose(f);
+            return -117; /* too many open files */
+        }
+        sFiles[fd] = f;
+        return fd;
+    }
 }
 
 /* /dev/di, the disc drive. Commands take a 0x20-byte block whose first
@@ -106,8 +131,8 @@ static int32_t di_ioctl(uint32_t type, uint32_t in, uint32_t out, uint32_t outsi
 static int32_t ios_ioctl(uint32_t req, const char* dev) {
     uint32_t type = LD32(req + 0x0C), in = LD32(req + 0x10), insize = LD32(req + 0x14);
     uint32_t out = LD32(req + 0x18), outsize = LD32(req + 0x1C);
-    (void)in;
     (void)insize;
+    if (strcmp(dev, "/dev/fs") == 0) return hle_nand_ioctl(type, in, out, outsize);
     if (strcmp(dev, "/dev/stm/eventhook") == 0 && type == 0x1000) {
         /* Completes on a power/reset button press, which never happens. */
         return IPC_PENDING;
@@ -123,6 +148,7 @@ static int32_t ios_ioctlv(uint32_t req, const char* dev) {
     uint32_t vec = LD32(req + 0x18);
 #define VEC_BASE(i) LD32(vec + 8 * (i))
 #define VEC_LEN(i) LD32(vec + 8 * (i) + 4)
+    if (strcmp(dev, "/dev/fs") == 0) return hle_nand_ioctlv(type, vec, nin, nout);
     if (strcmp(dev, "/dev/es") == 0) {
         switch (type) {
         case 32: /* GetTitleID */
@@ -169,6 +195,24 @@ static int32_t ios_handle(uint32_t req) {
     if (!dev) {
         HLE_WARN("IOS request %u on bad fd %d", type, fd);
         return IPC_EINVAL;
+    }
+    if (sFiles[fd]) {
+        FILE* f = sFiles[fd];
+        switch (type) {
+        case REQ_CLOSE:
+            fclose(f);
+            sFiles[fd] = NULL;
+            sFds[fd][0] = '\0';
+            return IPC_OK;
+        case REQ_READ: return hle_nand_read(f, LD32(req + 0x0C), LD32(req + 0x10));
+        case REQ_WRITE: return hle_nand_write(f, LD32(req + 0x0C), LD32(req + 0x10));
+        case REQ_SEEK: return hle_nand_seek(f, (int32_t)LD32(req + 0x0C), (int32_t)LD32(req + 0x10));
+        case REQ_IOCTL:
+            if (LD32(req + 0x0C) == 11) return hle_nand_file_stats(f, LD32(req + 0x18)); /* GetFileStats */
+            break;
+        }
+        HLE_WARN("request %u on NAND file \"%s\": unhandled", type, dev);
+        return -101;
     }
     switch (type) {
     case REQ_CLOSE:

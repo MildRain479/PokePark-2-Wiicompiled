@@ -24,6 +24,11 @@ void hle_raise_interrupt(int n);
  * device register that tells the handler what happened. */
 void hle_raise_interrupt_ex(int n, void (*before)(uint32_t data), uint32_t data);
 
+/* Periodic timers in guest time-base ticks, fired like interrupts. */
+void hle_timer_start(int id, uint64_t period, void (*fire)(ppc_t* c));
+void hle_timer_stop(int id);
+enum { HLE_TIMER_AUDIO = 0 };
+
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);
 
