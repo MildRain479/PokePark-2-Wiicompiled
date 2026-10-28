@@ -56,10 +56,37 @@ static inline uint32_t LD32(uint32_t a) { uint32_t v; memcpy(&v, MA(a), 4); retu
 static inline uint64_t LD64(uint32_t a) { uint64_t v; memcpy(&v, MA(a), 8); return BSWAP64(v); }
 static inline uint32_t LD16BR(uint32_t a) { uint16_t v; memcpy(&v, MA(a), 2); return v; }
 static inline uint32_t LD32BR(uint32_t a) { uint32_t v; memcpy(&v, MA(a), 4); return v; }
-static inline void ST8(uint32_t a, uint32_t v) { *MA(a) = (uint8_t)v; }
-static inline void ST16(uint32_t a, uint32_t v) { uint16_t t = BSWAP16((uint16_t)v); memcpy(MA(a), &t, 2); }
-static inline void ST32(uint32_t a, uint32_t v) { uint32_t t = BSWAP32(v); memcpy(MA(a), &t, 4); }
-static inline void ST64(uint32_t a, uint64_t v) { uint64_t t = BSWAP64(v); memcpy(MA(a), &t, 8); }
+/* The GPU's write-gather pipe: every store to its 32-byte window appends
+ * to the graphics command FIFO instead of memory (paired-single stores
+ * write their second value 4 bytes in). */
+#define WGPIPE_ADDR 0xCC008000u
+#define IS_WGPIPE(a) ((uint32_t)((a) - WGPIPE_ADDR) < 32u)
+extern void (*g_wgpipe_write)(uint32_t value, int size);
+/* Decodes pending GPU commands; set by the GPU module when present. */
+extern void (*g_gx_flush)(void);
+
+static inline void ST8(uint32_t a, uint32_t v) {
+    if (IS_WGPIPE(a)) { g_wgpipe_write(v & 0xFF, 1); return; }
+    *MA(a) = (uint8_t)v;
+}
+static inline void ST16(uint32_t a, uint32_t v) {
+    uint16_t t;
+    if (IS_WGPIPE(a)) { g_wgpipe_write(v & 0xFFFF, 2); return; }
+    t = BSWAP16((uint16_t)v);
+    memcpy(MA(a), &t, 2);
+}
+static inline void ST32(uint32_t a, uint32_t v) {
+    uint32_t t;
+    if (IS_WGPIPE(a)) { g_wgpipe_write(v, 4); return; }
+    t = BSWAP32(v);
+    memcpy(MA(a), &t, 4);
+}
+static inline void ST64(uint32_t a, uint64_t v) {
+    uint64_t t;
+    if (IS_WGPIPE(a)) { g_wgpipe_write((uint32_t)(v >> 32), 4); g_wgpipe_write((uint32_t)v, 4); return; }
+    t = BSWAP64(v);
+    memcpy(MA(a), &t, 8);
+}
 static inline void ST16BR(uint32_t a, uint32_t v) { uint16_t t = (uint16_t)v; memcpy(MA(a), &t, 2); }
 static inline void ST32BR(uint32_t a, uint32_t v) { memcpy(MA(a), &v, 4); }
 

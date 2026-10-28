@@ -71,7 +71,7 @@ static int32_t ios_open(uint32_t req) {
 #define DI_ERROR 2
 
 static int32_t di_ioctl(uint32_t type, uint32_t in, uint32_t out, uint32_t outsize) {
-    HLE_LOG("/dev/di 0x%02X (%08X %08X), out %u bytes", type, LD32(in + 4), LD32(in + 8), outsize);
+    HLE_LOG("/dev/di 0x%02X (%08X %08X), in %08X, out %08X+%X", type, LD32(in + 4), LD32(in + 8), in, out, outsize);
     if (out && outsize) memset(MA(out), 0, outsize);
     switch (type) {
     case 0x70: /* ReadDiskID */

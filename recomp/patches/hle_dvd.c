@@ -165,3 +165,13 @@ uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max) {
 }
 
 const uint8_t* hle_dvd_disc_id(void) { return sBootBin; }
+
+/* BOOL DVDReadAsyncPrio(DVDFileInfo* file, void* addr, s32 length, s32 offset,
+ *                       DVDCallback callback, s32 prio): logged only. */
+void f_802262E0(ppc_t* c) {
+    if (hle_log_enabled()) {
+        HLE_LOG("DVDReadAsyncPrio(file %08X, addr %08X, len %X, offset %X)", c->r[3], c->r[4], c->r[5], c->r[6]);
+        if (hle_log_enabled() > 1) ppc_backtrace(c);
+    }
+    f_802262E0_orig(c);
+}

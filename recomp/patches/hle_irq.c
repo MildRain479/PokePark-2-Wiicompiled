@@ -20,6 +20,8 @@ static const uint32_t kDecrementerHandler = 0x80207B30; /* DecrementerExceptionH
 #define EXC_DECREMENTER 8
 
 typedef struct {
+    int irq; /* >= 0: a hardware interrupt, dispatched through the OS table */
+    void (*before)(uint32_t data); /* sets device registers the handler reads */
     uint32_t fn, r3, r4;
     void (*after)(ppc_t* c, uint32_t data);
     uint32_t data;
@@ -53,6 +55,7 @@ void hle_post(uint32_t fn, uint32_t r3, uint32_t r4, void (*after)(ppc_t* c, uin
         return;
     }
     p = &sQueue[sTail++ % QUEUE_SIZE];
+    p->irq = -1;
     p->fn = fn;
     p->r3 = r3;
     p->r4 = r4;
@@ -99,6 +102,21 @@ static int retrace_due(void) {
     return (int64_t)(ppc_timebase() - sNextRetrace) >= 0;
 }
 
+void hle_raise_interrupt_ex(int n, void (*before)(uint32_t data), uint32_t data) {
+    Pending* p;
+    if (sTail - sHead >= QUEUE_SIZE) {
+        HLE_WARN("interrupt queue full; dropping interrupt %d", n);
+        return;
+    }
+    p = &sQueue[sTail++ % QUEUE_SIZE];
+    memset(p, 0, sizeof(*p));
+    p->irq = n;
+    p->before = before;
+    p->data = data;
+}
+
+void hle_raise_interrupt(int n) { hle_raise_interrupt_ex(n, NULL, 0); }
+
 void hle_deliver(ppc_t* c) {
     /* Interrupts are off inside a handler; a thread the handler switched
      * to takes them as usual. */
@@ -106,6 +124,12 @@ void hle_deliver(ppc_t* c) {
     for (;;) {
         if (sHead != sTail) {
             Pending p = sQueue[sHead++ % QUEUE_SIZE];
+            if (p.irq >= 0) {
+                uint32_t fn = interrupt_handler(p.irq);
+                if (p.before) p.before(p.data);
+                if (fn) hle_interrupt(c, fn, (uint32_t)p.irq, LD32(0x800000D4));
+                continue;
+            }
             HLE_LOG("interrupt: %08X [%s](%08X, %08X)", p.fn, ppc_func_name(p.fn), p.r3, p.r4);
             if (p.fn) hle_interrupt(c, p.fn, p.r3, p.r4);
             if (p.after) p.after(c, p.data);
@@ -115,6 +139,7 @@ void hle_deliver(ppc_t* c) {
         } else if (retrace_due()) {
             sNextRetrace += kRetracePeriod;
             g_retrace_count++;
+            if (g_gx_flush) g_gx_flush();
             ST16(VI_DI0, LD16(VI_DI0) | 0x8000);
             hle_interrupt(c, interrupt_handler(INTERRUPT_PI_VI), INTERRUPT_PI_VI, LD32(0x800000D4));
         } else {

@@ -17,3 +17,7 @@
 0x8022F080 __AI_SRC_INIT  # hle_audio.c: no audio hardware to calibrate
 0x80231080 __AXOutInitDSP  # hle_audio.c: no DSP; audio is silent for now
 0x80220890 GXDrawDone  # hle_gx.c: no GPU yet
+0x802262E0 DVDReadAsyncPrio  # hle_dvd.c: logging only
+0x80209600 OSReport  # hle_os.c: print to stderr
+0x80209690 OSPanic  # hle_os.c: print and stop
+0x80235A40 MEMAllocFromAllocator  # hle_os.c: log failures

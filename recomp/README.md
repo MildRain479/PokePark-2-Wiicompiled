@@ -82,20 +82,36 @@ The THP movies (`files/Thp`, 667 MB) are optional for now.
 1. OS init: memory, caches, interrupts, alarms, threads.
 2. IOS: STM, ES and FS requests are answered.
 3. The game runs six threads.
-4. It loads its data through its own DVD library: the sound archive, the
-   Home Button Menu, messages, the strap-screen resources and the first
-   attraction.
-5. It runs `MainLoop` every retrace, updating nw4r scenes and cameras.
+4. It loads its data through its own DVD library.
+5. It draws the Wii Strap safety screen, then the "Loading..." screen
+   with an animated 3D Pikachu, in a window through OpenGL.
 
-Nothing is drawn or heard yet.
+It then stays on "Loading...": the sound manager waits on nw4r's sound
+system, which only advances on AX audio-frame callbacks. Those need the
+AX/DSP replacement (see "Not done yet").
+
+The game's own `OSReport` output, including the SDK banners and the
+heap sizes, is printed to stderr.
 
 When the watchdog stops a run, it prints:
 - the last 200 functions entered;
 - a backtrace of the running thread;
 - where every other thread is waiting.
 
-`RECOMP_HLE_LOG=1` logs device requests and disc reads; `2` also logs
-every thread switch with a backtrace.
+Diagnostics:
+- `RECOMP_HLE_LOG=1` logs device requests, disc reads and large
+  allocations; `2` adds every thread switch with a backtrace; `3` adds a
+  backtrace for each large allocation.
+- `RECOMP_WATCH=<address>[,<length>]` stops on the first write to a guest
+  memory range, with a trace and backtrace.
+- `RECOMP_GX_LOG=1` logs every presented frame with draw counts.
+- `RECOMP_GX_DEBUG_FRAME=<n>` prints each draw of frame n: viewport, TEV
+  stages and the first vertices.
+- `RECOMP_GX_DUMP=<dir>` writes every 30th presented frame as a BMP;
+  `RECOMP_GX_DUMP_EVERY=<n>` changes the interval.
+- `RECOMP_GX_HIDDEN=1` keeps the window hidden.
+- `RECOMP_GX_SCALE=<n>` sets the internal resolution multiplier
+  (default 2).
 
 **How the hardware is replaced** (`recomp/patches/`, all through
 `hooks.txt`):
@@ -109,17 +125,67 @@ every thread switch with a backtrace.
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no remotes. |
 | `hle_audio.c` | The DSP/AI start-up handshakes are skipped, so there is no sound. |
-| `hle_gx.c` | `GXDrawDone` returns at once, since there is no GPU. |
+| `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
+| `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
+
+**Memory differences from a Wii:**
+- **MEM2:** the game also gets the top of MEM2 that IOS normally keeps
+  (`0x933E0000` up). The IPC buffer moves to the very top.
+  - Without this, the game's 21 MB `ParkPrepare` heap doesn't fit, on
+    the sizes from its own tables.
+  - On hardware it must fit, so some earlier allocation probably differs.
+    That is still to be found.
+- **Locked-cache DMA:** writing `DMAL` completes at once. nw4r uses it to
+  move matrices out of the locked cache.
+
+## Graphics (`recomp/gpu`)
+
+The GPU is replaced at its command stream, so the game's GX and nw4r code
+runs unchanged.
+
+- **Capture.** Stores to the write-gather pipe (`0xCC008000`, the whole
+  32-byte window) go to a FIFO instead of memory. Each command is decoded
+  as soon as it is complete, the way the GPU trails the CPU.
+  - This matters because indexed matrix loads, vertex arrays and textures
+    are read from memory that the game soon reuses.
+- **Decoding** (`gx_fifo.c`):
+  - CP (vertex formats and arrays), XF (matrices, projection, viewport,
+    color channels, texture coordinate generation including
+    post-transform) and BP (TEV, textures, palettes, blending, depth,
+    scissor, EFB copies) registers.
+  - Display lists.
+  - All seven primitive types are decoded. Quads, triangles, strips and
+    fans are drawn; lines and points are skipped.
+  - Vertices are transformed on the CPU.
+  - The pixel-engine draw-done and token commands raise the GX
+    interrupts. Each token is delivered with its own value.
+- **Textures** (`gx_texture.c`): every GX format (I4, I8, IA4, IA8,
+  RGB565, RGB5A3, RGBA8, C4, C8, C14X2, CMPR) and the palette formats,
+  cached by address and content hash.
+- **Backend** (`gl_backend.c`, OpenGL 3.3):
+  - The EFB is an offscreen framebuffer at 2x resolution.
+  - TEV runs in one uber-shader driven by uniforms: up to 16 stages with
+    every input, bias, scale, clamp and compare mode, konst colors, swap
+    tables and alpha test.
+  - EFB-to-texture copies become textures.
+  - Copies to the XFB are presented in the window.
+
+Not implemented yet:
+- lighting (lit channels use the material color);
+- indirect texturing, fog and logic ops;
+- z-textures;
+- lines and points;
+- copy pixel formats (copies keep RGBA);
+- a Vulkan backend.
 
 ## Not done yet
 
-- **Graphics.** GX commands go to the write-gather pipe at `0xCC008000`,
-  which is plain memory, so they are dropped. The renderer needs to
-  capture writes to that address and decode the command stream into
-  Vulkan/OpenGL draws. This is the next big piece.
+- **Audio, needed to get past loading.** AX must run its 5 ms frame
+  callbacks, at first silently and then mixed on the host, instead of on
+  the DSP.
+- **Graphics features.** See the list above.
 - **Input.** WPAD/KPAD need a host replacement that feeds controllers in
   as Wii Remote and Nunchuk data.
-- **Audio.** AX must be mixed on the host instead of on the DSP.
 - **Saves.** NAND file access (`/dev/fs`, ISFS) needs host files.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**

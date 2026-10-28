@@ -17,6 +17,13 @@ int hle_log_enabled(void);
  * enables interrupts, the way a hardware interrupt would be taken. */
 void hle_post(uint32_t fn, uint32_t r3, uint32_t r4, void (*after)(ppc_t* c, uint32_t data), uint32_t data);
 
+/* Raises hardware interrupt n (__OS_INTERRUPT_*); its OS handler runs
+ * like a queued call. */
+void hle_raise_interrupt(int n);
+/* ...calling before(data) just before the handler runs, e.g. to set the
+ * device register that tells the handler what happened. */
+void hle_raise_interrupt_ex(int n, void (*before)(uint32_t data), uint32_t data);
+
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);
 

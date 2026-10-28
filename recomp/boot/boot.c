@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "gx.h"
 #include "recomp_funcs.h"
 
 int hle_dvd_init(const char* root);
@@ -21,12 +22,33 @@ static ppc_t* gCpu;
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+/* RECOMP_WATCH: the watched guest range and its write-protected page. */
+static uint32_t gWatchPhys, gWatchLen;
+static uint8_t* gWatchPage;
+
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
     EXCEPTION_RECORD* r = info->ExceptionRecord;
+    if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && gWatchPage) {
+        /* Finished a write elsewhere on the watched page: protect it again. */
+        DWORD old;
+        VirtualProtect(gWatchPage, 0x1000, PAGE_READONLY, &old);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uintptr_t a = (uintptr_t)r->ExceptionInformation[1];
+        if (gWatchPage && (uint8_t*)a >= gWatchPage && (uint8_t*)a < gWatchPage + 0x1000 &&
+            (uint32_t)(a - (uintptr_t)g_mem - gWatchPhys) >= gWatchLen) {
+            /* Not the watched range: let this one write through, then
+             * single-step and re-protect. */
+            DWORD old;
+            VirtualProtect(gWatchPage, 0x1000, PAGE_READWRITE, &old);
+            info->ContextRecord->EFlags |= 0x100;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if (a >= (uintptr_t)g_mem && a < (uintptr_t)g_mem + 0x40000000u) {
-            fprintf(stderr, "boot: guest memory fault at physical %08X\n", (unsigned)(a - (uintptr_t)g_mem));
+            fprintf(stderr, "boot: guest memory fault at physical %08X (%s)\n", (unsigned)(a - (uintptr_t)g_mem),
+                    r->ExceptionInformation[0] ? "write" : "read");
+            if (gCpu) ppc_backtrace(gCpu);
         } else {
             fprintf(stderr, "boot: host memory fault at %p\n", (void*)a);
         }
@@ -68,7 +90,7 @@ static void setup_low_memory(void) {
     ST32(0x800000F8, 0x0E7BE2C0); /* bus clock, 243 MHz */
     ST32(0x800000FC, 0x2B73A840); /* CPU clock, 729 MHz */
     ST32(0x800030D8, 0x00000000); /* system time */
-    ST16(0x800030E6, 0x8201);     /* console type flags: no debugger */
+    ST16(0x800030E6, 0x0000);     /* retail console (bit 15 would mean a development kit) */
     ST32(0x80003100, 0x01800000); /* MEM1 physical size */
     ST32(0x80003104, 0x01800000); /* MEM1 simulated size */
     ST32(0x80003108, 0x817FEC60); /* end of usable MEM1 */
@@ -76,11 +98,14 @@ static void setup_low_memory(void) {
     ST32(0x80003110, 0x817FEC60); /* MEM1 arena end */
     ST32(0x80003118, 0x04000000); /* MEM2 physical size */
     ST32(0x8000311C, 0x04000000); /* MEM2 simulated size */
-    ST32(0x80003120, 0x93400000); /* end of MEM2 */
+    /* On a Wii, IOS keeps the top of MEM2 (0x933E0000 up). Nothing runs on
+     * the Starlet here, so the game gets that memory too, and the IPC
+     * buffer moves to the very top. */
+    ST32(0x80003120, 0x94000000); /* end of MEM2 */
     ST32(0x80003124, 0x90000800); /* usable MEM2 start */
-    ST32(0x80003128, 0x933E0000); /* usable MEM2 end */
-    ST32(0x80003130, 0x933E0000); /* IOS IPC buffer start */
-    ST32(0x80003134, 0x93400000); /* IOS IPC buffer end */
+    ST32(0x80003128, 0x93FE0000); /* usable MEM2 end */
+    ST32(0x80003130, 0x93FE0000); /* IOS IPC buffer start */
+    ST32(0x80003134, 0x94000000); /* IOS IPC buffer end */
     ST32(0x80003138, 0x00000011); /* Hollywood revision */
     ST32(0x80003140, 0x00090204); /* IOS version: IOS9 v516 */
     ST32(0x80003144, 0x00062507); /* IOS build date */
@@ -121,6 +146,21 @@ int main(int argc, char** argv) {
         else strcpy(root, "disc");
         if (hle_dvd_init(root) == 0) hle_dvd_boot_setup();
     }
+    {
+        /* RECOMP_WATCH=<guest address>[,<length>]: stop on the first write
+         * to that range, with a trace (for finding memory corruption). */
+        const char* w = getenv("RECOMP_WATCH");
+        if (w) {
+            DWORD old;
+            char* end;
+            uint32_t addr = (uint32_t)strtoul(w, &end, 16);
+            gWatchLen = *end == ',' ? (uint32_t)strtoul(end + 1, NULL, 16) : 4;
+            gWatchPhys = addr & 0x3FFFFFFF;
+            gWatchPage = MA(addr & ~0xFFFu);
+            VirtualProtect(gWatchPage, 0x1000, PAGE_READONLY, &old);
+        }
+    }
+    gx_init();
     c = gCpu = (ppc_t*)calloc(1, sizeof(ppc_t));
     c->msr = 0x00002032; /* FP available, instruction and data translation on */
     printf("boot: entering __start at %08X\n", entry);

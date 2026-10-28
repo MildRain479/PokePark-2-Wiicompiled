@@ -15,6 +15,10 @@
 
 uint8_t* g_mem;
 
+static void wgpipe_discard(uint32_t value, int size) { (void)value; (void)size; }
+void (*g_wgpipe_write)(uint32_t value, int size) = wgpipe_discard;
+void (*g_gx_flush)(void);
+
 #define GUEST_SPACE 0x40000000u
 
 /* Physical ranges that are backed by memory: MEM1, the hardware
@@ -221,6 +225,19 @@ void ppc_mtspr(ppc_t* c, int spr, uint32_t v) {
         /* A negative value means the exception is already pending. */
         sDecDeadline = ppc_timebase() + (uint64_t)(int64_t)(int32_t)v;
         sDecArmed = 1;
+    } else if (spr == 923 && (v & 2)) {
+        /* DMAL with the trigger bit: a locked-cache DMA. DMAU holds the
+         * memory address and the high bits of the length; DMAL the
+         * locked-cache address, the direction (bit 4: 1 = memory to
+         * cache), and the low bits of the length, in 32-byte blocks
+         * (0 = 128). The transfer completes at once. */
+        uint32_t dmau = c->spr[922];
+        uint32_t blocks = ((dmau & 0x1F) << 2) | ((v >> 2) & 3);
+        uint32_t mem = dmau & ~0x1Fu, lc = v & ~0x1Fu;
+        if (!blocks) blocks = 128;
+        if (v & 0x10) memmove(MA(lc), MA(mem), blocks * 32);
+        else memmove(MA(mem), MA(lc), blocks * 32);
+        c->spr[923] = v & ~2u;
     } else {
         c->spr[spr] = v;
     }

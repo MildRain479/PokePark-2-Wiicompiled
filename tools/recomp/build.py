@@ -26,8 +26,10 @@ TARGETS = {
         os.path.join(ROOT, "src", "flib", "CodepointConvert.cpp"),
         os.path.join(ROOT, "src", "flib", "FName.cpp"),
     ],
-    "boot": sorted(glob.glob(os.path.join(ROOT, "recomp", "boot", "*.c"))),
+    "boot": sorted(glob.glob(os.path.join(ROOT, "recomp", "boot", "*.c")) +
+                   glob.glob(os.path.join(ROOT, "recomp", "gpu", "*.c"))),
 }
+LIBS = {"boot": ["opengl32.lib", "user32.lib", "gdi32.lib"]}
 DEFINES = ["RECOMP_TRACE"]
 
 
@@ -44,7 +46,8 @@ def stale(src, obj):
 
 
 def build_msvc(common, targets, opt):
-    inc = f'/I"{os.path.join(ROOT, "recomp", "runtime")}" /I"{GEN}" /I"{os.path.join(ROOT, "src")}"'
+    inc = (f'/I"{os.path.join(ROOT, "recomp", "runtime")}" /I"{GEN}" /I"{os.path.join(ROOT, "src")}" '
+           f'/I"{os.path.join(ROOT, "recomp", "gpu")}"')
     defs = " ".join(f"/D{d}" for d in DEFINES)
     # The generated code relies on wrapping unsigned arithmetic only.
     flags = f"/nologo {opt} /MP /W0 /fp:precise /Zi {defs} {inc}"
@@ -67,7 +70,8 @@ def build_msvc(common, targets, opt):
             compile_([s for s in srcs if s.endswith(".c")], tdir, "c")
             compile_([s for s in srcs if not s.endswith(".c")], tdir, "cpp")
             exe = os.path.join(OUT, name + ".exe")
-            f.write(f'link /nologo /DEBUG /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" || exit /b 1\n')
+            libs = " ".join(LIBS.get(name, []))
+            f.write(f'link /nologo /DEBUG /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
     subprocess.check_call(["cmd", "/c", bat])
 
 
