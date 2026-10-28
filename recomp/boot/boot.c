@@ -17,6 +17,7 @@ void hle_dvd_boot_setup(void);
 void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
 void input_init(void);
+void audio_init(void);
 
 static ppc_t* gCpu;
 
@@ -209,6 +210,7 @@ int main(int argc, char** argv) {
     }
     gx_init();
     input_init();
+    audio_init();
     c = gCpu = (ppc_t*)calloc(1, sizeof(ppc_t));
     c->msr = 0x00002032; /* FP available, instruction and data translation on */
     printf("boot: entering __start at %08X\n", entry);

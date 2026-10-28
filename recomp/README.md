@@ -96,9 +96,10 @@ git-ignored, and is created on first run.
    keyboard or an Xbox-style controller. Pressing 2 leads to the save
    slots, picture choice and the following menus.
 
-There is no sound yet: AX runs its 3 ms frames and voices move through
-their samples (so the THP soundtrack and one-shot sounds play out and
-end on time), but nothing is mixed.
+Sound plays through waveOut (`recomp/boot/audio_win32.c`, about 150 ms
+of latency): the title movie's soundtrack, menu music and sound effects.
+There is no reverb or other effects yet, and the Wii Remote speaker is
+silent.
 
 The game runs at about 30-50 fps while the title movie plays (THP
 decoding is slow; performance hasn't been worked on). Text in some
@@ -150,6 +151,8 @@ Diagnostics:
   10 s and right at 22 s. Buttons: up down left right a b 1 2 plus minus
   home shake, joined with `+`; times count from the remote's first
   report.
+- `RECOMP_AUDIO=0` turns sound off; `RECOMP_AUDIO_DUMP=<file.wav>` also
+  records the mix.
 - `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
   before the watchdog stops a run (for finding what a stuck game is
   polling).
@@ -167,7 +170,7 @@ Diagnostics:
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
 | `hle_wpad.c` | The Wii Remote (WPAD). Remote 0, sideways with no extension, connects a second after the game sets its connect callback; a 200 Hz timer stands in for its reports, read from the host's controls (`host_input.h`). KPAD runs unchanged on top. Remotes 1-3 are absent; the speaker is accepted and silent. |
-| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick runs the voices of the last command list (positions, sample-rate ratio, ADPCM frame headers, loops and ends, as the DSP would), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Nothing is mixed yet. |
+| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Volume ramps, the aux (effects) buses and the remote speaker are not mixed. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
 | `hle_game.c` | Not hardware: game changes. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
@@ -228,9 +231,10 @@ Not implemented yet:
   sideways, so neither is needed for the main game. Only Windows input
   so far. Analog movement would need a game-side change, since the game
   reads the d-pad.
-- **Sound.** AX voices must be mixed on the host: decode their samples
-  (ADPCM/PCM), apply volumes and effects, and play the result. Their
-  positions already advance.
+- **Sound extras.** The aux buses that feed reverb and other effects
+  (AXFX), volume ramps, polyphase resampling (linear is used for all
+  voices), the biquad filter and the Wii Remote speaker. Only Windows
+  output so far.
 - **Graphics features.** See the list above.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**
