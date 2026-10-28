@@ -16,6 +16,7 @@ int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
 void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
+void input_init(void);
 
 static ppc_t* gCpu;
 
@@ -62,9 +63,38 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
 
 /* Stops a boot that hangs (usually polling hardware that isn't emulated)
  * and shows where it was. */
+static int by_calls(const void* a, const void* b) {
+    uint32_t x = g_calls[*(const uint32_t*)a], y = g_calls[*(const uint32_t*)b];
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* RECOMP_CALLS=<n>: the n functions called most in the run's last 5 s. */
+static void dump_calls(int n) {
+    static uint32_t idx[0x100000];
+    uint32_t i, used = 0;
+    for (i = 0; i < 0x100000; i++) {
+        if (g_calls[i]) idx[used++] = i;
+    }
+    qsort(idx, used, sizeof(idx[0]), by_calls);
+    fprintf(stderr, "most called in the last 5 s:\n");
+    for (i = 0; i < used && (int)i < n; i++) {
+        uint32_t a = 0x80000000u | idx[i] << 2;
+        fprintf(stderr, "  %8u  %08X %s\n", g_calls[idx[i]], a, ppc_func_name(a));
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID arg) {
-    Sleep((DWORD)(uintptr_t)arg * 1000);
-    fprintf(stderr, "boot: still running after %u s; stopping\n", (unsigned)(uintptr_t)arg);
+    DWORD secs = (DWORD)(uintptr_t)arg;
+    const char* calls = getenv("RECOMP_CALLS");
+    if (calls && secs > 5) {
+        Sleep((secs - 5) * 1000);
+        memset(g_calls, 0, sizeof(g_calls));
+        Sleep(5000);
+        dump_calls(atoi(calls));
+    } else {
+        Sleep(secs * 1000);
+    }
+    fprintf(stderr, "boot: still running after %u s; stopping\n", (unsigned)secs);
     ppc_dump_trace();
     if (gCpu) ppc_backtrace(gCpu);
     hle_dump_threads();
@@ -178,6 +208,7 @@ int main(int argc, char** argv) {
         }
     }
     gx_init();
+    input_init();
     c = gCpu = (ppc_t*)calloc(1, sizeof(ppc_t));
     c->msr = 0x00002032; /* FP available, instruction and data translation on */
     printf("boot: entering __start at %08X\n", entry);

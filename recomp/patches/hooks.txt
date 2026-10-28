@@ -28,3 +28,24 @@
 0x8022ED70 AIStopDMA  # hle_audio.c
 0x801741F0 fn_801741F0  # hle_game.c: skip the Hold screen
 0x80173E10 SceneSpecializerStrap::RunSystem  # hle_game.c: leave as soon as the park has loaded
+0x80247F10 WPADProbe  # hle_wpad.c: remote 0 connected, the rest absent
+0x80248030 WPADSetConnectCallback  # hle_wpad.c
+0x802480C0 WPADSetExtensionCallback  # hle_wpad.c
+0x80247FA0 WPADSetSamplingCallback  # hle_wpad.c: reports on a 200 Hz timer
+0x80248120 WPADGetDataFormat  # hle_wpad.c
+0x80248170 WPADSetDataFormat  # hle_wpad.c
+0x802488A0 WPADRead  # hle_wpad.c: the host's controls
+0x80247D40 WPADGetAccGravityUnit  # hle_wpad.c
+0x8024A990 WPADControlDpd  # hle_wpad.c
+0x8024A8A0 WPADIsDpdEnabled  # hle_wpad.c
+0x8024A8F0 WPADGetDpdFormat  # hle_wpad.c
+0x802484B0 WPADControlMotor  # hle_wpad.c: host rumble
+0x80248600 WPADControlLed  # hle_wpad.c
+0x80248290 WPADGetInfoAsync  # hle_wpad.c
+0x80246BC0 WPADGetRadioSensitivity  # hle_wpad.c
+0x80247E50 WPADDisconnect  # hle_wpad.c
+0x80248DF0 WPADControlSpeaker  # hle_wpad.c: no speaker sound
+0x80248DA0 WPADIsSpeakerEnabled  # hle_wpad.c
+0x8024A5C0 WPADCanSendStreamData  # hle_wpad.c
+0x8024A650 WPADSendStreamData  # hle_wpad.c
+

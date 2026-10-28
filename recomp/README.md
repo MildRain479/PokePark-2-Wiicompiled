@@ -92,10 +92,34 @@ git-ignored, and is created on first run.
 6. It creates its save files and copies the Pokémon resources into a
    cache on the NAND.
 7. It reaches the title screen, with its THP movie background.
-8. It then shows "Communications with the Wii Remote have been
-   interrupted", because no remote is connected. Input is next.
+8. A Wii Remote held sideways connects about a second in, driven by the
+   keyboard or an Xbox-style controller. Pressing 2 leads to the save
+   slots, picture choice and the following menus.
 
-There is no sound yet: AX frames run on time, but nothing is mixed.
+There is no sound yet: AX runs its 3 ms frames and voices move through
+their samples (so the THP soundtrack and one-shot sounds play out and
+end on time), but nothing is mixed.
+
+The game runs at about 30-50 fps while the title movie plays (THP
+decoding is slow; performance hasn't been worked on). Text in some
+dialog boxes renders as garbled glyphs; that is a graphics bug still to
+find.
+
+**Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
+
+| Wii Remote | Keyboard | Controller |
+|---|---|---|
+| d-pad | arrows / WASD | d-pad / left stick |
+| 2 | X / K / Space | A |
+| 1 | Z / J | X |
+| A | Enter / C | B |
+| B | V / Left Ctrl | Y / right trigger |
+| + / - | P / M | Start / Back |
+| HOME | Home / H | right stick click |
+| shake | Q / Left Shift | LB / RB |
+
+The keyboard counts only while the game window has focus. Rumble goes to
+the controller.
 
 The game's own `OSReport` output, including the SDK banners and the
 heap sizes, is printed to stderr.
@@ -121,6 +145,14 @@ Diagnostics:
 - `RECOMP_GX_HIDDEN=1` keeps the window hidden.
 - `RECOMP_GX_SCALE=<n>` sets the internal resolution multiplier
   (default 2).
+- `RECOMP_PAD_SCRIPT="<seconds>:<buttons> ..."` presses buttons at set
+  times, for unattended runs: `"10:2 10.3: 22:right 22.3:"` presses 2 at
+  10 s and right at 22 s. Buttons: up down left right a b 1 2 plus minus
+  home shake, joined with `+`; times count from the remote's first
+  report.
+- `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
+  before the watchdog stops a run (for finding what a stuck game is
+  polling).
 
 **How the hardware is replaced** (`recomp/patches/`, all through
 `hooks.txt`):
@@ -133,8 +165,9 @@ Diagnostics:
 | `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
 | `hle_exi.c` | EXI: no devices. |
-| `hle_bt.c` | Bluetooth: reported ready, with no remotes. |
-| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick marks the DSP's frame done and runs AX's frame callback, so AX and nw4r's sound thread advance on time. Nothing is mixed yet. |
+| `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
+| `hle_wpad.c` | The Wii Remote (WPAD). Remote 0, sideways with no extension, connects a second after the game sets its connect callback; a 200 Hz timer stands in for its reports, read from the host's controls (`host_input.h`). KPAD runs unchanged on top. Remotes 1-3 are absent; the speaker is accepted and silent. |
+| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick runs the voices of the last command list (positions, sample-rate ratio, ADPCM frame headers, loops and ends, as the DSP would), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Nothing is mixed yet. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
 | `hle_game.c` | Not hardware: game changes. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
@@ -191,12 +224,13 @@ Not implemented yet:
 
 ## Not done yet
 
-- **Input, needed past the title screen.** WPAD/KPAD need a host
-  replacement that feeds controllers in as a connected Wii Remote and
-  Nunchuk.
+- **Input extras.** No pointer (IR) and no Nunchuk; PokePark is played
+  sideways, so neither is needed for the main game. Only Windows input
+  so far. Analog movement would need a game-side change, since the game
+  reads the d-pad.
 - **Sound.** AX voices must be mixed on the host: decode their samples
-  (ADPCM/PCM), advance their positions, apply volumes and effects, and
-  play the result. Today nothing advances voices.
+  (ADPCM/PCM), apply volumes and effects, and play the result. Their
+  positions already advance.
 - **Graphics features.** See the list above.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**

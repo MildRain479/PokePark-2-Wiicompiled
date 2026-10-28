@@ -53,7 +53,7 @@ static const char* fd_path(int32_t fd) {
 
 /* Devices the game opens. Anything else is logged and refused; that
  * includes /dev/sdio/slot0 (no SD card) and /dev/usb/oh1/57e/305 (no
- * Bluetooth adapter; Wii Remote input will come from an HLE of WPAD). */
+ * Bluetooth adapter; Wii Remote input comes from hle_wpad.c). */
 static const char* const kDevices[] = {
     "/dev/stm/immediate", "/dev/stm/eventhook", "/dev/fs", "/dev/es", "/dev/di",
     "/dev/net/kd/request", "/dev/net/ncd/manage",

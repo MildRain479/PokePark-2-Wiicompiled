@@ -120,6 +120,7 @@ void ppc_icall(ppc_t* c, uint32_t addr) {
 #ifdef RECOMP_TRACE
 uint32_t g_trace[256];
 unsigned g_trace_pos;
+uint32_t g_calls[0x100000];
 #endif
 
 /* Name of the function containing addr, for diagnostics. */
