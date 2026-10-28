@@ -86,8 +86,9 @@ git-ignored, and is created on first run.
 2. IOS: STM, ES and FS requests are answered.
 3. The game runs six threads.
 4. It loads its data through its own DVD library.
-5. It draws the Wii Strap safety screen, then "Loading..." with an
-   animated 3D Pikachu, in a window through OpenGL.
+5. It draws in a window through OpenGL. The wrist strap safety screen
+   and "Hold Wii Remote Horizontally" are skipped (see `hle_game.c`), so
+   the title comes up about 2 s after start instead of about 28 s.
 6. It creates its save files and copies the Pokémon resources into a
    cache on the NAND.
 7. It reaches the title screen, with its THP movie background.
@@ -136,6 +137,7 @@ Diagnostics:
 | `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick marks the DSP's frame done and runs AX's frame callback, so AX and nw4r's sound thread advance on time. Nothing is mixed yet. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
+| `hle_game.c` | Not hardware: game changes. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
 
 **Memory differences from a Wii:**
 - **MEM2:** the game also gets the top of MEM2 that IOS normally keeps
