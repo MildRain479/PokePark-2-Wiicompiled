@@ -5,7 +5,7 @@
 
 // Script syscalls receive their arguments as an array of 32-bit words, and
 // return a 32-bit word. Floats are passed through by bit pattern.
-typedef u32 (*ScriptSyscall)(u32* args);
+typedef u32 (*ScriptSyscall)(u32* args, int count);
 
 inline f32 SyscallFloatArg(u32& arg) {
     return *(f32*)&arg;

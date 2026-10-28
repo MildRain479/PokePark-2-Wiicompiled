@@ -104,6 +104,7 @@ flib/scripting/core_syscalls.cpp:
 	.text       start:0x802EF620 end:0x802F1914 align:16
 	.data       start:0x8036C220 end:0x8036C470
 	.sdata      start:0x80486238 end:0x80486250
+	.sdata2     start:0x80489A80 end:0x80489AB0
 
 flib/scripting/Vec3Syscalls.cpp:
 	.text       start:0x802F1920 end:0x802F1D70 align:16

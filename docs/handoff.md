@@ -14,7 +14,7 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/flSlice2.cpp` | Matching |
 | `flib/ScriptLog.cpp` | Matching |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
-| `flib/scripting/core_syscalls.cpp` | Not started (104 functions) |
+| `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
 | `flib/flMemory.cpp` | Split only (needed for alignment), still asm |
 
 Other flib code (the record table, `Demangle_FName`, the
@@ -41,6 +41,30 @@ separate Vec-sized temporaries). These forms did not reproduce it:
   from it, so whatever built them stored a single field. Only contrived
   code ("write one field of a throwaway Vec, read it back") seems likely
   to match, and that would be a fake match.
+
+### Open problems: `core_syscalls.cpp`
+
+- **`RecordTableEntryFill*ArrayPropSyscall` (4 functions, ~94%).** These are
+  loops that the compiler unrolls by 8. The best form so far keeps
+  `int n = count - 2;` in a local. What remains is register assignment
+  inside the unrolled body: the original loads the field offset before the
+  data pointer, and puts the loop index in r4 and the argument pointer in
+  r6. Changing the address expression or the declaration order did not
+  help.
+- **`stack_vprintf` (97.8%).** Two differences remain:
+  - Scheduling in `%s` and `%f`: the original advances `args` before
+    setting r6.
+  - Register choice in `%x`.
+
+  The frame size is right once `spec` is `char[16]`, because the frame is
+  rounded to 16 bytes and 20 bytes overflows it.
+- **`stack_vprintf_d_specifier` (91.8%).** The left-aligned padding loop and
+  the register reuse differ. Writing the negative flag before the
+  terminator store got it from 83% to 92%.
+
+Experiment scripts used `score()` from a small helper: write a variant,
+build the object, run objdiff-cli, and read `match_percent`. Recreate it
+when needed. It is not in the repo.
 
 ## Compiler flags (game code, `config.json` "game")
 
