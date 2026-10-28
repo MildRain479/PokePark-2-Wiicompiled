@@ -1,0 +1,6 @@
+# Game functions replaced by hand-written C in recomp/patches/*.c.
+# One "0xADDRESS name" per line. The recompiler emits the original body as
+# f_<ADDRESS>_orig, and the patch defines f_<ADDRESS>, which every call in
+# the game then reaches.
+
+0x802F3464 strlen  # example_hook.c: counts calls, then runs the original
