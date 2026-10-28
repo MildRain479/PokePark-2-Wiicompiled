@@ -95,6 +95,8 @@
             "flib/flMemory.cpp": "NonMatching",
             "flib/FName.cpp": "Matching",
             "flib/CodepointConvert.cpp": "Matching",
+            "flib/flDB.cpp": { "status": "NonMatching", "extra_cflags": ["-RTTI off"] },
+            "flib/flDBNamed.cpp": { "status": "NonMatching", "extra_cflags": ["-RTTI off"] },
             "flib/scripting/core_syscalls.cpp": "NonMatching",
             "flib/scripting/Vec3Syscalls.cpp": "NonMatching",
             "flib/flSlice2.cpp": "Matching",

@@ -298,11 +298,11 @@ u32 RecordTablePtrByNameSyscall(u32* args, int count) {
 
 u32 RecordTableGetEntryByName_IndexSyscall(u32* args, int count) {
     RecordTable* table = RecordTablePtrByName((const char*)args[0]);
-    return (u32)&table->entries[args[1]];
+    return (u32)&table->entries.data[args[1]];
 }
 
 u32 DeleteRecordTableSyscall(u32* args, int count) {
-    DeleteRecordTable((RecordTable*)args[0]);
+    DeleteRecordTable((const char*)args[0]);
     return 0;
 }
 
@@ -324,19 +324,19 @@ u32 RecordTableGetElementSize(u32* args, int count) {
 }
 
 u32 RecordTableGetFieldCount(u32* args, int count) {
-    return ((RecordTable*)args[0])->fieldCount;
+    return ((RecordTable*)args[0])->fields.count;
 }
 
 u32 GetFieldDefByIndexSyscall(u32* args, int count) {
-    return (u32)&((RecordTable*)args[0])->fields[args[1]];
+    return (u32)&((RecordTable*)args[0])->fields.data[args[1]];
 }
 
 u32 RecordTableGetNumElementsSyscall(u32* args, int count) {
-    return ((RecordTable*)args[0])->entryCount;
+    return ((RecordTable*)args[0])->entries.count;
 }
 
 u32 RecordTableGetEntryByIndex(u32* args, int count) {
-    return (u32)&((RecordTable*)args[0])->entries[args[1]];
+    return (u32)&((RecordTable*)args[0])->entries.data[args[1]];
 }
 
 u32 noopSyscall(u32* args, int count) {
@@ -344,12 +344,12 @@ u32 noopSyscall(u32* args, int count) {
 }
 
 u32 RecordTableDeleteUnsortedEntrySyscall(u32* args, int count) {
-    RecordTableDeleteEntry((RecordTable*)args[0], args[1]);
+    RecordTableDeleteEntry((RecordTable*)args[0], (RTEntry*)args[1]);
     return 0;
 }
 
 u32 RecordTableDeleteSortedEntrySyscall(u32* args, int count) {
-    RemoveSortedEntry((RecordTable*)args[0], args[1]);
+    RemoveSortedEntry((RecordTable*)args[0], (RTEntry*)args[1]);
     return 0;
 }
 

@@ -15,6 +15,8 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 | `flib/ScriptLog.cpp` | Matching |
 | `flib/FName.cpp` | Matching (`Demangle_FName`, `FName_encoding`, two empty stubs) |
 | `flib/CodepointConvert.cpp` | Matching (`EncodeCodepoint`, `UnicodeToSJIS`, the Unicode→Shift-JIS tables) |
+| `flib/flDB.cpp` | NonMatching: .text 98.2%; 6/17 functions match; .data, .ctors and .sbss match |
+| `flib/flDBNamed.cpp` | NonMatching: .text 98.5%; 9/11 functions match; all data matches |
 | `flib/scripting/Vec3Syscalls.cpp` | NonMatching: 23/24 functions; `Vec3CopySyscall` is the exception |
 | `flib/scripting/core_syscalls.cpp` | NonMatching: 98/104 functions; all data sections match |
 | `flib/flMemory.cpp` | NonMatching: 18/21 functions; all data sections match |
@@ -23,8 +25,10 @@ The full build matches (`build/R8AE01/main.dol: OK`).
 interpreter, `fscript::Run`, `LookupFunctionInSymbolTable_impl`, the
 syscall pages) is split, with `.text` only, to keep the alignment. It
 has no source yet; its data (0x8036C098-0x8036C220: an "endian error"
-string, a table and two jump tables) is still unsplit. Other flib code
-(the record table) sits in auto units up to 0x802F3130.
+string, a table and two jump tables) is still unsplit. The record table code is split
+into `flDB.cpp` and `flDBNamed.cpp`. The second file's name is a guess;
+its "Name"/"Ptr" literals are pooled separately from flDB's, so it is a
+separate TU.
 
 ### Open problem: `Vec3CopySyscall`
 
@@ -111,6 +115,32 @@ Lessons from `CodepointConvert.cpp`:
   (`lbl_803691CE`, inside `sUnicodeToSJIS_8D`) every time it runs, so
   objdiff shows that table at 75%, although its bytes match and the DOL
   hash is OK.
+
+### Open problems: `flDB.cpp` / `flDBNamed.cpp`
+
+`RecordTable` is now two `RTArray<T>` members (fields, entries) plus
+`entrySize`. The structure is confirmed by the inlined member destructors
+in `DeleteRecordTable`, whose `this` checks include `addic. r0, r31, 0xc`.
+What's left:
+- **Register allocation** in most functions. The inlined `RTEntry::Free`,
+  `RTArray::Destroy` and the binary searches use the right instructions
+  in the wrong registers. Hoisting and permuting locals helped
+  `FindEntryByName` (97.8% to 99.2%).
+- **`AddField` / `AddNamedEntry` (~95%).** The original recomputes
+  `pos + half` in each branch; mine keeps it in a register, which needs
+  an extra saved register and a bigger frame.
+- **flDB `.sdata` order.** The original has "Ptr" before "Name"; mine is
+  the reverse. Nothing in the TU uses "Ptr" first, so the cause is unknown.
+
+Lessons:
+- **RTTI.** flib units with vtables need `-RTTI off` (per-object
+  `extra_cflags`). The original vtable header words are zero.
+- **Devirtualization.** Calls on the global allocator are true virtual
+  calls in the original. Calling through an inline accessor
+  (`RTAllocator()->free(p)`) keeps MWCC from devirtualizing them.
+- **Signed compare.** Comparing a `u16` field to a constant gives
+  `cmplwi`; the original's `cmpwi` comes from going through an `int`
+  temp.
 
 Experiment scripts used `score()` from a small helper: write a variant,
 build the object, run objdiff-cli, and read `match_percent`. Recreate it

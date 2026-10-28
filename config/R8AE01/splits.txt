@@ -125,6 +125,19 @@ flib/scripting/Vec3Syscalls.cpp:
 	.data       start:0x8036C470 end:0x8036C530
 	.sdata2     start:0x80489AB0 end:0x80489AB8
 
+flib/flDB.cpp:
+	.text       start:0x802F1D70 end:0x802F2D40 align:16
+	.ctors      start:0x80306874 end:0x80306878
+	.data       start:0x8036C530 end:0x8036C590
+	.sdata      start:0x80486250 end:0x80486260
+	.sbss       start:0x804873B8 end:0x804873C0
+
+flib/flDBNamed.cpp:
+	.text       start:0x802F2D40 end:0x802F3130 align:16
+	.data       start:0x8036C590 end:0x8036C5A0
+	.sdata      start:0x80486260 end:0x80486270
+	.sbss       start:0x804873C0 end:0x804873C8
+
 flib/flSlice2.cpp:
 	.text       start:0x802F3130 end:0x802F33D0 align:16
 	.ctors      start:0x80306878 end:0x8030687C
