@@ -48,6 +48,9 @@ typedef struct GXDrawState {
 /* Backend interface. */
 void gxb_init(void);
 uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear);
+/* Replaces a texture's contents (same size). */
+void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba);
+void gxb_texture_free(uint32_t handle);
 void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count);
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
 void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int clear);

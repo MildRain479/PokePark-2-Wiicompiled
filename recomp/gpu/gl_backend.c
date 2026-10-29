@@ -377,6 +377,26 @@ uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, i
     return t;
 }
 
+void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba) {
+    glBindTexture(GL_TEXTURE_2D, handle);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+}
+
+/* Textures are deleted after the frame is presented: a draw earlier in the
+ * frame may still refer to one, and GL hands a deleted name straight to
+ * the next texture created. */
+#define MAX_PENDING_FREES 1024
+static GLuint sPendingFree[MAX_PENDING_FREES];
+static int sPendingFreeCount;
+
+void gxb_texture_free(uint32_t handle) {
+    if (sPendingFreeCount == MAX_PENDING_FREES) {
+        glDeleteTextures(sPendingFreeCount, sPendingFree);
+        sPendingFreeCount = 0;
+    }
+    sPendingFree[sPendingFreeCount++] = handle;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Drawing */
 
@@ -591,6 +611,10 @@ void gxb_present(int x, int y, int cw, int ch) {
     }
     SwapBuffers(sDC);
     sPresented++;
+    if (sPendingFreeCount) {
+        glDeleteTextures(sPendingFreeCount, sPendingFree);
+        sPendingFreeCount = 0;
+    }
     {
         /* Frames per second and the longest frame of the last second, in
          * the window title and, with RECOMP_FPS=1, on stderr. */

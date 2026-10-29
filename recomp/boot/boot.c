@@ -25,10 +25,36 @@ static ppc_t* gCpu;
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
 
 /* RECOMP_WATCH: the watched guest range and its write-protected page. */
 static uint32_t gWatchPhys, gWatchLen;
 static uint8_t* gWatchPage;
+static DWORD gGameThreadId;
+
+/* Prints the faulting thread's host call stack, with symbol names. */
+static void host_backtrace(void) {
+    void* frames[32];
+    USHORT n = CaptureStackBackTrace(1, 32, frames, NULL), i;
+    union {
+        SYMBOL_INFO info;
+        char buf[sizeof(SYMBOL_INFO) + 128];
+    } sym;
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    fprintf(stderr, "host backtrace:\n");
+    for (i = 0; i < n; i++) {
+        DWORD64 disp = 0;
+        memset(&sym, 0, sizeof(sym));
+        sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym.info.MaxNameLen = 127;
+        if (SymFromAddr(GetCurrentProcess(), (DWORD64)(uintptr_t)frames[i], &disp, &sym.info))
+            fprintf(stderr, "  %p %s+0x%llx\n", frames[i], sym.info.Name, (unsigned long long)disp);
+        else
+            fprintf(stderr, "  %p ?\n", frames[i]);
+    }
+}
 
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
     EXCEPTION_RECORD* r = info->ExceptionRecord;
@@ -54,7 +80,10 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
                     r->ExceptionInformation[0] ? "write" : "read");
             if (gCpu) ppc_backtrace(gCpu);
         } else {
-            fprintf(stderr, "boot: host memory fault at %p\n", (void*)a);
+            fprintf(stderr, "boot: host memory fault at %p (%s), on the %s thread\n", (void*)a,
+                    r->ExceptionInformation[0] ? "write" : "read",
+                    GetCurrentThreadId() == gGameThreadId ? "game" : "another");
+            host_backtrace();
         }
         ppc_dump_trace();
         fflush(stderr);
@@ -89,8 +118,6 @@ static void dump_calls(int n) {
  * stops the run, samples where the game's host thread is about once a
  * millisecond, then lists the host functions it was in most (recompiled
  * guest functions are f_<address>). */
-#include <dbghelp.h>
-#pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "winmm.lib")
 
 #define MAX_SAMPLES 400000
@@ -241,6 +268,7 @@ int main(int argc, char** argv) {
     }
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifdef _WIN32
+    gGameThreadId = GetCurrentThreadId();
     AddVectoredExceptionHandler(1, on_fault);
     CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)(argc > 2 ? atoi(argv[2]) : 10), 0, NULL);
     if (getenv("RECOMP_PROFILE")) {

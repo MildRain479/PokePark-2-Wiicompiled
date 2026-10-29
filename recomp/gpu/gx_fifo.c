@@ -425,8 +425,21 @@ typedef struct TexEntry {
     uint32_t handle, hash;
     uint64_t checked;
 } TexEntry;
-#define TEX_CACHE 2048
+#define TEX_CACHE 4096
+#define TEX_WAYS 4
 static TexEntry sTexCache[TEX_CACHE];
+
+/* Spreads every bit of a key over the result (splitmix64's finalizer). The
+ * set index needs the address bits, which sit high in the key: without
+ * this, all textures of one size and format shared a set and kept
+ * evicting each other. */
+static uint64_t mix64(uint64_t k) {
+    k ^= k >> 30;
+    k *= 0xBF58476D1CE4E5B9ull;
+    k ^= k >> 27;
+    k *= 0x94D049BB133111EBull;
+    return k ^ (k >> 31);
+}
 
 /* Hashes every byte, eight at a time: textures are checked for changes on
  * every frame they are used. */
@@ -481,14 +494,43 @@ static uint32_t texture_for_map(int map) {
     if (!addr || size <= 0) return 0;
     key = ((uint64_t)addr << 32) ^ ((uint64_t)fmt << 28) ^ ((uint64_t)width << 14) ^ (uint64_t)height ^
           ((uint64_t)(tlut & 0xFFF) << 40) ^ ((uint64_t)(mode0 & 0x1F) << 52);
-    e = &sTexCache[(key ^ (key >> 21)) % TEX_CACHE];
-    if (e->key == key && e->checked == sFrame) return e->handle;
+    {
+        /* Four ways per set, so textures used together (a movie's Y, U and
+         * V planes) don't evict each other; a miss takes the way used
+         * longest ago. */
+        TexEntry* set = &sTexCache[(size_t)(mix64(key) % (TEX_CACHE / TEX_WAYS)) * TEX_WAYS];
+        int w;
+        e = NULL;
+        for (w = 0; w < TEX_WAYS && !e; w++) {
+            if (set[w].handle && set[w].key == key) e = &set[w];
+        }
+        for (w = 0; w < TEX_WAYS && !e; w++) {
+            if (!set[w].handle) e = &set[w];
+        }
+        if (!e) {
+            e = &set[0];
+            for (w = 1; w < TEX_WAYS; w++) {
+                if (set[w].checked < e->checked) e = &set[w];
+            }
+        }
+    }
+    if (e->handle && e->key == key && e->checked == sFrame) return e->handle;
     h = hash_bytes(MA(addr), size);
     if (fmt >= 8 && fmt <= 10) h ^= hash_bytes(&tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], fmt == 8 ? 32 : 512);
     if (e->key != key || e->hash != h || !e->handle) {
         uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 4);
         gx_decode_texture(rgba, MA(addr), fmt, width, height, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
-        e->handle = gxb_texture(key, width, height, rgba, mode0 & 3, (mode0 >> 2) & 3, (mode0 >> 4) & 1);
+        if (e->handle && e->key == key) {
+            /* Same texture, new contents (a movie frame, say): the key
+             * covers size and sampling, so update it in place. */
+            gxb_texture_update(e->handle, width, height, rgba);
+        } else {
+            /* The way goes to another texture. The old one is freed (or
+             * GPU memory grows without bound) once the frame is
+             * presented: draws made this frame may still use it. */
+            if (e->handle) gxb_texture_free(e->handle);
+            e->handle = gxb_texture(key, width, height, rgba, mode0 & 3, (mode0 >> 2) & 3, (mode0 >> 4) & 1);
+        }
         free(rgba);
         e->key = key;
         e->hash = h;

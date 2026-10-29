@@ -259,8 +259,9 @@ Not implemented yet:
 
   This matters for bit-exact physics and replays; none of the current
   tests showed a difference.
-- **Performance.** Measured so far only on movies and menus, which hold
-  60 fps with frames on time even with other programs loading the
-  machine. In general every register lives in memory (`c->r[n]`), and
+- **Performance.** Movies and menus hold 60 fps with frames on time
+  even with other programs loading the machine. The park's opening
+  scenes run at 15 fps: a frame takes about 41 ms of work against the
+  33 ms a 30 fps frame allows, so each one waits for the next slot. In general every register lives in memory (`c->r[n]`), and
   caching registers in locals per function is the usual next step.
   Gameplay has not been profiled yet.
