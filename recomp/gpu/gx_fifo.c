@@ -125,6 +125,8 @@ typedef struct VtxFormat {
      * present (bit i for each). */
     int pos_n, pos_cs, nrm_cs, nrm_bytes, tex_n[8], tex_cs[8], texmtx_mask, tex_mask;
     float pos_scale, nrm_scale, tex_scale[8];
+    /* Where each attribute sits in a vertex's bytes. */
+    int off_pnmtx, off_texmtx[8], off_pos, off_nrm, off_col[2], off_tex[8];
 } VtxFormat;
 
 static int comp_size(int fmt) {
@@ -210,6 +212,28 @@ static void get_format(int vat, VtxFormat* f) {
     f->nrm_scale = f->nrm_fmt == 1 ? 1.0f / 64 : f->nrm_fmt == 3 ? 1.0f / 16384 : 1.0f;
     f->nrm_bytes = f->nrm == ATTR_DIRECT ? f->nrm_cs * (f->nrm_cnt ? 9 : 3)
                                          : index_size(f->nrm) * (f->nrm_cnt && f->nrm_index3 ? 3 : 1);
+    size = 0;
+    f->off_pnmtx = size;
+    size += f->pnmtx;
+    for (i = 0; i < 8; i++) {
+        f->off_texmtx[i] = size;
+        size += f->texmtx[i];
+    }
+    f->off_pos = size;
+    if (f->pos == ATTR_DIRECT) size += f->pos_cs * f->pos_n;
+    else if (f->pos) size += index_size(f->pos);
+    f->off_nrm = size;
+    if (f->nrm) size += f->nrm_bytes;
+    for (i = 0; i < 2; i++) {
+        f->off_col[i] = size;
+        if (f->col[i] == ATTR_DIRECT) size += color_size(f->col_fmt[i]);
+        else if (f->col[i]) size += index_size(f->col[i]);
+    }
+    for (i = 0; i < 8; i++) {
+        f->off_tex[i] = size;
+        if (f->tex[i] == ATTR_DIRECT) size += comp_size(f->tex_fmt[i]) * (f->tex_cnt[i] ? 2 : 1);
+        else if (f->tex[i]) size += index_size(f->tex[i]);
+    }
     for (i = 0; i < 8; i++) {
         f->tex_n[i] = f->tex_cnt[i] ? 2 : 1;
         f->tex_cs[i] = comp_size(f->tex_fmt[i]);
@@ -238,21 +262,6 @@ static const VtxFormat* format(int vat) {
         sFormatValid[vat] = 1;
     }
     return &sFormats[vat];
-}
-
-static float read_comp(const uint8_t* p, int fmt, float scale) {
-    switch (fmt) {
-    case 0: return p[0] * scale;
-    case 1: return (int8_t)p[0] * scale;
-    case 2: return rd16(p) * scale;
-    case 3: return (int16_t)rd16(p) * scale;
-    default: {
-        uint32_t u = rd32(p);
-        float f;
-        memcpy(&f, &u, 4);
-        return f;
-    }
-    }
 }
 
 /* Colors widen to 8 bits per channel as the GPU widens them, repeating
@@ -298,57 +307,77 @@ static const uint8_t* array_ptr(int array, uint32_t index) {
     return MA((cp[0xA0 + array] & 0x3FFFFFFF) + index * (cp[0xB0 + array] & 0xFF));
 }
 
-static uint32_t read_index(const uint8_t** p, int type) {
-    uint32_t idx;
-    if (type == ATTR_INDEX8) return *(*p)++;
-    idx = rd16(*p);
-    *p += 2;
-    return idx;
+/* Vertices are read an attribute at a time across a whole draw, so the
+ * choices that depend only on the format are made once per attribute. */
+
+/* Where vertex i's value of an attribute is: in the vertex itself, or in
+ * its array at the index the vertex holds. */
+#define ATTR_SRC(i)                                                                                         \
+    (type == ATTR_DIRECT ? p + (size_t)(i) * vsize + off                                                    \
+                         : MA(base + (type == ATTR_INDEX8 ? p[(size_t)(i) * vsize + off]                    \
+                                                          : rd16(p + (size_t)(i) * vsize + off)) * stride))
+
+/* Reads n components of format fmt into the floats at byte offset field
+ * of each vertex. */
+static void read_floats(GXVertex* v, int count, const uint8_t* p, int vsize, int off, int type, int array, int fmt,
+                        float scale, int n, size_t field) {
+    uint32_t base = cp[0xA0 + array] & 0x3FFFFFFF, stride = cp[0xB0 + array] & 0xFF;
+    int i, k;
+#define EACH(expr)                                                                                          \
+    for (i = 0; i < count; i++) {                                                                           \
+        const uint8_t* src = ATTR_SRC(i);                                                                   \
+        float* d = (float*)((uint8_t*)&v[i] + field);                                                       \
+        for (k = 0; k < n; k++) d[k] = (expr);                                                              \
+    }
+    switch (fmt) {
+    case 0: EACH(src[k] * scale) break;
+    case 1: EACH((int8_t)src[k] * scale) break;
+    case 2: EACH(rd16(src + 2 * k) * scale) break;
+    case 3: EACH((int16_t)rd16(src + 2 * k) * scale) break;
+    default: {
+        uint32_t u;
+        EACH((u = rd32(src + 4 * k), *(float*)&u))
+        break;
+    }
+    }
+#undef EACH
 }
 
-/* Reads the attributes the format has into v, which holds the defaults
- * for the rest (vertex_template). */
-static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, GXVertex* v) {
+static void read_colors(GXVertex* v, int count, const uint8_t* p, int vsize, int off, int type, int array, int fmt,
+                        int which) {
+    uint32_t base = cp[0xA0 + array] & 0x3FFFFFFF, stride = cp[0xB0 + array] & 0xFF;
     int i;
-    if (f->pnmtx) v->mtx[0] = *p++;
-    if (f->texmtx_mask) {
-        for (i = 0; i < 8; i++) {
-            if (f->texmtx_mask & (1 << i)) v->mtx[1 + i] = *p++;
-        }
+    for (i = 0; i < count; i++) read_color(ATTR_SRC(i), fmt, v[i].color[which]);
+}
+
+/* Reads count vertices of format f from p into v, which hold the defaults
+ * for what the format lacks (vertex_template). */
+static void read_vertices(const uint8_t* p, const VtxFormat* f, GXVertex* v, int count) {
+    int vsize = f->size, i, k;
+    if (f->pnmtx) {
+        for (k = 0; k < count; k++) v[k].mtx[0] = p[(size_t)k * vsize + f->off_pnmtx];
+    }
+    for (i = 0; i < 8; i++) {
+        if (!(f->texmtx_mask & (1 << i))) continue;
+        for (k = 0; k < count; k++) v[k].mtx[1 + i] = p[(size_t)k * vsize + f->off_texmtx[i]];
     }
     if (f->pos) {
-        const uint8_t* src = p;
-        if (f->pos != ATTR_DIRECT) src = array_ptr(0, read_index(&p, f->pos));
-        else p += f->pos_cs * f->pos_n;
-        v->pos[0] = read_comp(src, f->pos_fmt, f->pos_scale);
-        v->pos[1] = read_comp(src + f->pos_cs, f->pos_fmt, f->pos_scale);
-        if (f->pos_n == 3) v->pos[2] = read_comp(src + 2 * f->pos_cs, f->pos_fmt, f->pos_scale);
+        read_floats(v, count, p, vsize, f->off_pos, f->pos, 0, f->pos_fmt, f->pos_scale, f->pos_n,
+                    offsetof(GXVertex, pos));
     }
     if (f->nrm) {
-        const uint8_t* src = p;
-        if (f->nrm != ATTR_DIRECT) src = array_ptr(1, f->nrm == ATTR_INDEX8 ? *p : rd16(p));
-        p += f->nrm_bytes;
-        for (i = 0; i < 3; i++) v->nrm[i] = read_comp(src + f->nrm_cs * i, f->nrm_fmt, f->nrm_scale);
+        /* Of normal, binormal and tangent, only the normal: with three
+         * indices, the first. */
+        read_floats(v, count, p, vsize, f->off_nrm, f->nrm, 1, f->nrm_fmt, f->nrm_scale, 3, offsetof(GXVertex, nrm));
     }
     for (i = 0; i < 2; i++) {
-        if (f->col[i] == ATTR_DIRECT) {
-            read_color(p, f->col_fmt[i], v->color[i]);
-            p += color_size(f->col_fmt[i]);
-        } else if (f->col[i]) {
-            read_color(array_ptr(2 + i, read_index(&p, f->col[i])), f->col_fmt[i], v->color[i]);
-        }
+        if (f->col[i]) read_colors(v, count, p, vsize, f->off_col[i], f->col[i], 2 + i, f->col_fmt[i], i);
     }
-    if (f->tex_mask) {
-        for (i = 0; i < 8; i++) {
-            const uint8_t* src = p;
-            if (!(f->tex_mask & (1 << i))) continue;
-            if (f->tex[i] != ATTR_DIRECT) src = array_ptr(4 + i, read_index(&p, f->tex[i]));
-            else p += f->tex_cs[i] * f->tex_n[i];
-            v->tex[i][0] = read_comp(src, f->tex_fmt[i], f->tex_scale[i]);
-            if (f->tex_n[i] == 2) v->tex[i][1] = read_comp(src + f->tex_cs[i], f->tex_fmt[i], f->tex_scale[i]);
-        }
+    for (i = 0; i < 8; i++) {
+        if (!(f->tex_mask & (1 << i))) continue;
+        read_floats(v, count, p, vsize, f->off_tex[i], f->tex[i], 4 + i, f->tex_fmt[i], f->tex_scale[i], f->tex_n[i],
+                    offsetof(GXVertex, tex) + (size_t)i * 2 * sizeof(float));
     }
-    return p;
 }
 
 /* What a vertex holds before its attributes are read: the default matrix
@@ -838,10 +867,8 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count) {
     base = (uint32_t)sBatchVerts;
     v = sBatch + base;
     vertex_template(&tpl);
-    for (i = 0; i < count; i++) {
-        v[i] = tpl;
-        p = read_vertex(p, f, &v[i]);
-    }
+    for (i = 0; i < count; i++) v[i] = tpl;
+    read_vertices(p, f, v, count);
     if ((long)sFrame == sDebugFrame) debug_draw(&sBatchState, v, count);
     ix = sIndex + sIndexCount;
     switch (prim) {
