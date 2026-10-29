@@ -106,8 +106,10 @@ title shows the frame rate and the slowest frame of the last second).
 A Wii's NTSC video runs at 59.94 Hz; here the refresh and the game's
 frame timing run at 60 Hz by default, to match PC displays
 (`RECOMP_VI_HZ=59.94` restores the original). THP movie frames are
-decoded natively (`hle_thp.c`). Text in some dialog boxes renders as garbled glyphs, and 3D
-lighting is missing; those are graphics bugs still to fix.
+decoded natively (`hle_thp.c`). Graphics bugs still to fix: some dialogs
+show a second dialog box behind the real one (something the game hides
+is drawn), and in Mew's intro a 3D object near the center is drawn dark.
+3D lighting is implemented but not yet checked in gameplay.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
 
