@@ -113,19 +113,23 @@ but not yet checked in gameplay.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
 
-| Wii Remote | Keyboard | Controller |
-|---|---|---|
-| d-pad | arrows / WASD | d-pad / left stick |
-| 2 | X / K / Space | A |
-| 1 | Z / J | X |
-| A | Enter / C | B |
-| B | V / Left Ctrl | Y / right trigger |
-| + / - | P / M | Start / Back |
-| HOME | Home / H | right stick click |
-| shake | Q / Left Shift | LB / RB |
+| Wii Remote | In the park | Keyboard and mouse | Controller |
+|---|---|---|---|
+| d-pad | move | WASD / arrows | d-pad / left stick |
+| 2 | jump, talk | Space / X / K | A |
+| 1 | dash | left click / Z / J | X |
+| A | Thunderbolt | right click / Enter / C | B |
+| B | recenter the camera | V / Left Ctrl | Y / right trigger |
+| (none) | turn the camera | mouse | |
+| + / - | | P / M | Start / Back |
+| HOME | | Home / H | right stick click |
+| shake | Iron Tail | Q / Left Shift | LB / RB |
 
-The keyboard counts only while the game window has focus. Rumble goes to
-the controller.
+The keyboard counts only while the game window has focus. While it has
+focus the mouse is captured for the camera: Esc lets it go, and a click
+in the window captures it again (that click isn't a dash). The mouse
+turns the player camera only; cutscene and dialogue cameras are the
+game's. Rumble goes to the controller.
 
 The game's own `OSReport` output, including the SDK banners and the
 heap sizes, is printed to stderr.
@@ -201,6 +205,7 @@ Diagnostics:
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
 | `hle_font.c` | The Wii system font, which `OSInitFont` reads from the boot ROM: `ReadFont` builds the ANSI font from host glyphs (`host_font.h`; GDI's Segoe UI Semibold in `recomp/boot/font_win32.c`), in the ROM font's format, and the SDK expands it as usual. |
+| `hle_camera.c` | Mouse camera: after each update of the player camera (`CameraPlayer`), its eye is orbited around the target by the mouse's accumulated turn, and the game's own eye is put back before the next update, so the game's camera logic never sees it. B clears the turn. |
 | `hle_thp.c` | THP movie video: `THPVideoDecode` decoded natively (baseline JPEG without byte stuffing, written as I8 tiles). The game's decoder took ~12 ms a frame in recompiled code. The output matches it to within a few levels on under 0.5% of bytes (IDCT rounding). |
 | `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
 

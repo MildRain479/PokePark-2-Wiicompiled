@@ -2,18 +2,22 @@
  * hle_wpad.c. PokePark is played with the remote held sideways, like a
  * classic pad: the d-pad moves, 1 and 2 are the face buttons.
  *
- *                    keyboard              controller
- *   d-pad            arrows / WASD         d-pad / left stick
- *   2                X / K / Space         A
- *   1                Z / J                 X
- *   A                Enter / C             B
- *   B                V / Left Ctrl         Y / right trigger
- *   +                P                     Start
- *   -                M                     Back
- *   HOME             Home / H              right stick click
- *   shake            Q / Left Shift        LB / RB
+ *                    keyboard / mouse           controller
+ *   d-pad (move)     WASD / arrows              d-pad / left stick
+ *   2 (jump)         Space / X / K              A
+ *   1 (dash)         left click / Z / J         X
+ *   A (Thunderbolt)  right click / Enter / C    B
+ *   B                V / Left Ctrl              Y / right trigger
+ *   +                P                          Start
+ *   -                M                          Back
+ *   HOME             Home / H                   right stick click
+ *   shake            Q / Left Shift             LB / RB
  *
- * The keyboard counts only while the game's window has focus. */
+ * The keyboard counts only while the game's window has focus. While it
+ * has focus the mouse is captured: hidden, held in the window, and its
+ * movement turns the camera (hle_camera.c). Esc lets it go; a click in
+ * the window captures it again. Mouse buttons count only while captured,
+ * and not the click that captures it. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -47,6 +51,66 @@ static int has_focus(void) {
     if (!w) return 0;
     GetWindowThreadProcessId(w, &pid);
     return pid == GetCurrentProcessId();
+}
+
+static int sCaptured, sReleased, sSwallow;
+static POINT sCenter;
+static float sMouseX, sMouseY;
+
+static void capture(int on) {
+    if (on == sCaptured) return;
+    sCaptured = on;
+    if (on) {
+        RECT r;
+        HWND w = GetForegroundWindow();
+        GetClientRect(w, &r);
+        MapWindowPoints(w, NULL, (POINT*)&r, 2);
+        ClipCursor(&r);
+        sCenter.x = (r.left + r.right) / 2;
+        sCenter.y = (r.top + r.bottom) / 2;
+        SetCursorPos(sCenter.x, sCenter.y);
+        while (ShowCursor(FALSE) >= 0) {}
+    } else {
+        ClipCursor(NULL);
+        while (ShowCursor(TRUE) < 0) {}
+    }
+}
+
+/* Captures or releases the mouse and collects its movement; returns the
+ * pad bits of its buttons. */
+static uint32_t mouse(void) {
+    int left = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0, right = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    POINT p;
+    if (!has_focus()) {
+        capture(0);
+        return 0;
+    }
+    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) sReleased = 1;
+    if (sReleased && (left || right)) {
+        HWND w = GetForegroundWindow();
+        RECT r;
+        GetCursorPos(&p);
+        ScreenToClient(w, &p);
+        GetClientRect(w, &r);
+        if (PtInRect(&r, p)) sReleased = 0, sSwallow = 1;
+    }
+    capture(!sReleased);
+    if (!sCaptured) return 0;
+    GetCursorPos(&p);
+    sMouseX += (float)(p.x - sCenter.x);
+    sMouseY += (float)(p.y - sCenter.y);
+    if (p.x != sCenter.x || p.y != sCenter.y) SetCursorPos(sCenter.x, sCenter.y);
+    if (sSwallow) {
+        if (left || right) return 0;
+        sSwallow = 0;
+    }
+    return (left ? HOST_PAD_1 : 0) | (right ? HOST_PAD_A : 0);
+}
+
+static void read_mouse(float* dx, float* dy) {
+    *dx = sMouseX;
+    *dy = sMouseY;
+    sMouseX = sMouseY = 0;
 }
 
 static uint32_t keyboard(void) {
@@ -99,7 +163,7 @@ static uint32_t controller(void) {
 
 static int read_pad(int chan, uint32_t* held) {
     if (chan != 0) return 0;
-    *held = keyboard() | controller();
+    *held = keyboard() | mouse() | controller();
     return 1;
 }
 
@@ -119,4 +183,5 @@ void input_init(void) {
     }
     g_host_pad_read = read_pad;
     g_host_pad_rumble = rumble;
+    g_host_mouse_read = read_mouse;
 }

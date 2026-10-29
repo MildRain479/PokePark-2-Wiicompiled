@@ -28,3 +28,7 @@ enum {
 extern int (*g_host_pad_read)(int chan, uint32_t* held);
 /* Turns the rumble motor of remote chan on or off. */
 extern void (*g_host_pad_rumble)(int chan, int on);
+/* Mouse movement since the last call, in pixels (x right, y down), while
+ * the mouse is captured for the camera; 0 otherwise. Set by the platform
+ * layer, read by the camera patch (hle_camera.c). */
+extern void (*g_host_mouse_read)(float* dx, float* dy);
