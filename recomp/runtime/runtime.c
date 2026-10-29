@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>
 #else
 #include <sys/mman.h>
 #include <time.h>
@@ -270,13 +271,53 @@ void ppc_mtspr(ppc_t* c, int spr, uint32_t v) {
 }
 
 /* The time base runs at a quarter of the 243 MHz bus clock. */
+/* The time base follows the host clock. It is read very often (every
+ * check for a due interrupt, which the game makes each time it enables
+ * them), so where the CPU's timestamp counter runs at a fixed rate it is
+ * read from that (a few nanoseconds), at a rate measured against the
+ * performance counter over the first second; until then, and on CPUs
+ * without one, from the performance counter itself. Only the game's
+ * thread reads it. */
+#ifdef _WIN32
+static int invariant_tsc(void) {
+    int r[4];
+    __cpuid(r, 0x80000000);
+    if ((unsigned)r[0] < 0x80000007u) return 0;
+    __cpuid(r, 0x80000007);
+    return (r[3] >> 8) & 1;
+}
+#endif
+
 uint64_t ppc_timebase(void) {
     uint64_t ticks;
 #ifdef _WIN32
-    LARGE_INTEGER now, freq;
+    enum { UNSET, COUNTER, MEASURING, TSC };
+    static int mode;
+    static double scale, perTsc;
+    static uint64_t tsc0, tb0;
+    static LONGLONG qpc0;
+    LARGE_INTEGER now;
+    uint64_t tsc;
+    if (mode == TSC) return tb0 + (uint64_t)((double)(__rdtsc() - tsc0) * perTsc);
+    if (mode == UNSET) {
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        scale = 60750000.0 / (double)freq.QuadPart;
+        mode = invariant_tsc() ? MEASURING : COUNTER;
+        QueryPerformanceCounter(&now);
+        tsc0 = __rdtsc();
+        qpc0 = now.QuadPart;
+    }
     QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    ticks = (uint64_t)((double)now.QuadPart * (60750000.0 / (double)freq.QuadPart));
+    tsc = __rdtsc();
+    ticks = (uint64_t)((double)now.QuadPart * scale);
+    if (mode == MEASURING && (double)(now.QuadPart - qpc0) * scale >= 60750000.0 && tsc > tsc0) {
+        /* Carries on from this reading, so the time base never steps. */
+        perTsc = (double)(now.QuadPart - qpc0) * scale / (double)(tsc - tsc0);
+        tsc0 = tsc;
+        tb0 = ticks;
+        mode = TSC;
+    }
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

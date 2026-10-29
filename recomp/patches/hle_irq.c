@@ -227,23 +227,27 @@ void hle_deliver(ppc_t* c) {
 
 /* Waits until the time base reaches deadline. Sleep() wakes on the
  * system timer tick (15.6 ms by default), up to a tick late. A
- * high-resolution waitable timer wakes within a fraction of a millisecond;
- * it is set a quarter millisecond early and a short spin covers the rest,
- * which keeps frames on time even on a busy machine for little CPU. */
+ * high-resolution waitable timer wakes within a fraction of a millisecond
+ * (0.3 ms late on average here). For a deadline the game's frames hang on
+ * (the retrace and its alarms), it is set a quarter millisecond early and
+ * a short spin covers the rest: without that, the 60 fps screens dropped
+ * to 49 fps. The device timers (sound every 3 ms, the remote every 5 ms)
+ * catch up on lateness, so for them it just sleeps: they are over half
+ * the wakes, and spinning for them cost a sixth of a core. */
 #define SPIN_TICKS (PPC_TB_HZ / 4000) /* 0.25 ms */
-static void sleep_until_inner(uint64_t deadline);
+static void sleep_until_inner(uint64_t deadline, int precise);
 
 /* Time spent waiting here, in time-base ticks (for the busy share the fps
  * line shows). */
 uint64_t g_wait_ticks;
 
-static void sleep_until(uint64_t deadline) {
+static void sleep_until(uint64_t deadline, int precise) {
     uint64_t start = ppc_timebase();
-    sleep_until_inner(deadline);
+    sleep_until_inner(deadline, precise);
     g_wait_ticks += ppc_timebase() - start;
 }
 
-static void sleep_until_inner(uint64_t deadline) {
+static void sleep_until_inner(uint64_t deadline, int precise) {
 #ifdef _WIN32
     static HANDLE timer;
     if (!timer) {
@@ -251,19 +255,22 @@ static void sleep_until_inner(uint64_t deadline) {
         if (!timer) timer = CreateWaitableTimerW(NULL, FALSE, NULL);
     }
     for (;;) {
-        int64_t left = (int64_t)(deadline - ppc_timebase());
+        int64_t left = (int64_t)(deadline - ppc_timebase()), early = precise ? (int64_t)SPIN_TICKS : 0;
         if (left <= 0) return;
-        if (left > (int64_t)SPIN_TICKS) {
+        if (left > early) {
             /* In 100 ns units, negative for a relative time. */
             LARGE_INTEGER due;
-            due.QuadPart = -((left - (int64_t)SPIN_TICKS) * 10000000 / (int64_t)PPC_TB_HZ);
+            due.QuadPart = -((left - early) * 10000000 / (int64_t)PPC_TB_HZ);
+            if (due.QuadPart == 0) due.QuadPart = -1;
             if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
             else Sleep(1);
+            if (!precise) return;
         } else {
             YieldProcessor();
         }
     }
 #else
+    (void)precise;
     while ((int64_t)(deadline - ppc_timebase()) > 0) {}
 #endif
 }
@@ -272,6 +279,7 @@ int hle_wait_for_event(ppc_t* c) {
     uint64_t deadline = 0, dec;
     int have = 0;
     if (sHead == sTail && !dec_expired() && !retrace_due() && timer_due() < 0) {
+        int precise = 1;
         if (ppc_dec_deadline(&dec)) {
             deadline = dec;
             have = 1;
@@ -286,11 +294,12 @@ int hle_wait_for_event(ppc_t* c) {
                 if (sTimers[i].active && (!have || (int64_t)(sTimers[i].next - deadline) < 0)) {
                     deadline = sTimers[i].next;
                     have = 1;
+                    precise = 0;
                 }
             }
         }
         if (!have) return 0;
-        sleep_until(deadline);
+        sleep_until(deadline, precise);
     }
     hle_deliver(c);
     return 1;
