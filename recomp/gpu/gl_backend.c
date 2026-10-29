@@ -49,11 +49,17 @@ typedef ptrdiff_t GLintptr;
 #define GL_MIRRORED_REPEAT 0x8370
 #define GL_FUNC_ADD 0x8006
 #define GL_FUNC_REVERSE_SUBTRACT 0x800B
+#define GL_UNIFORM_BUFFER 0x8A11
+#define GL_DYNAMIC_DRAW 0x88E8
 
 #define GL_FUNCS(X) \
     X(void, glGenBuffers, (GLsizei, GLuint*)) \
     X(void, glBindBuffer, (GLenum, GLuint)) \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void*, GLenum)) \
+    X(void, glBufferSubData, (GLenum, GLintptr, GLsizeiptr, const void*)) \
+    X(void, glBindBufferBase, (GLenum, GLuint, GLuint)) \
+    X(GLuint, glGetUniformBlockIndex, (GLuint, const GLchar*)) \
+    X(void, glUniformBlockBinding, (GLuint, GLuint, GLuint)) \
     X(void, glGenVertexArrays, (GLsizei, GLuint*)) \
     X(void, glBindVertexArray, (GLuint)) \
     X(void, glEnableVertexAttribArray, (GLuint)) \
@@ -101,15 +107,114 @@ static void load_gl(void) {
 /* ------------------------------------------------------------------------ */
 /* Shaders */
 
+#define STR2(x) #x
+#define STR(x) STR2(x)
+#define GX_XF_WORDS_STR STR(GX_XF_WORDS)
+#define GX_XF_MEM_WORDS_STR STR(GX_XF_MEM_WORDS)
+
+/* The GPU's transform unit (XF), per vertex: position and normal
+ * transform by the vertex's matrices, projection, the two color channels
+ * with lighting, and texture coordinate generation. All state comes from
+ * the XF memory and registers (gx.h), in a uniform buffer.
+ *
+ * Lighting follows the hardware model as Dolphin documents it: a lit
+ * channel is material * clamp(ambient + sum of its lights), where each
+ * light contributes color * attenuation * diffuse term; attenuation is
+ * none, specular or spot, the diffuse term none, signed or clamped
+ * N.L. */
 static const char* kVertexShader =
     "#version 330 compatibility\n"
-    "in vec4 a_pos; in vec4 a_col0; in vec4 a_col1;\n"
-    "in vec3 a_tex0, a_tex1, a_tex2, a_tex3, a_tex4, a_tex5, a_tex6, a_tex7;\n"
+    "layout(std140) uniform XF { uvec4 xfm[" GX_XF_WORDS_STR " / 4]; };\n"
+    "in vec4 a_mtx0, a_mtx1, a_mtx2; in vec3 a_pos, a_nrm; in vec4 a_col0, a_col1;\n"
+    "in vec4 a_tex01, a_tex23, a_tex45, a_tex67;\n"
     "out vec4 v_col0; out vec4 v_col1; out vec3 v_tex[8];\n"
+    "uint xw(int a) { int i = a < 0x1000 ? a : a - 0x1000 + " GX_XF_MEM_WORDS_STR "; return xfm[i >> 2][i & 3]; }\n"
+    "float xfl(int a) { return uintBitsToFloat(xw(a)); }\n"
+    "vec4 row(int a) { return uintBitsToFloat(xfm[a >> 2]); }\n" /* rows of 4 start on multiples of 4 */
+    "vec3 vec3at(int a) { return vec3(xfl(a), xfl(a + 1), xfl(a + 2)); }\n"
+    "vec4 unpack(uint c) { return vec4(float((c >> 24) & 255u), float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0; }\n"
+    "vec4 light(int j, uint ctrl, vec3 pos, vec3 n) {\n"
+    "  int b = 0x600 + j * 16;\n"
+    "  vec3 cosatt = vec3at(b + 4), distatt = vec3at(b + 7), lpos = vec3at(b + 10), ldirv = vec3at(b + 13);\n"
+    "  uint dfn = (ctrl >> 7) & 3u, afn = (ctrl >> 9) & 3u;\n"
+    "  vec3 ldir; float attn;\n"
+    "  if (afn == 1u) {\n" /* specular */
+    "    ldir = normalize(lpos - pos);\n"
+    "    attn = dot(n, ldir) >= 0.0 ? max(0.0, dot(n, ldirv)) : 0.0;\n"
+    "    vec3 da = dfn == 0u ? distatt : normalize(distatt);\n"
+    "    attn = max(0.0, dot(cosatt, vec3(1.0, attn, attn * attn))) / dot(da, vec3(1.0, attn, attn * attn));\n"
+    "  } else if (afn == 3u) {\n" /* spot */
+    "    vec3 d = lpos - pos; float dist2 = dot(d, d), dist = sqrt(dist2); ldir = d / dist;\n"
+    "    attn = max(0.0, dot(ldir, ldirv));\n"
+    "    attn = max(0.0, cosatt.x + cosatt.y * attn + cosatt.z * attn * attn) / dot(distatt, vec3(1.0, dist, dist2));\n"
+    "  } else {\n" /* none, directional */
+    "    vec3 d = lpos - pos; ldir = length(d) == 0.0 ? n : normalize(d); attn = 1.0;\n"
+    "  }\n"
+    "  float diff = dfn == 0u ? 1.0 : (dfn == 1u ? dot(ldir, n) : max(0.0, dot(ldir, n)));\n"
+    "  return attn * diff * unpack(xw(b + 3));\n"
+    "}\n"
+    "vec4 lights(uint ctrl, vec3 pos, vec3 n) {\n"
+    "  uint mask = ((ctrl >> 2) & 15u) | (((ctrl >> 11) & 15u) << 4);\n"
+    "  vec4 sum = vec4(0.0);\n"
+    "  for (int j = 0; j < 8; j++) if ((mask & (1u << uint(j))) != 0u) sum += light(j, ctrl, pos, n);\n"
+    "  return sum;\n"
+    "}\n"
+    "vec4 channel(int i, vec4 vcol, vec3 pos, vec3 n) {\n"
+    "  uint cc = xw(0x100E + i), ac = xw(0x1010 + i);\n"
+    "  vec4 matr = unpack(xw(0x100C + i)), ambr = unpack(xw(0x100A + i)), r;\n"
+    "  vec3 mat = (cc & 1u) != 0u ? vcol.rgb : matr.rgb;\n"
+    "  if ((cc & 2u) != 0u) {\n"
+    "    vec3 amb = (cc & 64u) != 0u ? vcol.rgb : ambr.rgb;\n"
+    "    r.rgb = mat * clamp(amb + lights(cc, pos, n).rgb, 0.0, 1.0);\n"
+    "  } else r.rgb = mat;\n"
+    "  float mata = (ac & 1u) != 0u ? vcol.a : matr.a;\n"
+    "  if ((ac & 2u) != 0u) {\n"
+    "    float amba = (ac & 64u) != 0u ? vcol.a : ambr.a;\n"
+    "    r.a = mata * clamp(amba + lights(ac, pos, n).a, 0.0, 1.0);\n"
+    "  } else r.a = mata;\n"
+    "  return clamp(r, 0.0, 1.0);\n"
+    "}\n"
+    "int texmtx(int i) { return int(i < 3 ? a_mtx0[i + 1] : i < 7 ? a_mtx1[i - 3] : a_mtx2.x); }\n"
+    "vec2 texin(int i) { vec4 p = i < 2 ? a_tex01 : i < 4 ? a_tex23 : i < 6 ? a_tex45 : a_tex67; return (i & 1) == 0 ? p.xy : p.zw; }\n"
     "void main() {\n"
-    "  gl_Position = a_pos; v_col0 = a_col0; v_col1 = a_col1;\n"
-    "  v_tex[0] = a_tex0; v_tex[1] = a_tex1; v_tex[2] = a_tex2; v_tex[3] = a_tex3;\n"
-    "  v_tex[4] = a_tex4; v_tex[5] = a_tex5; v_tex[6] = a_tex6; v_tex[7] = a_tex7;\n"
+    "  int pn = int(a_mtx0.x);\n"
+    "  vec4 in4 = vec4(a_pos, 1.0);\n"
+    "  vec3 world = vec3(dot(row(pn * 4), in4), dot(row(pn * 4 + 4), in4), dot(row(pn * 4 + 8), in4));\n"
+    "  int nb = 0x400 + (pn & 31) * 3;\n"
+    "  vec3 n = vec3(dot(vec3at(nb), a_nrm), dot(vec3at(nb + 3), a_nrm), dot(vec3at(nb + 6), a_nrm));\n"
+    "  if (dot(n, n) > 0.0) n = normalize(n);\n"
+    "  float p0 = xfl(0x1020), p1 = xfl(0x1021), p2 = xfl(0x1022), p3 = xfl(0x1023), p4 = xfl(0x1024), p5 = xfl(0x1025);\n"
+    "  vec4 clip = xw(0x1026) == 0u\n"
+    "    ? vec4(p0 * world.x + p1 * world.z, p2 * world.y + p3 * world.z, p4 * world.z + p5, -world.z)\n"
+    "    : vec4(p0 * world.x + p1, p2 * world.y + p3, p4 * world.z + p5, 1.0);\n"
+    /* GX depth runs from -w (near) to 0 (far); GL wants -w..w. */
+    "  gl_Position = vec4(clip.x, clip.y, 2.0 * clip.z + clip.w, clip.w);\n"
+    "  v_col0 = channel(0, a_col0, world, n);\n"
+    "  v_col1 = channel(1, a_col1, world, n);\n"
+    "  int ntex = int(xw(0x103F) & 15u);\n"
+    "  bool dual = (xw(0x1012) & 1u) != 0u;\n"
+    "  for (int i = 0; i < 8; i++) {\n"
+    "    if (i >= ntex) { v_tex[i] = vec3(0.0, 0.0, 1.0); continue; }\n"
+    "    uint info = xw(0x1040 + i);\n"
+    "    int src_row = int((info >> 7) & 31u), type = int((info >> 4) & 7u);\n"
+    "    vec4 src = vec4(0.0, 0.0, 1.0, 1.0);\n"
+    "    if (src_row == 0) src = in4;\n"
+    "    else if (src_row == 1) src.xyz = a_nrm;\n"
+    "    else if (src_row >= 5 && src_row <= 12) src.xy = texin(src_row - 5);\n"
+    "    vec3 stq;\n"
+    "    if (type == 0) {\n"
+    "      int m = texmtx(i) * 4;\n"
+    "      stq = vec3(dot(row(m), src), dot(row(m + 4), src), ((info >> 1) & 1u) != 0u ? dot(row(m + 8), src) : 1.0);\n"
+    "    } else stq = vec3(src.xy, 1.0);\n"
+    "    if (dual) {\n" /* post-transform */
+    "      uint pt = xw(0x1050 + i);\n"
+    "      vec4 v = vec4(stq, 1.0);\n"
+    "      if (((pt >> 8) & 1u) != 0u && dot(v.xyz, v.xyz) > 0.0) v.xyz = normalize(v.xyz);\n"
+    "      int m = 0x500 + int(pt & 63u) * 4;\n"
+    "      stq = vec3(dot(row(m), v), dot(row(m + 4), v), dot(row(m + 8), v));\n"
+    "    }\n"
+    "    v_tex[i] = stq;\n"
+    "  }\n"
     "}\n";
 
 /* TEV: each stage computes, per color channel and for alpha,
@@ -216,7 +321,37 @@ static const char* kFragmentShader =
     "  o_color = last;\n"
     "}\n";
 
-static GLuint sProgram, sVao, sVbo;
+extern volatile long g_in_gl;
+static void print_gl_stats(void);
+
+/* Time and calls per entry point, for RECOMP_FPS=1. */
+enum { GLK_TEXTURE, GLK_TEXTURE_UPDATE, GLK_DRAW, GLK_CLEAR, GLK_COPY, GLK_PRESENT, GL_KINDS };
+static const char* const kGlKind[GL_KINDS] = {"texture", "update", "draw", "clear", "copy", "present"};
+static LONGLONG sGlTicks[GL_KINDS];
+static unsigned sGlCalls[GL_KINDS];
+
+static LONGLONG qpc(void) {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+#define GL_ENTER() LONGLONG t0_ = (g_in_gl = 1, qpc())
+#define GL_LEAVE(kind) (sGlTicks[kind] += qpc() - t0_, sGlCalls[kind]++, g_in_gl = 0)
+
+/* Prints and resets the per-entry-point totals. */
+static void print_gl_stats(void) {
+    LARGE_INTEGER f;
+    int k;
+    QueryPerformanceFrequency(&f);
+    fprintf(stderr, "  gl:");
+    for (k = 0; k < GL_KINDS; k++) {
+        fprintf(stderr, " %s %u calls %.0f ms%s", kGlKind[k], sGlCalls[k], sGlTicks[k] * 1000.0 / f.QuadPart,
+                k + 1 < GL_KINDS ? "," : "\n");
+        sGlTicks[k] = 0;
+        sGlCalls[k] = 0;
+    }
+}
+static GLuint sProgram, sVao, sVbo, sXfUbo;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef;
 
 static GLuint compile(GLenum type, const char* src) {
@@ -235,8 +370,8 @@ static GLuint compile(GLenum type, const char* src) {
 }
 
 static void build_program(void) {
-    static const char* attribs[] = {"a_pos", "a_col0", "a_col1", "a_tex0", "a_tex1", "a_tex2",
-                                    "a_tex3", "a_tex4", "a_tex5", "a_tex6", "a_tex7"};
+    static const char* attribs[] = {"a_mtx0", "a_mtx1", "a_mtx2", "a_pos", "a_nrm", "a_col0",
+                                    "a_col1", "a_tex01", "a_tex23", "a_tex45", "a_tex67"};
     GLint ok;
     int i;
     sProgram = p_glCreateProgram();
@@ -274,16 +409,29 @@ static void build_program(void) {
     p_glBindVertexArray(sVao);
     p_glGenBuffers(1, &sVbo);
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    p_glEnableVertexAttribArray(0);
-    p_glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, pos));
-    p_glEnableVertexAttribArray(1);
-    p_glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
-    p_glEnableVertexAttribArray(2);
-    p_glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
-    for (i = 0; i < 8; i++) {
-        p_glEnableVertexAttribArray(3 + i);
-        p_glVertexAttribPointer(3 + i, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, tex) + i * 3 * sizeof(float)));
+    for (i = 0; i < 3; i++) {
+        p_glEnableVertexAttribArray(i);
+        p_glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, mtx) + i * 4 * sizeof(float)));
     }
+    p_glEnableVertexAttribArray(3);
+    p_glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, pos));
+    p_glEnableVertexAttribArray(4);
+    p_glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, nrm));
+    p_glEnableVertexAttribArray(5);
+    p_glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
+    p_glEnableVertexAttribArray(6);
+    p_glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
+    for (i = 0; i < 4; i++) {
+        p_glEnableVertexAttribArray(7 + i);
+        p_glVertexAttribPointer(7 + i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, tex) + i * 4 * sizeof(float)));
+    }
+
+    /* The XF state, for the vertex shader. */
+    p_glGenBuffers(1, &sXfUbo);
+    p_glBindBuffer(GL_UNIFORM_BUFFER, sXfUbo);
+    p_glBufferData(GL_UNIFORM_BUFFER, GX_XF_WORDS * 4, NULL, GL_DYNAMIC_DRAW);
+    p_glUniformBlockBinding(sProgram, p_glGetUniformBlockIndex(sProgram, "XF"), 0);
+    p_glBindBufferBase(GL_UNIFORM_BUFFER, 0, sXfUbo);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -364,7 +512,7 @@ void gxb_init(void) {
 
 static GLint wrap_mode(int w) { return w == 0 ? GL_CLAMP_TO_EDGE : (w == 1 ? GL_REPEAT : GL_MIRRORED_REPEAT); }
 
-uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear) {
+static uint32_t gxb_texture_gl(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear) {
     GLuint t;
     (void)key;
     glGenTextures(1, &t);
@@ -377,7 +525,7 @@ uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, i
     return t;
 }
 
-void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba) {
+static void gxb_texture_update_gl(uint32_t handle, int width, int height, const uint8_t* rgba) {
     glBindTexture(GL_TEXTURE_2D, handle);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
 }
@@ -406,7 +554,7 @@ static const GLenum kBlendDst[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_
                                     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
 
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count) {
+static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int count) {
     GLint cin[64], ain[64], cop[64], aop[64], map[64], sel[64], swap[16], alpha[4];
     GLfloat reg[16], konst[16], aref[4];
     int i;
@@ -499,12 +647,18 @@ void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count) {
     glScissor(st->scissor[0] * sScale, (EFB_H - st->scissor[3]) * sScale, (st->scissor[2] - st->scissor[0]) * sScale,
               (st->scissor[3] - st->scissor[1]) * sScale);
 
+    if (st->xf && st->xf_dirty_lo < st->xf_dirty_hi) {
+        /* Only the XF words written since the last draw. */
+        p_glBindBuffer(GL_UNIFORM_BUFFER, sXfUbo);
+        p_glBufferSubData(GL_UNIFORM_BUFFER, (GLintptr)st->xf_dirty_lo * 4,
+                          (GLsizeiptr)(st->xf_dirty_hi - st->xf_dirty_lo) * 4, st->xf + st->xf_dirty_lo);
+    }
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(GXVertex), v, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, count);
 }
 
-void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
+static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GLbitfield mask = 0;
     p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
     glDisable(GL_SCISSOR_TEST);
@@ -530,7 +684,7 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
+static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
     CopyTarget* t = NULL;
     int i;
     (void)fmt;
@@ -587,7 +741,7 @@ static void dump_bmp(const char* path, int w, int h) {
     free(px);
 }
 
-void gxb_present(int x, int y, int cw, int ch) {
+static void gxb_present_gl(int x, int y, int cw, int ch) {
     RECT r;
     MSG msg;
     int w, h;
@@ -636,9 +790,18 @@ void gxb_present(int x, int y, int cw, int ch) {
             char title[96];
             double fps = frames * (double)freq.QuadPart / (now.QuadPart - since.QuadPart);
             const char* e = getenv("RECOMP_FPS");
-            snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms", fps, worst);
+            /* The share of the second the game thread was not waiting
+             * for an event: how much headroom is left. */
+            extern uint64_t g_wait_ticks;
+            static uint64_t lastWait;
+            double secs = (double)(now.QuadPart - since.QuadPart) / freq.QuadPart;
+            double busy = 100.0 * (1.0 - (double)(g_wait_ticks - lastWait) / PPC_TB_HZ / secs);
+            lastWait = g_wait_ticks;
+            snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
+                     worst, busy);
             SetWindowTextA(sWnd, title);
-            if (e && *e == '1') fprintf(stderr, "fps: %.2f, slowest frame %.1f ms\n", fps, worst);
+            if (e && *e == '1') fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%\n", fps, worst, busy);
+            if (e && *e == '1') print_gl_stats();
             since = now;
             frames = 0;
             worst = 0;
@@ -648,4 +811,48 @@ void gxb_present(int x, int y, int cw, int ch) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Entry points. Each marks the thread as inside OpenGL, so the sampling
+ * profiler (boot.c) doesn't hold it suspended inside the driver. */
+
+volatile long g_in_gl;
+
+uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear) {
+    uint32_t r;
+    GL_ENTER();
+    r = gxb_texture_gl(key, width, height, rgba, wrap_s, wrap_t, linear);
+    GL_LEAVE(GLK_TEXTURE);
+    return r;
+}
+
+void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba) {
+    GL_ENTER();
+    gxb_texture_update_gl(handle, width, height, rgba);
+    GL_LEAVE(GLK_TEXTURE_UPDATE);
+}
+
+void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count) {
+    GL_ENTER();
+    gxb_draw_triangles_gl(st, v, count);
+    GL_LEAVE(GLK_DRAW);
+}
+
+void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
+    GL_ENTER();
+    gxb_clear_gl(color, alpha, depth, rgba, z);
+    GL_LEAVE(GLK_CLEAR);
+}
+
+void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
+    GL_ENTER();
+    gxb_copy_to_texture_gl(addr, x, y, w, h, fmt, clear);
+    GL_LEAVE(GLK_COPY);
+}
+
+void gxb_present(int x, int y, int cw, int ch) {
+    GL_ENTER();
+    gxb_present_gl(x, y, cw, ch);
+    GL_LEAVE(GLK_PRESENT);
 }

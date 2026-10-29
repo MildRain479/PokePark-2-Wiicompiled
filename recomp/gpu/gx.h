@@ -11,12 +11,23 @@
 
 #include "ppc.h"
 
-/* One vertex after transformation, ready for the backend. */
+/* One vertex as the game sent it, before transformation: the backend's
+ * vertex shader transforms it with the XF state (matrices, lights,
+ * texture coordinate generation), as the GPU's transform unit does. */
 typedef struct GXVertex {
-    float pos[4];      /* clip space, GL convention */
-    float color[2][4]; /* rasterized channels 0 and 1, RGBA 0..1 */
-    float tex[8][3];   /* texture coordinates s, t, q */
+    float mtx[12];     /* position matrix index, texture matrix indices 0..7, unused */
+    float pos[3];      /* object space */
+    float nrm[3];
+    float color[2][4]; /* vertex colors 0 and 1, RGBA 0..1 (1 when absent) */
+    float tex[8][2];   /* texture coordinates as sent */
 } GXVertex;
+
+/* The XF state as the vertex shader reads it: XF memory words 0x000-0x67F
+ * (matrices, normal matrices, post-transform matrices, lights) followed by
+ * XF registers 0x1000-0x105F. */
+#define GX_XF_MEM_WORDS 0x680
+#define GX_XF_REG_WORDS 0x60
+#define GX_XF_WORDS (GX_XF_MEM_WORDS + GX_XF_REG_WORDS)
 
 /* One TEV stage, unpacked from the BP registers. */
 typedef struct GXTevStage {
@@ -43,6 +54,8 @@ typedef struct GXDrawState {
     int cull_mode;
     float viewport[6];     /* x, y, width, height, near, far in EFB pixels */
     int scissor[4];        /* x0, y0, x1, y1 */
+    const uint32_t* xf;    /* GX_XF_WORDS words, laid out as above */
+    int xf_dirty_lo, xf_dirty_hi; /* words changed since the last draw (lo >= hi: none) */
 } GXDrawState;
 
 /* Backend interface. */

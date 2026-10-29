@@ -33,26 +33,40 @@ static uint32_t gWatchPhys, gWatchLen;
 static uint8_t* gWatchPage;
 static DWORD gGameThreadId;
 
-/* Prints the faulting thread's host call stack, with symbol names. */
-static void host_backtrace(void) {
-    void* frames[32];
-    USHORT n = CaptureStackBackTrace(1, 32, frames, NULL), i;
+/* Prints the faulting code's host call stack, with symbol names, walked
+ * from the context the exception was raised in. */
+static void host_backtrace(const CONTEXT* fault) {
+    CONTEXT ctx = *fault;
+    STACKFRAME64 frame;
+    HANDLE proc = GetCurrentProcess(), thread = GetCurrentThread();
+    int depth;
     union {
         SYMBOL_INFO info;
         char buf[sizeof(SYMBOL_INFO) + 128];
     } sym;
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    SymInitialize(proc, NULL, TRUE);
+    memset(&frame, 0, sizeof(frame));
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
     fprintf(stderr, "host backtrace:\n");
-    for (i = 0; i < n; i++) {
+    for (depth = 0; depth < 40; depth++) {
         DWORD64 disp = 0;
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, &ctx, NULL, SymFunctionTableAccess64,
+                         SymGetModuleBase64, NULL) || !frame.AddrPC.Offset)
+            break;
         memset(&sym, 0, sizeof(sym));
         sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
         sym.info.MaxNameLen = 127;
-        if (SymFromAddr(GetCurrentProcess(), (DWORD64)(uintptr_t)frames[i], &disp, &sym.info))
-            fprintf(stderr, "  %p %s+0x%llx\n", frames[i], sym.info.Name, (unsigned long long)disp);
+        if (SymFromAddr(proc, frame.AddrPC.Offset, &disp, &sym.info))
+            fprintf(stderr, "  %016llX %s+0x%llx\n", (unsigned long long)frame.AddrPC.Offset, sym.info.Name,
+                    (unsigned long long)disp);
         else
-            fprintf(stderr, "  %p ?\n", frames[i]);
+            fprintf(stderr, "  %016llX ?\n", (unsigned long long)frame.AddrPC.Offset);
     }
 }
 
@@ -83,7 +97,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
             fprintf(stderr, "boot: host memory fault at %p (%s), on the %s thread\n", (void*)a,
                     r->ExceptionInformation[0] ? "write" : "read",
                     GetCurrentThreadId() == gGameThreadId ? "game" : "another");
-            host_backtrace();
+            host_backtrace(info->ContextRecord);
         }
         ppc_dump_trace();
         fflush(stderr);
@@ -122,6 +136,8 @@ static void dump_calls(int n) {
 
 #define MAX_SAMPLES 400000
 static HANDLE gGameThread;
+extern volatile long g_in_gl; /* gl_backend.c */
+#define SAMPLE_IN_GL 1 /* a sample taken while the game thread was inside OpenGL */
 static DWORD64 gSamples[MAX_SAMPLES];
 static volatile LONG gSampleCount;
 
@@ -132,6 +148,14 @@ static DWORD WINAPI profiler(LPVOID arg) {
     for (;;) {
         Sleep(1);
         if (SuspendThread(gGameThread) == (DWORD)-1) continue;
+        if (g_in_gl) {
+            /* Inside OpenGL: let it go at once (holding a thread
+             * suspended in the driver can crash it) and count the sample
+             * as graphics driver time. */
+            ResumeThread(gGameThread);
+            if (gSampleCount < MAX_SAMPLES) gSamples[gSampleCount++] = SAMPLE_IN_GL;
+            continue;
+        }
         ctx.ContextFlags = CONTEXT_CONTROL;
         if (GetThreadContext(gGameThread, &ctx) && gSampleCount < MAX_SAMPLES) gSamples[gSampleCount++] = ctx.Rip;
         ResumeThread(gGameThread);
@@ -165,7 +189,8 @@ static void dump_profile(void) {
         memset(&sym, 0, sizeof(sym));
         sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
         sym.info.MaxNameLen = 127;
-        if (SymFromAddr(GetCurrentProcess(), gSamples[i], &disp, &sym.info)) name = sym.info.Name;
+        if (gSamples[i] == SAMPLE_IN_GL) name = "gl (inside OpenGL)";
+        else if (SymFromAddr(GetCurrentProcess(), gSamples[i], &disp, &sym.info)) name = sym.info.Name;
         for (j = 0; j < used && strcmp(entries[j].name, name); j++) {}
         if (j == used) {
             if (used == 4096) continue;
@@ -176,6 +201,39 @@ static void dump_profile(void) {
     }
     qsort(entries, used, sizeof(entries[0]), by_count);
     fprintf(stderr, "profile: %d samples\n", n);
+    {
+        /* Totals by kind: recompiled game code, graphics, sound, waiting,
+         * and the rest (runtime helpers, HLE, the OS and drivers). */
+        static const struct { const char* kind; const char* names; } kKinds[] = {
+            {"game code", "f_"},
+            {"graphics", "run read_vertex read_comp read_color transform_vertex channel_color build_state draw gxb_ gx_ "
+                         "texture_for_map hash_bytes decode_ tex_ gl"},
+            {"sound", "mix_voice read_sample dsp_run_voices ai_frame push"},
+            {"waiting", "NtWaitForSingleObject ZwDelayExecution WaitForSingleObject RtlDelayExecution Sleep "
+                        "RtlQueryPerformanceCounter QueryPerformanceCounter ppc_timebase sleep_until"},
+        };
+        double share[5] = {0};
+        int k;
+        for (i = 0; i < used; i++) {
+            int kind = 4;
+            for (k = 0; k < 4 && kind == 4; k++) {
+                const char* p = kKinds[k].names;
+                while (*p) {
+                    size_t len = strcspn(p, " ");
+                    if (!strncmp(entries[i].name, p, len) && (p[len - 1] == '_' || p[0] == 'g' && p[1] == 'l' && len == 2 ||
+                                                              !entries[i].name[len] || entries[i].name[len] == '+')) {
+                        kind = k;
+                        break;
+                    }
+                    p += len;
+                    while (*p == ' ') p++;
+                }
+            }
+            share[kind] += 100.0 * entries[i].count / (n ? n : 1);
+        }
+        fprintf(stderr, "  by kind: game code %.1f%%, graphics %.1f%%, sound %.1f%%, waiting %.1f%%, other %.1f%%\n",
+                share[0], share[1], share[2], share[3], share[4]);
+    }
     for (i = 0; i < used && i < 60; i++) {
         uint32_t guest = 0;
         sscanf(entries[i].name, "f_%x", &guest);

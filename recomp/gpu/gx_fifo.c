@@ -13,6 +13,7 @@
  * Register layouts follow the hardware; see Dolphin's VideoCommon for a
  * reference description. */
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,27 @@ static uint32_t cp[256];
 static uint32_t bp[256];
 static uint32_t bp_mask = 0xFFFFFF;
 static uint32_t xf[0x1100];
+/* XF memory 0x000-0x67F and registers 0x1000-0x105F, packed for the vertex
+ * shader (gx.h), and the words written since the last draw. */
+static uint32_t sXfPacked[GX_XF_WORDS];
+static int sXfDirtyLo = 0, sXfDirtyHi = GX_XF_WORDS;
+
+static void flush_batch(void);
+
+static void xf_write(uint32_t addr, uint32_t value) {
+    int i;
+    if (addr >= 0x1100) return;
+    xf[addr] = value;
+    if (addr < GX_XF_MEM_WORDS) i = (int)addr;
+    else if (addr >= 0x1000 && addr < 0x1000 + GX_XF_REG_WORDS) i = GX_XF_MEM_WORDS + (int)(addr - 0x1000);
+    else return;
+    if (sXfPacked[i] == value) return;
+    /* The pending batch is drawn with the XF state as it is now. */
+    flush_batch();
+    sXfPacked[i] = value;
+    if (i < sXfDirtyLo) sXfDirtyLo = i;
+    if (i + 1 > sXfDirtyHi) sXfDirtyHi = i + 1;
+}
 static uint8_t tmem[1 << 20];
 
 static float xf_float(uint32_t addr) {
@@ -234,22 +256,16 @@ static const uint8_t* array_ptr(int array, uint32_t index) {
     return MA((cp[0xA0 + array] & 0x3FFFFFFF) + index * (cp[0xB0 + array] & 0xFF));
 }
 
-typedef struct RawVertex {
-    int pnmtx, texmtx[8];
-    float pos[3];
-    float nrm[3];
-    float col[2][4];
-    float tex[8][2];
-} RawVertex;
 
-static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, RawVertex* v) {
+static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, GXVertex* v) {
     int i;
     uint32_t mi_a = xf[0x1018], mi_b = xf[0x1019];
-    v->pnmtx = f->pnmtx ? *p++ : (int)(mi_a & 0x3F);
+    v->mtx[0] = (float)(f->pnmtx ? *p++ : (int)(mi_a & 0x3F));
     for (i = 0; i < 8; i++) {
         int def = i < 4 ? (int)((mi_a >> (6 + 6 * i)) & 0x3F) : (int)((mi_b >> (6 * (i - 4))) & 0x3F);
-        v->texmtx[i] = f->texmtx[i] ? *p++ : def;
+        v->mtx[1 + i] = (float)(f->texmtx[i] ? *p++ : def);
     }
+    v->mtx[9] = v->mtx[10] = v->mtx[11] = 0.0f;
     if (f->pos) {
         const uint8_t* src = p;
         int n = f->pos_cnt ? 3 : 2, cs = comp_size(f->pos_fmt);
@@ -261,6 +277,8 @@ static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, RawVerte
             p += cs * n;
         }
         for (i = 0; i < 3; i++) v->pos[i] = i < n ? read_comp(src + cs * i, f->pos_fmt, f->pos_shift) : 0.0f;
+    } else {
+        v->pos[0] = v->pos[1] = v->pos[2] = 0.0f;
     }
     if (f->nrm) {
         int cs = comp_size(f->nrm_fmt), shift = f->nrm_fmt == 1 ? 6 : f->nrm_fmt == 3 ? 14 : 0;
@@ -273,17 +291,19 @@ static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, RawVerte
             p += cs * (f->nrm_cnt ? 9 : 3);
         }
         for (i = 0; i < 3; i++) v->nrm[i] = read_comp(src + cs * i, f->nrm_fmt, shift);
+    } else {
+        v->nrm[0] = v->nrm[1] = v->nrm[2] = 0.0f;
     }
     for (i = 0; i < 2; i++) {
         if (f->col[i] == ATTR_DIRECT) {
-            read_color(p, f->col_fmt[i], v->col[i]);
+            read_color(p, f->col_fmt[i], v->color[i]);
             p += color_size(f->col_fmt[i]);
         } else if (f->col[i]) {
             uint32_t idx = f->col[i] == ATTR_INDEX8 ? *p : rd16(p);
             p += index_size(f->col[i]);
-            read_color(array_ptr(2 + i, idx), f->col_fmt[i], v->col[i]);
+            read_color(array_ptr(2 + i, idx), f->col_fmt[i], v->color[i]);
         } else {
-            v->col[i][0] = v->col[i][1] = v->col[i][2] = v->col[i][3] = 1.0f;
+            v->color[i][0] = v->color[i][1] = v->color[i][2] = v->color[i][3] = 1.0f;
         }
     }
     for (i = 0; i < 8; i++) {
@@ -303,116 +323,6 @@ static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, RawVerte
         for (k = 0; k < 2; k++) v->tex[i][k] = k < n ? read_comp(src + cs * k, f->tex_fmt[i], f->tex_shift[i]) : 0.0f;
     }
     return p;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Transform (XF) */
-
-static void mtx_row_dot(uint32_t row, const float in[4], float* out) {
-    *out = xf_float(row) * in[0] + xf_float(row + 1) * in[1] + xf_float(row + 2) * in[2] + xf_float(row + 3) * in[3];
-}
-
-static void unpack_rgba(uint32_t c, float out[4]) {
-    out[0] = ((c >> 24) & 0xFF) / 255.0f;
-    out[1] = ((c >> 16) & 0xFF) / 255.0f;
-    out[2] = ((c >> 8) & 0xFF) / 255.0f;
-    out[3] = (c & 0xFF) / 255.0f;
-}
-
-/* Rasterized color for channel i: material (register or vertex color),
- * times the lighting result when lighting is on. Lights are not
- * evaluated yet: a lit channel gets ambient + full diffuse. */
-static void channel_color(int i, const RawVertex* rv, float out[4]) {
-    uint32_t cc = xf[0x100E + i], ac = xf[0x1010 + i];
-    float mat[4], amb[4], vc[4];
-    int k;
-    memcpy(vc, rv->col[i], sizeof(vc));
-    unpack_rgba(xf[0x100C + i], mat);
-    unpack_rgba(xf[0x100A + i], amb);
-    if (cc & 1) memcpy(out, vc, 3 * sizeof(float));
-    else memcpy(out, mat, 3 * sizeof(float));
-    out[3] = (ac & 1) ? vc[3] : mat[3];
-    (void)amb;
-    for (k = 0; k < 4; k++) {
-        if (out[k] < 0) out[k] = 0;
-        if (out[k] > 1) out[k] = 1;
-    }
-}
-
-static void transform_vertex(const RawVertex* rv, GXVertex* out) {
-    float in[4] = {rv->pos[0], rv->pos[1], rv->pos[2], 1.0f}, world[4], clip[4];
-    uint32_t base = (uint32_t)rv->pnmtx * 4;
-    float p[6];
-    int i, num_tex = (int)(xf[0x103F] & 15);
-    mtx_row_dot(base, in, &world[0]);
-    mtx_row_dot(base + 4, in, &world[1]);
-    mtx_row_dot(base + 8, in, &world[2]);
-    world[3] = 1.0f;
-    for (i = 0; i < 6; i++) p[i] = xf_float(0x1020 + i);
-    if (xf[0x1026] == 0) { /* perspective */
-        clip[0] = p[0] * world[0] + p[1] * world[2];
-        clip[1] = p[2] * world[1] + p[3] * world[2];
-        clip[2] = p[4] * world[2] + p[5];
-        clip[3] = -world[2];
-    } else { /* orthographic */
-        clip[0] = p[0] * world[0] + p[1];
-        clip[1] = p[2] * world[1] + p[3];
-        clip[2] = p[4] * world[2] + p[5];
-        clip[3] = 1.0f;
-    }
-    /* GX depth runs from -w (near) to 0 (far); GL wants -w..w. */
-    out->pos[0] = clip[0];
-    out->pos[1] = clip[1];
-    out->pos[2] = 2.0f * clip[2] + clip[3];
-    out->pos[3] = clip[3];
-
-    channel_color(0, rv, out->color[0]);
-    channel_color(1, rv, out->color[1]);
-
-    for (i = 0; i < 8; i++) {
-        uint32_t info = xf[0x1040 + i];
-        int row = (info >> 7) & 31, type = (info >> 4) & 7, stq = (info >> 1) & 1;
-        float src[4] = {0, 0, 1, 1}, s, t, q = 1.0f;
-        if (i >= num_tex) {
-            out->tex[i][0] = out->tex[i][1] = 0;
-            out->tex[i][2] = 1;
-            continue;
-        }
-        if (row == 0) {
-            memcpy(src, in, sizeof(src));
-        } else if (row == 1) {
-            src[0] = rv->nrm[0];
-            src[1] = rv->nrm[1];
-            src[2] = rv->nrm[2];
-        } else if (row >= 5 && row <= 12) {
-            src[0] = rv->tex[row - 5][0];
-            src[1] = rv->tex[row - 5][1];
-        }
-        if (type == 0) {
-            uint32_t m = (uint32_t)rv->texmtx[i] * 4;
-            mtx_row_dot(m, src, &s);
-            mtx_row_dot(m + 4, src, &t);
-            if (stq) mtx_row_dot(m + 8, src, &q);
-        } else {
-            s = src[0];
-            t = src[1];
-        }
-        if (xf[0x1012] & 1) { /* post-transform ("dual tex") */
-            uint32_t pt = xf[0x1050 + i];
-            float v[4] = {s, t, q, 1.0f};
-            uint32_t m = 0x500 + (pt & 0x3F) * 4;
-            if ((pt >> 8) & 1) {
-                float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-                if (len > 0) { v[0] /= len; v[1] /= len; v[2] /= len; }
-            }
-            mtx_row_dot(m, v, &s);
-            mtx_row_dot(m + 4, v, &t);
-            mtx_row_dot(m + 8, v, &q);
-        }
-        out->tex[i][0] = s;
-        out->tex[i][1] = t;
-        out->tex[i][2] = q;
-    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -523,6 +433,7 @@ static uint32_t texture_for_map(int map) {
         if (e->handle && e->key == key) {
             /* Same texture, new contents (a movie frame, say): the key
              * covers size and sampling, so update it in place. */
+            flush_batch();
             gxb_texture_update(e->handle, width, height, rgba);
         } else {
             /* The way goes to another texture. The old one is freed (or
@@ -663,18 +574,49 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
         fprintf(stderr, " (%d); MATINDEX_A %08X, CP 0xAC %08X 0xBC %08X\n", nz, xf[0x1018], cp[0xAC], cp[0xBC]);
     }
     for (i = 0; i < n && i < 3; i++) {
-        fprintf(stderr, "   v%d pos %.3f %.3f %.3f %.3f col %.2f %.2f %.2f %.2f tex %.3f %.3f\n", i, v[i].pos[0], v[i].pos[1],
-                v[i].pos[2], v[i].pos[3], v[i].color[0][0], v[i].color[0][1], v[i].color[0][2], v[i].color[0][3],
-                v[i].tex[0][0], v[i].tex[0][1]);
+        fprintf(stderr, "   v%d mtx %.0f pos %.3f %.3f %.3f col %.2f %.2f %.2f %.2f tex %.3f %.3f\n", i, v[i].mtx[0],
+                v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].color[0][0], v[i].color[0][1], v[i].color[0][2],
+                v[i].color[0][3], v[i].tex[0][0], v[i].tex[0][1]);
     }
+}
+
+/* Batching: consecutive draws with the same state go to the backend as
+ * one. The game sends many small primitives (22,000 a frame in the park),
+ * and each backend draw costs far more than its vertices. A batch is
+ * drawn before anything that changes what it would look like: different
+ * state, an XF write (xf_write), a texture's contents changing
+ * (texture_for_map), or an EFB copy, clear or present (efb_copy). */
+static GXDrawState sBatchState;
+static GXVertex* sBatch;
+static int sBatchCount, sBatchCap;
+
+static void flush_batch(void) {
+    if (!sBatchCount) return;
+    gxb_draw_triangles(&sBatchState, sBatch, sBatchCount);
+    sBatchCount = 0;
 }
 
 static void emit(GXVertex* tri, int n) {
     GXDrawState st;
     if (n <= 0) return;
-    build_state(&st);
+    build_state(&st); /* may draw the pending batch, if a texture changes */
     if ((long)sFrame == sDebugFrame) debug_draw(&st, tri, n);
-    gxb_draw_triangles(&st, tri, n);
+    /* Everything but the XF fields, which build_state leaves zero. */
+    if (!sBatchCount || memcmp(&st, &sBatchState, offsetof(GXDrawState, xf)) != 0) {
+        flush_batch();
+        st.xf = sXfPacked;
+        st.xf_dirty_lo = sXfDirtyLo;
+        st.xf_dirty_hi = sXfDirtyHi;
+        sXfDirtyLo = GX_XF_WORDS;
+        sXfDirtyHi = 0;
+        sBatchState = st;
+    }
+    if (sBatchCount + n > sBatchCap) {
+        sBatchCap = (sBatchCount + n) * 2;
+        sBatch = (GXVertex*)realloc(sBatch, (size_t)sBatchCap * sizeof(GXVertex));
+    }
+    memcpy(sBatch + sBatchCount, tri, (size_t)n * sizeof(GXVertex));
+    sBatchCount += n;
     sDrawCount++;
 }
 
@@ -721,8 +663,7 @@ static void draw(int prim, const GXVertex* v, int count) {
 static void load_xf(uint32_t addr, const uint8_t* data, int count) {
     int i;
     for (i = 0; i < count; i++) {
-        uint32_t a = addr + (uint32_t)i;
-        if (a < 0x1100) xf[a] = rd32(data + 4 * i);
+        xf_write(addr + (uint32_t)i, rd32(data + 4 * i));
     }
 }
 
@@ -730,7 +671,7 @@ static void load_indexed_xf(int n, uint32_t value) {
     uint32_t index = value >> 16, len = ((value >> 12) & 15) + 1, addr = value & 0xFFF, i;
     const uint8_t* src = array_ptr(12 + n, index);
     for (i = 0; i < len; i++) {
-        if (addr + i < 0x1100) xf[addr + i] = rd32(src + 4 * i);
+        xf_write(addr + i, rd32(src + 4 * i));
     }
 }
 
@@ -769,6 +710,7 @@ static void efb_copy(uint32_t exec) {
         for (k = 0; k < 256; k++) if (sOpCount[k]) fprintf(stderr, " %02X:%u", k, sOpCount[k]);
         fputc(10, stderr);
     }
+    flush_batch();
     if (to_xfb) {
         LOG("frame %llu: copy to XFB %dx%d at (%d,%d), %u draws, %u vertices", (unsigned long long)sFrame, w, h, x, y,
             sDrawCount, sVertexCount);
@@ -807,8 +749,7 @@ static void bp_write(uint32_t v) {
 /* ------------------------------------------------------------------------ */
 /* Command parsing */
 
-static RawVertex* sRaw;
-static GXVertex* sXf;
+static GXVertex* sRaw;
 static int sRawCap;
 static unsigned sErrors;
 
@@ -827,8 +768,8 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
         } else if (op == 0x08) {
             if (left < 6) { *need = 6; break; }
             cp[c[1]] = rd32(c + 2);
-            if (c[1] == 0x30) xf[0x1018] = cp[0x30];
-            if (c[1] == 0x40) xf[0x1019] = cp[0x40];
+            if (c[1] == 0x30) xf_write(0x1018, cp[0x30]);
+            if (c[1] == 0x40) xf_write(0x1019, cp[0x40]);
             pos += 6;
         } else if (op == 0x10) {
             uint32_t h, n;
@@ -866,16 +807,14 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
             if (left < 3 + (size_t)count * f.size) { *need = 3 + (size_t)count * f.size; break; }
             if (count > sRawCap) {
                 sRawCap = count * 2;
-                sRaw = (RawVertex*)realloc(sRaw, sRawCap * sizeof(RawVertex));
-                sXf = (GXVertex*)realloc(sXf, sRawCap * sizeof(GXVertex));
+                sRaw = (GXVertex*)realloc(sRaw, sRawCap * sizeof(GXVertex));
             }
             vp = c + 3;
             for (i = 0; i < count; i++) {
                 vp = read_vertex(vp, &f, &sRaw[i]);
-                transform_vertex(&sRaw[i], &sXf[i]);
             }
             sVertexCount += (unsigned)count;
-            draw(op & 0xF8, sXf, count);
+            draw(op & 0xF8, sRaw, count);
             pos += 3 + (size_t)count * f.size;
         } else {
             if (sErrors++ < 20) {

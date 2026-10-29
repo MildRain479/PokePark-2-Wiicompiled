@@ -231,7 +231,19 @@ void hle_deliver(ppc_t* c) {
  * it is set a quarter millisecond early and a short spin covers the rest,
  * which keeps frames on time even on a busy machine for little CPU. */
 #define SPIN_TICKS (PPC_TB_HZ / 4000) /* 0.25 ms */
+static void sleep_until_inner(uint64_t deadline);
+
+/* Time spent waiting here, in time-base ticks (for the busy share the fps
+ * line shows). */
+uint64_t g_wait_ticks;
+
 static void sleep_until(uint64_t deadline) {
+    uint64_t start = ppc_timebase();
+    sleep_until_inner(deadline);
+    g_wait_ticks += ppc_timebase() - start;
+}
+
+static void sleep_until_inner(uint64_t deadline) {
 #ifdef _WIN32
     static HANDLE timer;
     if (!timer) {
