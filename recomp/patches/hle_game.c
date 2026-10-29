@@ -73,3 +73,31 @@ void hle_game_init(void) {
         ST32(kFrameStepConsts[i] + 4, f32_bits(step_const(2)));
     }
 }
+
+/* Movies: the scripts open one (ThpManager syscall 0, with a loop flag),
+ * then poll its state (syscall 5: 2 while playing, 3 once finished)
+ * before closing it. RECOMP_SKIP_MOVIES=1 reports a movie that doesn't
+ * loop as finished after about a second of playing, which skips the 56 s
+ * opening for testing; the looping title background plays as usual.
+ * (Reporting it finished at once closed the player while it was still
+ * starting, and the game then waited forever.) */
+enum { THP_SYS_OPEN = 0, THP_SYS_STATE = 5, THP_PLAYING = 2, THP_FINISHED = 3 };
+#define SKIP_AFTER_POLLS 60
+static int sMovieLoops, sMoviePolls;
+
+/* int ThpManager::virt0x18(int sub, u32* args) */
+void f_801776E0(ppc_t* c) {
+    static int skip = -1;
+    uint32_t sub = c->r[4], args = c->r[5];
+    if (skip < 0) {
+        const char* e = getenv("RECOMP_SKIP_MOVIES");
+        skip = e && *e && *e != '0';
+    }
+    if (sub == THP_SYS_OPEN) {
+        sMovieLoops = LD32(args + 4) != 0;
+        sMoviePolls = 0;
+    }
+    f_801776E0_orig(c);
+    if (sub == THP_SYS_STATE && skip && !sMovieLoops && c->r[3] == THP_PLAYING && ++sMoviePolls > SKIP_AFTER_POLLS)
+        c->r[3] = THP_FINISHED;
+}

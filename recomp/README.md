@@ -159,7 +159,11 @@ Diagnostics:
 - `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
   before the watchdog stops a run (for finding what a stuck game is
   polling).
-- `RECOMP_FPS=1` prints the frame rate and slowest frame every second.
+- `RECOMP_FPS=1` prints the frame rate, the slowest frame and how busy
+  the game thread was every second, with OpenGL calls and time per
+  entry point.
+- `RECOMP_SKIP_MOVIES=1` ends movies that don't loop after about a
+  second (the 56 s opening), for reaching the park quickly in tests.
 - `RECOMP_VI_HZ=<rate>` sets the video refresh and frame rate (default
   60; 59.94 is the Wii's).
 - `RECOMP_THP=orig` decodes THP movies with the game's own decoder;
@@ -260,8 +264,8 @@ Not implemented yet:
   This matters for bit-exact physics and replays; none of the current
   tests showed a difference.
 - **Performance.** Movies and menus hold 60 fps with frames on time
-  even with other programs loading the machine. The park's opening
-  scenes run at 15 fps: a frame takes about 41 ms of work against the
-  33 ms a 30 fps frame allows, so each one waits for the next slot. In general every register lives in memory (`c->r[n]`), and
+  even with other programs loading the machine; the park's opening runs
+  at its 30 fps target with the game thread about 40% busy. Gameplay
+  further in has not been measured yet. In general every register lives in memory (`c->r[n]`), and
   caching registers in locals per function is the usual next step.
   Gameplay has not been profiled yet.
