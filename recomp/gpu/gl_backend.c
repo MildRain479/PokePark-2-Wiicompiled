@@ -434,6 +434,77 @@ static void build_program(void) {
     p_glBindBufferBase(GL_UNIFORM_BUFFER, 0, sXfUbo);
 }
 
+/* EFB copies: a full-screen triangle that samples the EFB rectangle and
+ * converts it to the copy format, stored as the texture reads back. The
+ * value of a narrow format is truncated to its bits and expanded again,
+ * as the console's copy and texture fetch do. */
+static const char* kCopyVertexShader =
+    "#version 330 core\n"
+    "uniform vec4 u_src;\n"
+    "out vec2 v_uv;\n"
+    "void main() {\n"
+    "    vec2 p = vec2((gl_VertexID & 1) * 2, (gl_VertexID >> 1) * 2);\n"
+    "    v_uv = mix(u_src.xy, u_src.zw, p);\n"
+    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* kCopyFragmentShader =
+    "#version 330 core\n"
+    "in vec2 v_uv;\n"
+    "out vec4 o_color;\n"
+    "uniform sampler2D u_efb;\n"
+    "uniform ivec4 u_mode; /* copy format, intensity, EFB has alpha */\n"
+    "float bits(float v, int n) {\n"
+    "    float i = float(int(v * 255.0 + 0.5) >> (8 - n));\n"
+    "    return floor(i * 255.0 / float((1 << n) - 1) + 0.5) / 255.0;\n"
+    "}\n"
+    "void main() {\n"
+    "    vec4 c = texture(u_efb, v_uv);\n"
+    "    int f = u_mode.x;\n"
+    "    float i;\n"
+    "    if (u_mode.z == 0) c.a = 1.0;\n"
+    "    /* The intensity formats store luma (BT.601, studio range). */\n"
+    "    i = u_mode.y != 0 ? clamp(dot(c.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0) : c.r;\n"
+    "    if (f == 0) o_color = vec4(bits(i, 4));\n"
+    "    else if (f == 1 || f == 8) o_color = vec4(i);\n"
+    "    else if (f == 2) o_color = vec4(vec3(bits(i, 4)), bits(c.a, 4));\n"
+    "    else if (f == 3) o_color = vec4(vec3(i), c.a);\n"
+    "    else if (f == 4) o_color = vec4(bits(c.r, 5), bits(c.g, 6), bits(c.b, 5), 1.0);\n"
+    "    else if (f == 5 && c.a >= 224.0 / 255.0) o_color = vec4(bits(c.r, 5), bits(c.g, 5), bits(c.b, 5), 1.0);\n"
+    "    else if (f == 5) o_color = vec4(bits(c.r, 4), bits(c.g, 4), bits(c.b, 4), bits(c.a, 3));\n"
+    "    else if (f == 7) o_color = vec4(c.a);\n"
+    "    else if (f == 9) o_color = vec4(c.g);\n"
+    "    else if (f == 10) o_color = vec4(c.b);\n"
+    "    else if (f == 11) o_color = vec4(vec3(c.g), c.r); /* IA8 layout: A = R, I = G */\n"
+    "    else if (f == 12) o_color = vec4(vec3(c.b), c.g);\n"
+    "    else o_color = c;\n"
+    "}\n";
+
+static GLuint sCopyProgram, sCopyVao;
+static GLint uCopySrc, uCopyMode;
+
+static void build_copy_program(void) {
+    GLint ok;
+    sCopyProgram = p_glCreateProgram();
+    p_glAttachShader(sCopyProgram, compile(GL_VERTEX_SHADER, kCopyVertexShader));
+    p_glAttachShader(sCopyProgram, compile(GL_FRAGMENT_SHADER, kCopyFragmentShader));
+    p_glLinkProgram(sCopyProgram);
+    p_glGetProgramiv(sCopyProgram, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        p_glGetProgramInfoLog(sCopyProgram, sizeof(log), NULL, log);
+        fprintf(stderr, "gl: link error:\n%s\n", log);
+        exit(1);
+    }
+    p_glUseProgram(sCopyProgram);
+    p_glUniform1i(p_glGetUniformLocation(sCopyProgram, "u_efb"), 0);
+    uCopySrc = p_glGetUniformLocation(sCopyProgram, "u_src");
+    uCopyMode = p_glGetUniformLocation(sCopyProgram, "u_mode");
+    p_glGenVertexArrays(1, &sCopyVao);
+    p_glUseProgram(sProgram);
+    p_glBindVertexArray(sVao);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Window and EFB */
 
@@ -487,6 +558,7 @@ void gxb_init(void) {
     load_gl();
     fprintf(stderr, "gl: %s, %s\n", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     build_program();
+    build_copy_program();
 
     glGenTextures(1, &sEfbColor);
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
@@ -552,6 +624,14 @@ static const GLenum kBlendSrc[8] = {GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_
                                     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
 static const GLenum kBlendDst[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
                                     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+/* Without an alpha channel (RGB8 and RGB565 EFB formats) the EFB's
+ * alpha reads as 1: the bloom in Mew's intro weights its copies by it. */
+static GLenum blend_factor(GLenum f, int efb_alpha) {
+    if (efb_alpha) return f;
+    if (f == GL_DST_ALPHA) return GL_ONE;
+    if (f == GL_ONE_MINUS_DST_ALPHA) return GL_ZERO;
+    return f;
+}
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
 
 static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int count) {
@@ -623,13 +703,14 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
 
     if (st->blend_enable) {
         glEnable(GL_BLEND);
-        glBlendFunc(kBlendSrc[st->blend_src], kBlendDst[st->blend_dst]);
+        glBlendFunc(blend_factor(kBlendSrc[st->blend_src], st->efb_alpha),
+                    blend_factor(kBlendDst[st->blend_dst], st->efb_alpha));
         p_glBlendEquation(st->blend_subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD);
         if (st->blend_subtract) glBlendFunc(GL_ONE, GL_ONE);
     } else {
         glDisable(GL_BLEND);
     }
-    glColorMask(st->color_update, st->color_update, st->color_update, st->alpha_update);
+    glColorMask(st->color_update, st->color_update, st->color_update, st->alpha_update && st->efb_alpha);
     if (st->z_enable) {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(kDepthFunc[st->z_func]);
@@ -695,10 +776,11 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
-static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
+static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     CopyTarget* t = NULL;
     int i;
-    (void)clear;
+    GLint mode[4];
+    GLfloat src[4];
     for (i = 0; i < sTargetCount; i++) {
         if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) t = &sTargets[i];
     }
@@ -719,11 +801,32 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
         p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->tex, 0);
     }
-    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sEfbFbo);
-    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, t->fbo);
+    /* Row 0 of the texture is the top row of the rectangle. */
+    p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
     glDisable(GL_SCISSOR_TEST);
-    p_glBlitFramebuffer(x * sScale, (EFB_H - y) * sScale, (x + w) * sScale, (EFB_H - y - h) * sScale, 0, 0, w * sScale,
-                        h * sScale, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glViewport(0, 0, w * sScale, h * sScale);
+    p_glUseProgram(sCopyProgram);
+    p_glBindVertexArray(sCopyVao);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sEfbColor);
+    src[0] = (float)x / EFB_W;
+    src[1] = (float)(EFB_H - y) / EFB_H;
+    src[2] = (float)(x + w) / EFB_W;
+    src[3] = (float)(EFB_H - y - h) / EFB_H;
+    p_glUniform4fv(uCopySrc, 1, src);
+    mode[0] = fmt;
+    mode[1] = intensity;
+    mode[2] = efb_alpha;
+    mode[3] = 0;
+    p_glUniform4iv(uCopyMode, 1, mode);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    p_glUseProgram(sProgram);
+    p_glBindVertexArray(sVao);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
     gx_register_copy(addr, t->tex, w, h, fmt);
 }
 
@@ -855,9 +958,9 @@ void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GL_LEAVE(GLK_CLEAR);
 }
 
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
+void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     GL_ENTER();
-    gxb_copy_to_texture_gl(addr, x, y, w, h, fmt, clear);
+    gxb_copy_to_texture_gl(addr, x, y, w, h, fmt, intensity, efb_alpha);
     GL_LEAVE(GLK_COPY);
 }
 

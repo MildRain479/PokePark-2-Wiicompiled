@@ -54,6 +54,7 @@ typedef struct GXDrawState {
     int cull_mode;
     float viewport[6];     /* x, y, width, height, near, far in EFB pixels */
     int scissor[4];        /* x0, y0, x1, y1 */
+    int efb_alpha;         /* the EFB pixel format has an alpha channel (RGBA6_Z24) */
     const uint32_t* xf;    /* GX_XF_WORDS words, laid out as above */
     int xf_dirty_lo, xf_dirty_hi; /* words changed since the last draw (lo >= hi: none) */
 } GXDrawState;
@@ -66,7 +67,10 @@ void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* r
 void gxb_texture_free(uint32_t handle);
 void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count);
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int clear);
+/* Copies an EFB rectangle to a texture, converted to copy format `fmt`
+ * (exec bits 3-6) and stored as the game reads it back: an I8 copy as
+ * intensity in every channel, an RGB565 copy with opaque alpha. */
+void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha);
 /* Shows the EFB rectangle the game copied to the XFB. */
 void gxb_present(int x, int y, int w, int h);
 

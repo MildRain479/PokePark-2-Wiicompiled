@@ -603,6 +603,7 @@ static void build_state(GXDrawState* st) {
     st->z_enable = zmode & 1;
     st->z_func = (zmode >> 1) & 7;
     st->z_update = (zmode >> 4) & 1;
+    st->efb_alpha = (bp[0x43] & 7) == 1;
     st->cull_mode = (genmode >> 14) & 3;
     {
         float wd = xf_float(0x101A), ht = xf_float(0x101B), zr = xf_float(0x101C);
@@ -855,7 +856,7 @@ static void efb_copy(uint32_t exec) {
         sDrawCount = sVertexCount = 0;
     } else {
         int fmt = (int)(((exec >> 4) & 7) | (((exec >> 3) & 1) << 3));
-        gxb_copy_to_texture(dst, x, y, w, h, fmt, 0);
+        gxb_copy_to_texture(dst, x, y, w, h, fmt, (exec >> 15) & 1, (bp[0x43] & 7) == 1);
     }
     if (clear) {
         uint32_t rgba = ((bp[0x4F] & 0xFF) << 24) | (((bp[0x50] >> 8) & 0xFF) << 16) | ((bp[0x50] & 0xFF) << 8) |
