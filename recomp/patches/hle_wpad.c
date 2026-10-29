@@ -55,8 +55,7 @@ static int connected(int32_t chan) { return chan == 0 && sConnected; }
  * (up down left right a b 1 2 plus minus home shake; on-screen
  * directions), each held from its time until the next entry, timed from
  * the remote's first report. "4:2 4.2: 9:a 9.2:" presses 2 at 4 s and A at 9 s. */
-#define MAX_SCRIPT 64
-static struct { double t; uint32_t held; } sScript[MAX_SCRIPT];
+static struct ScriptEntry { double t; uint32_t held; } *sScript;
 static int sScriptLen = -1;
 
 static void load_script(void) {
@@ -67,15 +66,25 @@ static void load_script(void) {
         {"shake", HOST_PAD_SHAKE},
     };
     const char* p = getenv("RECOMP_PAD_SCRIPT");
+    int cap = 0;
     sScriptLen = 0;
-    while (p && *p && sScriptLen < MAX_SCRIPT) {
+    while (p && *p) {
         char* end;
         double t;
         uint32_t held = 0;
         while (*p == ' ' || *p == ',') p++;
         if (!*p) break;
         t = strtod(p, &end);
-        if (end == p || *end != ':') break;
+        if (end == p || *end != ':') {
+            fprintf(stderr, "wpad: RECOMP_PAD_SCRIPT: ignoring everything from \"%.20s\"\n", p);
+            break;
+        }
+        if (sScriptLen == cap) {
+            struct ScriptEntry* grown = realloc(sScript, (cap ? cap * 2 : 64) * sizeof(*sScript));
+            if (!grown) break;
+            sScript = grown;
+            cap = cap ? cap * 2 : 64;
+        }
         p = end + 1;
         while (*p && *p != ' ' && *p != ',') {
             size_t n = strcspn(p, "+ ,"), i;
