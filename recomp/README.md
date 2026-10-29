@@ -15,6 +15,7 @@ copy at startup.
 ```
 python tools/recomp/recomp.py          # main.dol -> build/recomp/gen/*.c (~4 s)
 python tools/recomp/build.py --run     # compile (~25 s with MSVC) and run the tests
+python tools/recomp/build.py --release # optimized across files (~70 s, a few % faster)
 ```
 
 `recomp.py` needs `orig/R8AE01/sys/main.dol` and dtk's
@@ -238,7 +239,7 @@ Diagnostics:
 | `hle_font.c` | The Wii system font, which `OSInitFont` reads from the boot ROM: `ReadFont` builds the ANSI font from host glyphs (`host_font.h`; GDI's Segoe UI Semibold in `recomp/boot/font_win32.c`), in the ROM font's format, and the SDK expands it as usual. |
 | `hle_camera.c` | Mouse camera: the mouse turns the player camera's (`CameraPlayer`) yaw and its easing target, and swings the eye the game rebuilds that yaw from while Pikachu moves (so turning works while running and steers the run), so the game's own follow, distance and wall collision carry the turn on; up and down tilt it as an offset on the pitch the game picks from the slope ahead, kept off while the game works that pitch out. B recenters as on the Wii and clears the tilt. |
 | `hle_thp.c` | THP movie video: `THPVideoDecode` decoded natively (baseline JPEG without byte stuffing, written as I8 tiles). The game's decoder took ~12 ms a frame in recompiled code. The output matches it to within a few levels on under 0.5% of bytes (IDCT rounding). |
-| `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`. The boot cuts the Strap (safety) screen short: it hands over to Hold (sideways) as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer. Hold runs its course (about 4 s): skipping it sent the first new game of a session back to the title after the opening. `RECOMP_BOOT_SCREENS=1` keeps the Strap timer. |
+| `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`, chosen so the 30 Hz alarm's period is exactly twice the 60 Hz one (otherwise the two drift apart and the game can settle at 15 fps). The boot cuts the Strap (safety) screen short: it hands over to Hold (sideways) as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer. Hold runs its course (about 4 s): skipping it sent the first new game of a session back to the title after the opening. `RECOMP_BOOT_SCREENS=1` keeps the Strap timer. |
 
 **Memory differences from a Wii:**
 - **MEM2:** the game also gets the top of MEM2 that IOS normally keeps
@@ -268,7 +269,12 @@ runs unchanged.
   - Display lists.
   - All seven primitive types are decoded. Quads, triangles, strips and
     fans are drawn; lines and points are skipped.
-  - Vertices are transformed on the CPU.
+  - Each vertex is decoded once, straight into the current batch, an
+    attribute at a time across the draw; primitives become indices.
+    Vertex formats and the draw state are worked out again only when
+    their registers change (the park sends 22,000 draws a frame).
+  - Vertices are transformed on the GPU, from the XF state, as the
+    console's transform unit does.
   - The pixel-engine draw-done and token commands raise the GX
     interrupts. Each token is delivered with its own value.
 - **Textures** (`gx_texture.c`): every GX format (I4, I8, IA4, IA8,
@@ -283,6 +289,7 @@ runs unchanged.
     tables and alpha test.
   - EFB-to-texture copies become textures.
   - Copies to the XFB are presented in the window.
+  - Each draw changes only the GL state that differs from the last.
 
 Not implemented yet:
 - lighting (lit channels use the material color);
