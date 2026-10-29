@@ -51,27 +51,45 @@ void f_80173E10(ppc_t* c) {
     }
 }
 
-/* Frame pacing: the game times its updates and draws in fixed steps on
- * the time base, computed at start-up as (bus clock / 4) times 1/59.94 s
- * and 2/59.94 s (for 30 fps) by four schedulers, each with its own copy of
- * the two constants. They are set to the emulated refresh rate instead
- * (hle_irq.c), so the steps agree with the retrace. Each is rounded down
- * to at most one retrace period, as the originals are: a step even
- * slightly longer leaves some frames without one (30 fps). */
+/* Frame pacing: the game times its updates and draws with periodic
+ * alarms, their periods computed at start-up as (bus clock / 4) times
+ * 1/59.94 s and 2/59.94 s by four schedulers, each with its own copy of
+ * the two constants. The main loop's are a 60 Hz alarm that queues a pad
+ * sample for each update, and a 30 Hz alarm that wakes the loop to run
+ * the queued updates and draw (after running more than two it skips the
+ * next draw). Both alarms count from time base 0, so they keep step only
+ * if the 30 Hz period is exactly twice the 60 Hz one. From 1/60 and 2/60
+ * rounded down it came out a tick over (1012499 and 2024999 ticks), and
+ * as the host's time base is its uptime, the 60 Hz alarm fired anywhere
+ * in the frame, creeping 1.8 ms an hour. Where it fired as the loop
+ * counted its samples, the loop ran 1 and 3 updates by turns and drew
+ * every other frame (15 fps).
+ *
+ * So the constants follow the emulated refresh rate (hle_irq.c), each
+ * step at most one or two retrace periods (a step even slightly longer
+ * leaves some frames without one), and with the game's own arithmetic (a
+ * single-precision product, truncated) the 30 Hz period is exactly twice
+ * the 60 Hz one: the two alarms fire together, the sample first. */
 static const uint32_t kFrameStepConsts[] = {0x80487540, 0x804877A0, 0x80488924, 0x80488990};
 
-static float step_const(double frames) {
-    double hz = hle_vi_hz(), ticks = PPC_TB_HZ * frames / hz;
-    float f = (float)(frames / hz);
-    while ((double)f * PPC_TB_HZ > ticks) f = nextafterf(f, 0.0f);
+/* The alarm period, in ticks, that the game makes of step constant f. */
+static uint64_t step_ticks(float f) {
+    volatile float product = f * (float)PPC_TB_HZ;
+    return (uint64_t)product;
+}
+
+static float step_const(void) {
+    double ticks = PPC_TB_HZ / hle_vi_hz();
+    float f = (float)(1.0 / hle_vi_hz()) * 1.001f;
+    while ((double)step_ticks(f) > ticks || step_ticks(2 * f) != 2 * step_ticks(f)) f = nextafterf(f, 0.0f);
     return f;
 }
 
 void hle_game_init(void) {
     size_t i;
     for (i = 0; i < sizeof(kFrameStepConsts) / sizeof(kFrameStepConsts[0]); i++) {
-        ST32(kFrameStepConsts[i], f32_bits(step_const(1)));
-        ST32(kFrameStepConsts[i] + 4, f32_bits(step_const(2)));
+        ST32(kFrameStepConsts[i], f32_bits(step_const()));
+        ST32(kFrameStepConsts[i] + 4, f32_bits(2 * step_const()));
     }
 }
 
