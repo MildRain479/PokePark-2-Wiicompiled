@@ -106,11 +106,10 @@ title shows the frame rate and the slowest frame of the last second).
 A Wii's NTSC video runs at 59.94 Hz; here the refresh and the game's
 frame timing run at 60 Hz by default, to match PC displays
 (`RECOMP_VI_HZ=59.94` restores the original). THP movie frames are
-decoded natively (`hle_thp.c`). Graphics bugs still to fix: in Mew's
-intro in the park, Mew (a lit, skinned model) is drawn as a dark
-silhouette, and the picture confirmation dialog shows a grey square where
-the chosen picture should be. 3D lighting is implemented but not yet
-checked in gameplay.
+decoded natively (`hle_thp.c`). EFB copies are converted to their copy
+format, and the EFB depth is stored reversed in a float buffer, for the
+precision GX scenes need near the far plane. 3D lighting is implemented
+but not yet checked in gameplay.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
 

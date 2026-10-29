@@ -51,6 +51,9 @@ typedef ptrdiff_t GLintptr;
 #define GL_FUNC_REVERSE_SUBTRACT 0x800B
 #define GL_UNIFORM_BUFFER 0x8A11
 #define GL_DYNAMIC_DRAW 0x88E8
+#define GL_LOWER_LEFT 0x8CA1
+#define GL_ZERO_TO_ONE 0x935F
+#define GL_DEPTH_COMPONENT32F 0x8CAC
 
 #define GL_FUNCS(X) \
     X(void, glGenBuffers, (GLsizei, GLuint*)) \
@@ -90,7 +93,8 @@ typedef ptrdiff_t GLintptr;
     X(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(void, glActiveTexture, (GLenum)) \
-    X(void, glBlendEquation, (GLenum))
+    X(void, glBlendEquation, (GLenum)) \
+    X(void, glClipControl, (GLenum, GLenum))
 
 #define DECLARE(ret, name, args) typedef ret(APIENTRY* PFN_##name) args; static PFN_##name p_##name;
 GL_FUNCS(DECLARE)
@@ -187,8 +191,10 @@ static const char* kVertexShader =
     "  vec4 clip = xw(0x1026) == 0u\n"
     "    ? vec4(p0 * world.x + p1 * world.z, p2 * world.y + p3 * world.z, p4 * world.z + p5, -world.z)\n"
     "    : vec4(p0 * world.x + p1, p2 * world.y + p3, p4 * world.z + p5, 1.0);\n"
-    /* GX depth runs from -w (near) to 0 (far); GL wants -w..w. */
-    "  gl_Position = vec4(clip.x, clip.y, 2.0 * clip.z + clip.w, clip.w);\n"
+    /* GX depth runs from -w (near) to 0 (far). The EFB depth is stored
+     * reversed (see gxb_init), so the far plane, where GX scenes keep
+     * nearly everything, gets the float precision: 0..w, far to near. */
+    "  gl_Position = vec4(clip.x, clip.y, -clip.z, clip.w);\n"
     "  v_col0 = channel(0, a_col0, world, n);\n"
     "  v_col1 = channel(1, a_col1, world, n);\n"
     "  int ntex = int(xw(0x103F) & 15u);\n"
@@ -566,12 +572,18 @@ void gxb_init(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     p_glGenRenderbuffers(1, &sEfbDepth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, sEfbDepth);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, EFB_W * sScale, EFB_H * sScale);
+    /* Depth is stored reversed, 1 - GX depth, in a float buffer: GX
+     * scenes put their depths within a few millionths of 1, where a 24-bit
+     * buffer fed by float math can't tell surfaces one GX step apart (the
+     * picture in the picture confirmation dialog lost to its frame). */
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, EFB_W * sScale, EFB_H * sScale);
+    p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     p_glGenFramebuffers(1, &sEfbFbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sEfbColor, 0);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, sEfbDepth);
     glClearColor(0, 0, 0, 0);
+    glClearDepth(0.0); /* the far plane, reversed */
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glGenTextures(1, &sWhite);
@@ -632,7 +644,8 @@ static GLenum blend_factor(GLenum f, int efb_alpha) {
     if (f == GL_ONE_MINUS_DST_ALPHA) return GL_ZERO;
     return f;
 }
-static const GLenum kDepthFunc[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+/* Mirrored for the reversed depth. */
+static const GLenum kDepthFunc[8] = {GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL, GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
 
 static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int count) {
     GLint cin[64], ain[64], cop[64], aop[64], map[64], sel[64], swap[16], alpha[4];
@@ -723,7 +736,7 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
 
     glViewport((GLint)(st->viewport[0] * sScale), (GLint)((EFB_H - (st->viewport[1] + st->viewport[3])) * sScale),
                (GLsizei)(st->viewport[2] * sScale), (GLsizei)(st->viewport[3] * sScale));
-    glDepthRange(st->viewport[4] < 0 ? 0 : st->viewport[4], st->viewport[5] > 1 ? 1 : st->viewport[5]);
+    glDepthRange(1.0 - (st->viewport[5] > 1 ? 1 : st->viewport[5]), 1.0 - (st->viewport[4] < 0 ? 0 : st->viewport[4]));
     /* Face culling (GX_CULL_NONE, FRONT, BACK, ALL). GX's front faces wind
      * counter-clockwise in GL's window coordinates, GL's default. Games
      * rely on it: the picture confirmation dialog hides a placeholder pane
@@ -758,7 +771,7 @@ static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_
     glDepthMask(depth ? GL_TRUE : GL_FALSE);
     glClearColor(((rgba >> 24) & 0xFF) / 255.0f, ((rgba >> 16) & 0xFF) / 255.0f, ((rgba >> 8) & 0xFF) / 255.0f,
                  (rgba & 0xFF) / 255.0f);
-    glClearDepth(z / 16777215.0);
+    glClearDepth(1.0 - z / 16777215.0);
     if (color || alpha) mask |= GL_COLOR_BUFFER_BIT;
     if (depth) mask |= GL_DEPTH_BUFFER_BIT;
     if (mask) glClear(mask);
