@@ -26,7 +26,7 @@
 0x8022ECD0 AIInitDMA  # hle_audio.c
 0x8022ED50 AIStartDMA  # hle_audio.c
 0x8022ED70 AIStopDMA  # hle_audio.c
-0x801741F0 fn_801741F0  # hle_game.c: skip the Hold screen
+0x801741F0 fn_801741F0  # hle_game.c: logs scene changes
 0x80173E10 SceneSpecializerStrap::RunSystem  # hle_game.c: leave as soon as the park has loaded
 0x80247F10 WPADProbe  # hle_wpad.c: remote 0 connected, the rest absent
 0x80248030 WPADSetConnectCallback  # hle_wpad.c
