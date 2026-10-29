@@ -4,6 +4,9 @@ Usage:
     python tools/recomp/build.py                 # build both targets
     python tools/recomp/build.py --run test      # ...and run the tests
     python tools/recomp/build.py --run boot      # ...and boot main.dol
+    python tools/recomp/build.py --release       # optimize across files (MSVC
+                                                 # /GL /LTCG): a few % faster,
+                                                 # each build ~70 s
 
 Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 """
@@ -17,6 +20,7 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 OUT = os.path.join(ROOT, "build", "recomp")
 GEN = os.path.join(OUT, "gen")
+OBJ = os.path.join(OUT, "obj")
 DOL = os.path.join(ROOT, "orig", "R8AE01", "sys", "main.dol")
 
 TARGETS = {
@@ -52,7 +56,7 @@ def build_msvc(common, targets, opt):
     # The generated code relies on wrapping unsigned arithmetic only.
     flags = f"/nologo {opt} /MP /W0 /fp:precise /Zi {defs} {inc}"
     bat = os.path.join(OUT, "build.bat")
-    objdir = os.path.join(OUT, "obj")
+    objdir = OBJ
     with open(bat, "w") as f:
         f.write(f'@call "{vcvars()}" >nul 2>nul\n')
 
@@ -71,14 +75,15 @@ def build_msvc(common, targets, opt):
             compile_([s for s in srcs if not s.endswith(".c")], tdir, "cpp")
             exe = os.path.join(OUT, name + ".exe")
             libs = " ".join(LIBS.get(name, []))
-            f.write(f'link /nologo /DEBUG /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
+            ltcg = "/LTCG" if "/GL" in opt else ""
+            f.write(f'link /nologo /DEBUG {ltcg} /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
     subprocess.check_call(["cmd", "/c", bat])
 
 
 def build_cc(common, targets, opt):
     inc = ["-I", os.path.join(ROOT, "recomp", "runtime"), "-I", GEN, "-I", os.path.join(ROOT, "src")]
     defs = [f"-D{d}" for d in DEFINES]
-    objdir = os.path.join(OUT, "obj")
+    objdir = OBJ
 
     def compile_(srcs, odir):
         os.makedirs(odir, exist_ok=True)
@@ -101,8 +106,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", choices=sorted(TARGETS))
     ap.add_argument("--opt", default=None, help="optimization flag (default /O2 or -O2)")
+    ap.add_argument("--release", action="store_true", help="whole-program optimization (MSVC /GL with /LTCG)")
     ap.add_argument("args", nargs="*", help="extra arguments for --run")
     args = ap.parse_args()
+    global OBJ
+    if args.release:
+        args.opt = "/O2 /GL" if os.name == "nt" else "-O2 -flto"
+    # Objects built with other flags go elsewhere, so switching rebuilds.
+    if args.opt and args.opt not in ("/O2", "-O2"):
+        OBJ = os.path.join(OUT, "obj_" + "".join(ch for ch in args.opt if ch.isalnum()))
 
     gen = sorted(glob.glob(os.path.join(GEN, "*.c")))
     if not gen:
@@ -110,9 +122,10 @@ def main():
     common = gen + sorted(glob.glob(os.path.join(ROOT, "recomp", "runtime", "*.c")))
     common += sorted(glob.glob(os.path.join(ROOT, "recomp", "patches", "*.c")))
     # Headers aren't tracked; a changed header rebuilds everything.
-    headers = glob.glob(os.path.join(ROOT, "recomp", "runtime", "*.h")) + [os.path.join(GEN, "recomp_funcs.h")]
+    headers = (glob.glob(os.path.join(ROOT, "recomp", "runtime", "*.h")) + glob.glob(os.path.join(ROOT, "recomp", "gpu", "*.h")) +
+               [os.path.join(GEN, "recomp_funcs.h")])
     newest = max(os.path.getmtime(h) for h in headers if os.path.exists(h))
-    for o in glob.glob(os.path.join(OUT, "obj", "**", "*.o*"), recursive=True):
+    for o in glob.glob(os.path.join(OBJ, "**", "*.o*"), recursive=True):
         if os.path.getmtime(o) < newest:
             os.remove(o)
     if os.name == "nt":

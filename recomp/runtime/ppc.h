@@ -106,9 +106,12 @@ static inline void st_f64(uint32_t a, double v) { ST64(a, f64_bits(v)); }
 #ifdef RECOMP_TRACE
 extern uint32_t g_trace[256];
 extern unsigned g_trace_pos;
-/* ...and a call count per function (main.dol's code is below 0x80400000). */
+/* ...and, while g_count_calls is set (RECOMP_CALLS), a call count per
+ * function (main.dol's code is below 0x80400000). Off, it costs a
+ * predictable branch; on, a 4 MB table that every call writes to. */
 extern uint32_t g_calls[0x100000];
-#define PPC_TRACE(a) (g_trace[g_trace_pos++ & 255] = (a), g_calls[((a) >> 2) & 0xFFFFF]++)
+extern int g_count_calls;
+#define PPC_TRACE(a)     (g_trace[g_trace_pos++ & 255] = (a), g_count_calls ? (void)g_calls[((a) >> 2) & 0xFFFFF]++ : (void)0)
 #else
 #define PPC_TRACE(a) ((void)0)
 #endif

@@ -280,6 +280,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     if (calls && secs > 5) {
         Sleep((secs - 5) * 1000);
         memset(g_calls, 0, sizeof(g_calls));
+        g_count_calls = 1;
         Sleep(5000);
         dump_calls(atoi(calls));
     } else {
