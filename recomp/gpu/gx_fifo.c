@@ -329,6 +329,7 @@ static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, GXVertex
 /* Draw state for the backend */
 
 static uint64_t sFrame;
+static long sDebugFrame; /* defined with its value below */
 
 typedef struct TexEntry {
     uint64_t key;
@@ -398,6 +399,15 @@ static uint32_t texture_for_map(int map) {
     uint64_t key;
     TexEntry* e;
     uint32_t h;
+    if ((long)sFrame == sDebugFrame) {
+        int copy = -1;
+        for (i = 0; i < sCopyCount; i++) {
+            if (sCopies[i].addr == addr) copy = i;
+        }
+        fprintf(stderr, "   map %d: %08X fmt %d %dx%d mode %X tlut %X%s", map, addr, fmt, width, height, mode0, tlut,
+                copy >= 0 ? " (EFB copy" : "\n");
+        if (copy >= 0) fprintf(stderr, " %dx%d)\n", sCopies[copy].width, sCopies[copy].height);
+    }
     for (i = 0; i < sCopyCount; i++) {
         if (sCopies[i].addr == addr) return sCopies[i].handle;
     }
@@ -704,6 +714,10 @@ static void efb_copy(uint32_t exec) {
     int w = (int)(wh & 0x3FF) + 1, h = (int)((wh >> 10) & 0x3FF) + 1;
     int clear = (exec >> 11) & 1, to_xfb = (exec >> 14) & 1;
     uint32_t dst = (bp[0x4B] & 0xFFFFFF) << 5;
+    if ((long)sFrame == sDebugFrame) {
+        fprintf(stderr, "efb copy %dx%d at (%d,%d) to %s %08X, exec %08X, clear %d\n", w, h, x, y, to_xfb ? "XFB" : "texture",
+                dst, exec, clear);
+    }
     if (to_xfb && (long)sFrame == sDebugFrame) {
         int k;
         fprintf(stderr, "commands in frame:");
