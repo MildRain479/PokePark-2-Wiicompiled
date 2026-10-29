@@ -168,6 +168,8 @@ Diagnostics:
 - `RECOMP_GX_SKIP=<first>-<last>` drops those draws (numbered from 0 in
   each frame), to find which draws make up something on screen;
   `RECOMP_GX_COPY_LOG=1` logs each new EFB copy target.
+- `RECOMP_GX_DUMP_TEX=<address>` saves the texture at that address, as
+  decoded, to `tex_<address>.bmp` the first time it is loaded.
 - `RECOMP_WATCH_LOG=1`, with `RECOMP_WATCH`, logs every function that
   writes the watched range instead of stopping at the first.
 - `RECOMP_DUMP_MEM=<file>` saves MEM1 and MEM2 when the watchdog stops a

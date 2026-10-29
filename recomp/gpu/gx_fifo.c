@@ -481,6 +481,39 @@ static uint32_t texture_for_map(int map) {
     if (e->key != key || e->hash != h || !e->handle) {
         uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 4);
         gx_decode_texture(rgba, MA(addr), fmt, width, height, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
+        {
+            /* RECOMP_GX_DUMP_TEX=<address>: save that texture, as decoded,
+             * to tex_<address>.bmp (once). */
+            const char* want = getenv("RECOMP_GX_DUMP_TEX");
+            static int dumped;
+            if (want && !dumped && (strtoul(want, NULL, 16) & 0x3FFFFFFF) == (addr & 0x3FFFFFFF)) {
+                char path[64];
+                FILE* f;
+                snprintf(path, sizeof(path), "tex_%08X.bmp", addr);
+                if ((f = fopen(path, "wb")) != NULL) {
+                    uint8_t hdr[54] = {'B', 'M'};
+                    int y, x;
+                    *(uint32_t*)(hdr + 2) = 54 + (uint32_t)(width * height * 4);
+                    hdr[10] = 54;
+                    hdr[14] = 40;
+                    *(int32_t*)(hdr + 18) = width;
+                    *(int32_t*)(hdr + 22) = -height;
+                    hdr[26] = 1;
+                    hdr[28] = 32;
+                    fwrite(hdr, 1, 54, f);
+                    for (y = 0; y < height; y++) {
+                        for (x = 0; x < width; x++) {
+                            const uint8_t* px = rgba + (y * width + x) * 4;
+                            uint8_t bgra[4] = {px[2], px[1], px[0], px[3]};
+                            fwrite(bgra, 1, 4, f);
+                        }
+                    }
+                    fclose(f);
+                    fprintf(stderr, "gx: saved %s (fmt %d %dx%d)\n", path, fmt, width, height);
+                }
+                dumped = 1;
+            }
+        }
         if (e->handle && e->key == key) {
             /* Same texture, new contents (a movie frame, say): the key
              * covers size and sampling, so update it in place. */
@@ -604,14 +637,19 @@ static unsigned sOpCount[256];
 
 static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
     int i;
-    fprintf(stderr, "draw %u: %d verts, vp %.0f,%.0f %.0fx%.0f z %.3f-%.3f, sc %d,%d-%d,%d, stages %d, blend %d %d/%d, z %d/%d/%d, cu %d au %d\n",
+    fprintf(stderr, "draw %u: %d verts, vp %.0f,%.0f %.0fx%.0f z %.3f-%.3f, sc %d,%d-%d,%d, stages %d, blend %d %d/%d sub %d lop %d/%d, z %d/%d/%d, cu %d au %d\n",
             sDrawCount, n, st->viewport[0], st->viewport[1], st->viewport[2], st->viewport[3], st->viewport[4],
             st->viewport[5], st->scissor[0], st->scissor[1], st->scissor[2], st->scissor[3], st->num_stages,
-            st->blend_enable, st->blend_src, st->blend_dst, st->z_enable, st->z_func, st->z_update, st->color_update,
-            st->alpha_update);
+            st->blend_enable, st->blend_src, st->blend_dst, st->blend_subtract, st->logic_enable, st->logic_op, st->z_enable,
+            st->z_func, st->z_update, st->color_update, st->alpha_update);
     fprintf(stderr, "   alpha test %d %d / %d %d logic %d; chan0 ctrl %X/%X mat %08X amb %08X; konst0 %.2f %.2f %.2f %.2f\n",
             st->alpha_func[0], st->alpha_ref[0], st->alpha_func[1], st->alpha_ref[1], st->alpha_logic, xf[0x100E],
             xf[0x1010], xf[0x100C], xf[0x100A], st->konst[0][0], st->konst[0][1], st->konst[0][2], st->konst[0][3]);
+    fprintf(stderr, "   tev regs: prev %.2f %.2f %.2f %.2f, c0 %.2f %.2f %.2f %.2f, c1 %.2f %.2f %.2f %.2f, c2 %.2f %.2f %.2f %.2f\n",
+            st->tev_reg[0][0], st->tev_reg[0][1], st->tev_reg[0][2], st->tev_reg[0][3], st->tev_reg[1][0],
+            st->tev_reg[1][1], st->tev_reg[1][2], st->tev_reg[1][3], st->tev_reg[2][0], st->tev_reg[2][1],
+            st->tev_reg[2][2], st->tev_reg[2][3], st->tev_reg[3][0], st->tev_reg[3][1], st->tev_reg[3][2],
+            st->tev_reg[3][3]);
     if (xf[0x100E] & 2) {
         /* A lit channel: its lights' color, cos and distance attenuation,
          * position and direction. */
