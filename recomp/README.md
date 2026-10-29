@@ -118,14 +118,15 @@ format, and the EFB depth is stored reversed in a float buffer, for the
 precision GX scenes need near the far plane. 3D lighting is implemented
 but not yet checked in gameplay.
 
-**Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
+**Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways), by
+default:
 
 | Wii Remote | In the park | Keyboard and mouse | Controller |
 |---|---|---|---|
 | d-pad | move | WASD / arrows | d-pad / left stick |
-| 2 | jump, talk | Space / X / K | A |
-| 1 | dash | left click / Z / J | X |
-| A | Thunderbolt | right click / Enter / C | B |
+| 2 | jump, talk | Space / X | A |
+| 1 | dash | left click / Z | X |
+| A | Thunderbolt | right click / Enter | B |
 | B | recenter the camera | V / Left Ctrl | Y / right trigger |
 | (none) | turn the camera | mouse | |
 | + / - | | P / M | Start / Back |
@@ -137,6 +138,25 @@ focus the mouse is captured for the camera: Esc lets it go, and a click
 in the window captures it again (that click isn't a dash). The mouse
 turns the player camera (moving it down looks down on Pikachu);
 cutscene and dialogue cameras are the game's. Rumble goes to the controller.
+
+**Settings** (`recomp/boot/menu_win32.c`): Backspace, or Back+Start on a
+controller, opens a settings menu over the game, which keeps running but
+gets no input. It has:
+- fullscreen (borderless, on the window's monitor; Alt+Enter also
+  toggles it);
+- the internal resolution: fit the window (the multiple of the 456-line
+  picture nearest the window's height), or 1x to 6x;
+- anti-aliasing: off, or 2x, 4x or 8x MSAA;
+- camera sensitivity and inverted tilt for the mouse;
+- the bindings above, two keys or mouse buttons and two controller
+  buttons for each Wii Remote button (Enter, then press the new one; a
+  key or button bound elsewhere moves).
+
+Up/Down choose, Left/Right change, Enter rebinds, Delete clears; on a
+controller, the d-pad, A, X to clear and B to close. Changes apply at
+once and are saved in `settings.ini` beside `boot.exe`
+(`RECOMP_SETTINGS=<file>` uses another file). The menu is plain for
+now, until there is a proper pause menu.
 
 The game's own `OSReport` output, including the SDK banners and the
 heap sizes, is printed to stderr.
@@ -160,8 +180,8 @@ Diagnostics:
 - `RECOMP_GX_DUMP=<dir>` writes every 30th presented frame as a BMP;
   `RECOMP_GX_DUMP_EVERY=<n>` changes the interval.
 - `RECOMP_GX_HIDDEN=1` keeps the window hidden.
-- `RECOMP_GX_SCALE=<n>` sets the internal resolution multiplier
-  (default 2). The game shows 456 lines, so the picture is 456n lines
+- `RECOMP_GX_SCALE=<n>` sets the internal resolution multiplier, over
+  the settings. The game shows 456 lines, so the picture is 456n lines
   tall; at 3 in 16:9 it is 2560x1368, pixel for pixel across a 1440p
   display.
 - `RECOMP_WIDESCREEN=0` sets the console up for a 4:3 TV instead of
@@ -255,7 +275,9 @@ runs unchanged.
   RGB565, RGB5A3, RGBA8, C4, C8, C14X2, CMPR) and the palette formats,
   cached by address and content hash.
 - **Backend** (`gl_backend.c`, OpenGL 3.3):
-  - The EFB is an offscreen framebuffer at 2x resolution.
+  - The EFB is an offscreen framebuffer at the settings' internal
+    resolution, multisampled if anti-aliasing is on (resolved before each
+    copy reads it).
   - TEV runs in one uber-shader driven by uniforms: up to 16 stages with
     every input, bias, scale, clamp and compare mode, konst colors, swap
     tables and alpha test.

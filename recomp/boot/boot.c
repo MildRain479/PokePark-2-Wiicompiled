@@ -19,6 +19,7 @@ void hle_dump_threads(void);
 void input_init(void);
 void audio_init(void);
 void font_init(void);
+void settings_load(void);
 void hle_game_init(void);
 
 static ppc_t* gCpu;
@@ -424,6 +425,7 @@ int main(int argc, char** argv) {
      * keep the CPU busy. */
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
+    settings_load();
     gx_init();
     input_init();
     audio_init();

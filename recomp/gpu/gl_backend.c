@@ -1,15 +1,18 @@
 /* OpenGL backend for the GX decoder.
  *
  * The EFB (the GPU's embedded framebuffer, 640x528) is an offscreen
- * framebuffer rendered at RECOMP_GX_SCALE times the native resolution
- * (default 2), and 4/3 as wide again in 16:9. TEV, the GPU's
- * programmable color combiner, runs in one "uber" fragment shader driven
- * by uniforms, so any stage setup draws without compiling a new shader.
- * Copies of the EFB to the XFB are presented in a window at the shape
- * they have on a TV; RECOMP_GX_DUMP=<dir> also writes them as BMPs.
+ * framebuffer rendered at a multiple of the native resolution (the
+ * settings' internal resolution, by default whatever fits the window),
+ * and 4/3 as wide again in 16:9, with multisample anti-aliasing if the
+ * settings ask for it. TEV, the GPU's programmable color combiner, runs
+ * in one "uber" fragment shader driven by uniforms, so any stage setup
+ * draws without compiling a new shader. Copies of the EFB to the XFB are
+ * presented in a window, or borderless fullscreen, at the shape they have
+ * on a TV, with the settings menu over them while it is open;
+ * RECOMP_GX_DUMP=<dir> also writes them as BMPs.
  *
  * Environment:
- *   RECOMP_GX_SCALE=n          internal resolution multiplier
+ *   RECOMP_GX_SCALE=n          internal resolution multiplier, over the settings
  *   RECOMP_GX_HIDDEN=1         do not show the window
  *   RECOMP_GX_DUMP=<dir>       write presented frames as BMP files
  *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30) */
@@ -23,6 +26,7 @@
 #include <GL/gl.h>
 
 #include "gx.h"
+#include "host_settings.h"
 
 #define EFB_W 640
 #define EFB_H 528
@@ -56,6 +60,8 @@ typedef ptrdiff_t GLintptr;
 #define GL_LOWER_LEFT 0x8CA1
 #define GL_ZERO_TO_ONE 0x935F
 #define GL_DEPTH_COMPONENT32F 0x8CAC
+#define GL_MAX_SAMPLES 0x8D57
+#define GL_BGRA 0x80E1
 
 #define GL_FUNCS(X) \
     X(void, glGenBuffers, (GLsizei, GLuint*)) \
@@ -93,6 +99,9 @@ typedef ptrdiff_t GLintptr;
     X(void, glGenRenderbuffers, (GLsizei, GLuint*)) \
     X(void, glBindRenderbuffer, (GLenum, GLuint)) \
     X(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
+    X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei)) \
+    X(void, glDeleteRenderbuffers, (GLsizei, const GLuint*)) \
+    X(void, glDeleteFramebuffers, (GLsizei, const GLuint*)) \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(void, glActiveTexture, (GLenum)) \
     X(void, glBlendEquation, (GLenum)) \
@@ -513,6 +522,48 @@ static void build_copy_program(void) {
     p_glBindVertexArray(sVao);
 }
 
+/* The settings menu, an image with alpha laid over the presented picture.
+ * Its rows run top to bottom. */
+static const char* kOverlayVertexShader =
+    "#version 330 core\n"
+    "out vec2 v_uv;\n"
+    "void main() {\n"
+    "    vec2 p = vec2((gl_VertexID & 1) * 2, (gl_VertexID >> 1) * 2);\n"
+    "    v_uv = vec2(p.x, 1.0 - p.y);\n"
+    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* kOverlayFragmentShader =
+    "#version 330 core\n"
+    "in vec2 v_uv;\n"
+    "out vec4 o_color;\n"
+    "uniform sampler2D u_image;\n"
+    "void main() { o_color = texture(u_image, v_uv); }\n";
+
+static GLuint sOverlayProgram, sOverlayTex;
+
+static void build_overlay_program(void) {
+    GLint ok;
+    sOverlayProgram = p_glCreateProgram();
+    p_glAttachShader(sOverlayProgram, compile(GL_VERTEX_SHADER, kOverlayVertexShader));
+    p_glAttachShader(sOverlayProgram, compile(GL_FRAGMENT_SHADER, kOverlayFragmentShader));
+    p_glLinkProgram(sOverlayProgram);
+    p_glGetProgramiv(sOverlayProgram, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        p_glGetProgramInfoLog(sOverlayProgram, sizeof(log), NULL, log);
+        fprintf(stderr, "gl: link error:\n%s\n", log);
+        exit(1);
+    }
+    p_glUseProgram(sOverlayProgram);
+    p_glUniform1i(p_glGetUniformLocation(sOverlayProgram, "u_image"), 0);
+    p_glUseProgram(sProgram);
+    glGenTextures(1, &sOverlayTex);
+    glBindTexture(GL_TEXTURE_2D, sOverlayTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Window and EFB */
 
@@ -525,15 +576,108 @@ static double sScaleX = 2, sScaleY = 2;
 static double sPixelAspect = 1; /* width of an EFB pixel on screen, over its height */
 #define GLX(x) ((GLint)floor((x) * sScaleX + 0.5))
 #define GLY(y) ((GLint)floor((y) * sScaleY + 0.5))
+/* Draws go to sDrawFbo. Without anti-aliasing that is sEfbFbo, whose
+ * color texture the copies and the presented picture read; with it, a
+ * multisampled framebuffer resolved into sEfbFbo when they need it. */
 static GLuint sEfbFbo, sEfbColor, sEfbDepth;
+static GLuint sDrawFbo, sMsFbo, sMsColor, sMsDepth;
+static int sMsDirty;
 static GLuint sWhite;
 static const char* sDumpDir;
 static int sDumpEvery = 30;
 static unsigned sPresented;
+/* The settings as applied. */
+static int sScale, sMsaa = 1, sMaxSamples = 1, sFullscreen, sHidden;
+static WINDOWPLACEMENT sWindowed;
+
+int display_scale(void) { return sScale; }
+int display_msaa(void) {
+    int m;
+    for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
+    return m;
+}
+
+/* Borderless, covering the monitor the window is on; back to where the
+ * window was before. */
+static void set_fullscreen(int on) {
+    DWORD style = (DWORD)GetWindowLongA(sWnd, GWL_STYLE);
+    if (on == sFullscreen) return;
+    sFullscreen = on;
+    if (on) {
+        MONITORINFO mi;
+        mi.cbSize = sizeof(mi);
+        sWindowed.length = sizeof(sWindowed);
+        GetWindowPlacement(sWnd, &sWindowed);
+        GetMonitorInfoA(MonitorFromWindow(sWnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+        SetWindowLongA(sWnd, GWL_STYLE, (LONG)((style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP));
+        SetWindowPos(sWnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    } else {
+        SetWindowLongA(sWnd, GWL_STYLE, (LONG)((style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW));
+        SetWindowPlacement(sWnd, &sWindowed);
+        SetWindowPos(sWnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+}
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CLOSE) exit(0);
+    /* Alt+Enter toggles fullscreen; Alt alone doesn't open the window
+     * menu, which would hold the game's keys. */
+    if (msg == WM_SYSKEYDOWN && wp == VK_RETURN && (lp & (1 << 29))) {
+        if (!(lp & (1 << 30))) {
+            g_settings.fullscreen = !g_settings.fullscreen;
+            settings_save();
+        }
+        return 0;
+    }
+    if (msg == WM_SYSCHAR || (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_KEYMENU)) return 0;
+    if (menu_window_message(h, msg, wp, lp)) return 0;
     return DefWindowProcA(h, msg, wp, lp);
+}
+
+/* The internal resolution for a client area h pixels tall: RECOMP_GX_SCALE,
+ * else the settings', else the multiple whose picture (456 lines shown)
+ * comes nearest the window, rounding up unless within a quarter step. */
+static int wanted_scale(int h) {
+    const char* v = getenv("RECOMP_GX_SCALE");
+    int s = v && atoi(v) > 0 ? atoi(v) : g_settings.scale;
+    if (!s) s = (int)ceil(h / 456.0 - 0.25);
+    return s < 1 ? 1 : s > 8 ? 8 : s;
+}
+
+/* (Re)allocates the EFB at the current scale and sample count, and the
+ * copy textures at the matching scale (keeping their names: the texture
+ * cache holds them). What they held is lost; the game redraws it. */
+static void alloc_efb(void);
+
+static void apply_settings(void) {
+    RECT r;
+    int s, m;
+    if (!sHidden) set_fullscreen(g_settings.fullscreen);
+    GetClientRect(sWnd, &r);
+    if (r.bottom - r.top <= 0) return; /* minimized */
+    s = wanted_scale(r.bottom - r.top);
+    for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
+    if (s == sScale && m == sMsaa) return;
+    sScale = s;
+    sMsaa = m;
+    sScaleY = s;
+    sScaleX = s * sPixelAspect;
+    alloc_efb();
+    fprintf(stderr, "gl: internal resolution %dx (%d x %d), anti-aliasing %s\n", s, GLX(EFB_W), GLY(EFB_H),
+            m > 1 ? (m == 2 ? "2x" : m == 4 ? "4x" : "8x") : "off");
+}
+
+/* Brings sEfbFbo up to date with the multisampled draws. */
+static void resolve(void) {
+    if (sDrawFbo == sEfbFbo || !sMsDirty) return;
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sMsFbo);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sEfbFbo);
+    glDisable(GL_SCISSOR_TEST);
+    p_glBlitFramebuffer(0, 0, GLX(EFB_W), GLY(EFB_H), 0, 0, GLX(EFB_W), GLY(EFB_H), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+    sMsDirty = 0;
 }
 
 void gxb_init(void) {
@@ -544,10 +688,8 @@ void gxb_init(void) {
     const char* v;
     uint32_t white = 0xFFFFFFFF;
     extern int hle_widescreen(void);
-    if ((v = getenv("RECOMP_GX_SCALE")) && atoi(v) > 0) sScaleX = sScaleY = atoi(v);
     if (hle_widescreen()) {
         sPixelAspect = 4.0 / 3.0;
-        sScaleX *= sPixelAspect;
         r.right = (LONG)(r.right * sPixelAspect + 0.5);
     }
     sDumpDir = getenv("RECOMP_GX_DUMP");
@@ -574,31 +716,22 @@ void gxb_init(void) {
     rc = wglCreateContext(sDC);
     wglMakeCurrent(sDC, rc);
     v = getenv("RECOMP_GX_HIDDEN");
-    if (!(v && *v && *v != '0')) ShowWindow(sWnd, SW_SHOW);
+    sHidden = v && *v && *v != '0';
+    if (!sHidden) ShowWindow(sWnd, SW_SHOW);
     load_gl();
     fprintf(stderr, "gl: %s, %s\n", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
+    glGetIntegerv(GL_MAX_SAMPLES, &sMaxSamples);
     build_program();
     build_copy_program();
+    build_overlay_program();
 
     glGenTextures(1, &sEfbColor);
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(EFB_W), GLY(EFB_H), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     p_glGenRenderbuffers(1, &sEfbDepth);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, sEfbDepth);
-    /* Depth is stored reversed, 1 - GX depth, in a float buffer: GX
-     * scenes put their depths within a few millionths of 1, where a 24-bit
-     * buffer fed by float math can't tell surfaces one GX step apart (the
-     * picture in the picture confirmation dialog lost to its frame). */
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, GLX(EFB_W), GLY(EFB_H));
     p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     p_glGenFramebuffers(1, &sEfbFbo);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
-    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sEfbColor, 0);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, sEfbDepth);
-    glClearColor(0, 0, 0, 0);
-    glClearDepth(0.0); /* the far plane, reversed */
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    apply_settings();
 
     glGenTextures(1, &sWhite);
     glBindTexture(GL_TEXTURE_2D, sWhite);
@@ -665,7 +798,8 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
     GLint cin[64], ain[64], cop[64], aop[64], map[64], sel[64], swap[16], alpha[4];
     GLfloat reg[16], konst[16], aref[4];
     int i;
-    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+    sMsDirty = 1;
     p_glUseProgram(sProgram);
     p_glBindVertexArray(sVao);
 
@@ -782,7 +916,8 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
 
 static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GLbitfield mask = 0;
-    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+    sMsDirty = 1;
     glDisable(GL_SCISSOR_TEST);
     glColorMask(color, color, color, alpha);
     glDepthMask(depth ? GL_TRUE : GL_FALSE);
@@ -814,6 +949,7 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
     for (i = 0; i < sTargetCount; i++) {
         if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) t = &sTargets[i];
     }
+    resolve();
     if (!t) {
         if (sTargetCount == 64) return;
         t = &sTargets[sTargetCount++];
@@ -856,8 +992,55 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
     glDrawArrays(GL_TRIANGLES, 0, 3);
     p_glUseProgram(sProgram);
     p_glBindVertexArray(sVao);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
     gx_register_copy(addr, t->tex, w, h, fmt);
+}
+
+static void alloc_efb(void) {
+    int w = GLX(EFB_W), h = GLY(EFB_H), i;
+    glBindTexture(GL_TEXTURE_2D, sEfbColor);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, sEfbDepth);
+    /* Depth is stored reversed, 1 - GX depth, in a float buffer: GX
+     * scenes put their depths within a few millionths of 1, where a 24-bit
+     * buffer fed by float math can't tell surfaces one GX step apart (the
+     * picture in the picture confirmation dialog lost to its frame). */
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, sMsaa > 1 ? 1 : w, sMsaa > 1 ? 1 : h);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sEfbColor, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, sMsaa > 1 ? 0 : sEfbDepth);
+    if (sMsFbo) {
+        p_glDeleteFramebuffers(1, &sMsFbo);
+        p_glDeleteRenderbuffers(1, &sMsColor);
+        p_glDeleteRenderbuffers(1, &sMsDepth);
+        sMsFbo = sMsColor = sMsDepth = 0;
+    }
+    sDrawFbo = sEfbFbo;
+    if (sMsaa > 1) {
+        p_glGenRenderbuffers(1, &sMsColor);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, sMsColor);
+        p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, sMsaa, GL_RGBA8, w, h);
+        p_glGenRenderbuffers(1, &sMsDepth);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, sMsDepth);
+        p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, sMsaa, GL_DEPTH_COMPONENT32F, w, h);
+        p_glGenFramebuffers(1, &sMsFbo);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, sMsFbo);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, sMsColor);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, sMsDepth);
+        sDrawFbo = sMsFbo;
+    }
+    for (i = 0; i < sTargetCount; i++) {
+        glBindTexture(GL_TEXTURE_2D, sTargets[i].tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(sTargets[i].w), GLY(sTargets[i].h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glClearColor(0, 0, 0, 0);
+    glClearDepth(0.0); /* the far plane, reversed */
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    sMsDirty = 0;
 }
 
 static void dump_bmp(const char* path, int w, int h) {
@@ -902,14 +1085,40 @@ static void gxb_present_gl(int x, int y, int cw, int ch) {
         dh = h;
         dw = (int)(h * aspect + 0.5);
     }
+    resolve();
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sEfbFbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, w, h);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     p_glBlitFramebuffer(GLX(x), GLY(EFB_H - y - ch), GLX(x + cw), GLY(EFB_H - y), (w - dw) / 2, (h - dh) / 2,
                         (w - dw) / 2 + dw, (h - dh) / 2 + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    /* Nothing slow belongs in here: presenting happens in the GX flush at
+     * a retrace, before the retrace interrupt, and a few milliseconds more
+     * every frame (reading a controller that isn't plugged in, for one)
+     * can leave the game showing every fourth retrace (15 fps). */
+    {
+        const uint32_t* menu = menu_draw(w, h);
+        if (menu) {
+            p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            p_glUseProgram(sOverlayProgram);
+            p_glBindVertexArray(sCopyVao);
+            p_glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, sOverlayTex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, menu);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            p_glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDisable(GL_BLEND);
+            p_glUseProgram(sProgram);
+            p_glBindVertexArray(sVao);
+        }
+    }
     if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0) {
         char path[512];
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -964,6 +1173,9 @@ static void gxb_present_gl(int x, int y, int cw, int ch) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+    /* Between frames, so a change doesn't lose the one being drawn. */
+    apply_settings();
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
 }
 
 /* ------------------------------------------------------------------------ */

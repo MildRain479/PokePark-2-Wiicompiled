@@ -1,12 +1,12 @@
 /* Wii Remote 0 from the keyboard and the first XInput controller, for
  * hle_wpad.c. PokePark is played with the remote held sideways, like a
- * classic pad: the d-pad moves, 1 and 2 are the face buttons.
+ * classic pad: the d-pad moves, 1 and 2 are the face buttons. By default:
  *
  *                    keyboard / mouse           controller
  *   d-pad (move)     WASD / arrows              d-pad / left stick
- *   2 (jump)         Space / X / K              A
- *   1 (dash)         left click / Z / J         X
- *   A (Thunderbolt)  right click / Enter / C    B
+ *   2 (jump)         Space / X                  A
+ *   1 (dash)         left click / Z             X
+ *   A (Thunderbolt)  right click / Enter        B
  *   B                V / Left Ctrl              Y / right trigger
  *   +                P                          Start
  *   -                M                          Back
@@ -17,11 +17,13 @@
  * has focus the mouse is captured: hidden, held in the window, and its
  * movement turns the camera (hle_camera.c). Esc lets it go; a click in
  * the window captures it again. Mouse buttons count only while captured,
- * and not the click that captures it. */
+ * and not the click that captures it. The settings menu (menu_win32.c)
+ * changes the bindings; while it is open the game gets no input. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include "host_input.h"
+#include "host_settings.h"
 
 typedef struct {
     WORD wButtons;
@@ -36,12 +38,6 @@ typedef struct {
     WORD wLeftMotorSpeed, wRightMotorSpeed;
 } XPadVibration;
 
-enum {
-    XPAD_UP = 0x0001, XPAD_DOWN = 0x0002, XPAD_LEFT = 0x0004, XPAD_RIGHT = 0x0008,
-    XPAD_START = 0x0010, XPAD_BACK = 0x0020, XPAD_RTHUMB = 0x0080,
-    XPAD_LB = 0x0100, XPAD_RB = 0x0200, XPAD_A = 0x1000, XPAD_B = 0x2000, XPAD_X = 0x4000, XPAD_Y = 0x8000,
-};
-
 static DWORD(WINAPI* pXInputGetState)(DWORD, XPadState*);
 static DWORD(WINAPI* pXInputSetState)(DWORD, XPadVibration*);
 
@@ -53,37 +49,43 @@ static int has_focus(void) {
     return pid == GetCurrentProcessId();
 }
 
-static int sCaptured, sReleased, sSwallow;
+static int sCaptured, sReleased, sSwallow, sButtonsLive;
 static POINT sCenter;
 static float sMouseX, sMouseY;
 
+/* Keeps the cursor in the window while captured, checked on every poll:
+ * going fullscreen moves the window. */
 static void capture(int on) {
-    if (on == sCaptured) return;
-    sCaptured = on;
     if (on) {
         RECT r;
+        POINT c;
         HWND w = GetForegroundWindow();
         GetClientRect(w, &r);
         MapWindowPoints(w, NULL, (POINT*)&r, 2);
-        ClipCursor(&r);
-        sCenter.x = (r.left + r.right) / 2;
-        sCenter.y = (r.top + r.bottom) / 2;
-        SetCursorPos(sCenter.x, sCenter.y);
-        while (ShowCursor(FALSE) >= 0) {}
-    } else {
+        c.x = (r.left + r.right) / 2;
+        c.y = (r.top + r.bottom) / 2;
+        if (!sCaptured || c.x != sCenter.x || c.y != sCenter.y) {
+            ClipCursor(&r);
+            sCenter = c;
+            SetCursorPos(sCenter.x, sCenter.y);
+        }
+        if (!sCaptured) while (ShowCursor(FALSE) >= 0) {}
+    } else if (sCaptured) {
         ClipCursor(NULL);
         while (ShowCursor(TRUE) < 0) {}
     }
+    sCaptured = on;
 }
 
-/* Captures or releases the mouse and collects its movement; returns the
- * pad bits of its buttons. */
-static uint32_t mouse(void) {
+/* Captures or releases the mouse and collects its movement; works out
+ * whether its buttons count (sButtonsLive). */
+static void mouse(void) {
     int left = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0, right = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
     POINT p;
-    if (!has_focus()) {
+    sButtonsLive = 0;
+    if (!has_focus() || menu_is_open()) {
         capture(0);
-        return 0;
+        return;
     }
     if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) sReleased = 1;
     if (sReleased && (left || right)) {
@@ -95,75 +97,96 @@ static uint32_t mouse(void) {
         if (PtInRect(&r, p)) sReleased = 0, sSwallow = 1;
     }
     capture(!sReleased);
-    if (!sCaptured) return 0;
+    if (!sCaptured) return;
     GetCursorPos(&p);
     sMouseX += (float)(p.x - sCenter.x);
     sMouseY += (float)(p.y - sCenter.y);
     if (p.x != sCenter.x || p.y != sCenter.y) SetCursorPos(sCenter.x, sCenter.y);
     if (sSwallow) {
-        if (left || right) return 0;
+        if (left || right) return;
         sSwallow = 0;
     }
-    return (left ? HOST_PAD_1 : 0) | (right ? HOST_PAD_A : 0);
+    sButtonsLive = 1;
 }
 
 static void read_mouse(float* dx, float* dy) {
-    *dx = sMouseX;
-    *dy = sMouseY;
+    *dx = sMouseX * g_settings.mouse_sensitivity;
+    *dy = sMouseY * g_settings.mouse_sensitivity * (g_settings.invert_tilt ? -1 : 1);
     sMouseX = sMouseY = 0;
 }
 
+static int is_mouse_button(int vk) {
+    return vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
+}
+
+/* The pad bit of each action (ACT_*). */
+static const uint32_t kActionBit[ACT_COUNT] = {
+    HOST_PAD_SCREEN_UP, HOST_PAD_SCREEN_DOWN, HOST_PAD_SCREEN_LEFT, HOST_PAD_SCREEN_RIGHT,
+    HOST_PAD_2, HOST_PAD_1, HOST_PAD_A, HOST_PAD_B, HOST_PAD_PLUS, HOST_PAD_MINUS, HOST_PAD_HOME, HOST_PAD_SHAKE,
+};
+
 static uint32_t keyboard(void) {
-    static const struct { int vk; uint32_t bit; } kKeys[] = {
-        {VK_UP, HOST_PAD_SCREEN_UP},       {'W', HOST_PAD_SCREEN_UP},
-        {VK_DOWN, HOST_PAD_SCREEN_DOWN},   {'S', HOST_PAD_SCREEN_DOWN},
-        {VK_LEFT, HOST_PAD_SCREEN_LEFT},   {'A', HOST_PAD_SCREEN_LEFT},
-        {VK_RIGHT, HOST_PAD_SCREEN_RIGHT}, {'D', HOST_PAD_SCREEN_RIGHT},
-        {'X', HOST_PAD_2}, {'K', HOST_PAD_2}, {VK_SPACE, HOST_PAD_2},
-        {'Z', HOST_PAD_1}, {'J', HOST_PAD_1},
-        {VK_RETURN, HOST_PAD_A}, {'C', HOST_PAD_A},
-        {'V', HOST_PAD_B}, {VK_LCONTROL, HOST_PAD_B},
-        {'P', HOST_PAD_PLUS}, {'M', HOST_PAD_MINUS},
-        {VK_HOME, HOST_PAD_HOME}, {'H', HOST_PAD_HOME},
-        {'Q', HOST_PAD_SHAKE}, {VK_LSHIFT, HOST_PAD_SHAKE},
-    };
     uint32_t held = 0;
-    size_t i;
+    int i, k;
     if (!has_focus()) return 0;
-    for (i = 0; i < sizeof(kKeys) / sizeof(kKeys[0]); i++) {
-        if (GetAsyncKeyState(kKeys[i].vk) & 0x8000) held |= kKeys[i].bit;
+    for (i = 0; i < ACT_COUNT; i++) {
+        for (k = 0; k < BIND_SLOTS; k++) {
+            int vk = g_settings.key[i][k];
+            if (vk && (!is_mouse_button(vk) || sButtonsLive) && (GetAsyncKeyState(vk) & 0x8000)) held |= kActionBit[i];
+        }
     }
     return held;
 }
 
-static uint32_t controller(void) {
-    static const struct { WORD xpad; uint32_t bit; } kButtons[] = {
-        {XPAD_UP, HOST_PAD_SCREEN_UP}, {XPAD_DOWN, HOST_PAD_SCREEN_DOWN},
-        {XPAD_LEFT, HOST_PAD_SCREEN_LEFT}, {XPAD_RIGHT, HOST_PAD_SCREEN_RIGHT},
-        {XPAD_A, HOST_PAD_2}, {XPAD_X, HOST_PAD_1}, {XPAD_B, HOST_PAD_A}, {XPAD_Y, HOST_PAD_B},
-        {XPAD_START, HOST_PAD_PLUS}, {XPAD_BACK, HOST_PAD_MINUS}, {XPAD_RTHUMB, HOST_PAD_HOME},
-        {XPAD_LB, HOST_PAD_SHAKE}, {XPAD_RB, HOST_PAD_SHAKE},
-    };
-    /* Half the stick's travel, then the d-pad direction. */
-    const SHORT kStick = 16384;
+/* Half the stick's travel, then the d-pad direction. */
+#define STICK_THRESHOLD 16384
+
+/* The controller's buttons (XPAD_*), and separately the directions the
+ * left stick is pushed, as d-pad bits. Read once per poll: asking about
+ * a controller that isn't plugged in takes milliseconds, and the menu
+ * gets the same reading. */
+static void controller_state(uint32_t* buttons, uint32_t* stick) {
     XPadState s;
+    *buttons = *stick = 0;
+    if (!pXInputGetState || pXInputGetState(0, &s) != ERROR_SUCCESS) return;
+    *buttons = s.Gamepad.wButtons;
+    if (s.Gamepad.bLeftTrigger > 128) *buttons |= XPAD_LT;
+    if (s.Gamepad.bRightTrigger > 128) *buttons |= XPAD_RT;
+    if (s.Gamepad.sThumbLY > STICK_THRESHOLD) *stick |= XPAD_UP;
+    if (s.Gamepad.sThumbLY < -STICK_THRESHOLD) *stick |= XPAD_DOWN;
+    if (s.Gamepad.sThumbLX < -STICK_THRESHOLD) *stick |= XPAD_LEFT;
+    if (s.Gamepad.sThumbLX > STICK_THRESHOLD) *stick |= XPAD_RIGHT;
+}
+
+/* The left stick always moves, besides what the d-pad is bound to. */
+static uint32_t controller(uint32_t b, uint32_t stick) {
     uint32_t held = 0;
-    size_t i;
-    if (!pXInputGetState || pXInputGetState(0, &s) != ERROR_SUCCESS) return 0;
-    for (i = 0; i < sizeof(kButtons) / sizeof(kButtons[0]); i++) {
-        if (s.Gamepad.wButtons & kButtons[i].xpad) held |= kButtons[i].bit;
+    int i, k;
+    for (i = 0; i < ACT_COUNT; i++) {
+        for (k = 0; k < BIND_SLOTS; k++) {
+            if (b & g_settings.pad[i][k]) held |= kActionBit[i];
+        }
     }
-    if (s.Gamepad.bRightTrigger > 128) held |= HOST_PAD_B;
-    if (s.Gamepad.sThumbLY > kStick) held |= HOST_PAD_SCREEN_UP;
-    if (s.Gamepad.sThumbLY < -kStick) held |= HOST_PAD_SCREEN_DOWN;
-    if (s.Gamepad.sThumbLX < -kStick) held |= HOST_PAD_SCREEN_LEFT;
-    if (s.Gamepad.sThumbLX > kStick) held |= HOST_PAD_SCREEN_RIGHT;
+    if (stick & XPAD_UP) held |= HOST_PAD_SCREEN_UP;
+    if (stick & XPAD_DOWN) held |= HOST_PAD_SCREEN_DOWN;
+    if (stick & XPAD_LEFT) held |= HOST_PAD_SCREEN_LEFT;
+    if (stick & XPAD_RIGHT) held |= HOST_PAD_SCREEN_RIGHT;
     return held;
 }
 
+/* While the menu is open, and after it closes until everything held is
+ * let go, nothing reaches the game: not the press that closed it. */
 static int read_pad(int chan, uint32_t* held) {
+    static int menuHeld;
+    uint32_t buttons, stick;
     if (chan != 0) return 0;
-    *held = keyboard() | mouse() | controller();
+    mouse();
+    controller_state(&buttons, &stick);
+    menu_controller(buttons, buttons | stick);
+    *held = keyboard() | controller(buttons, stick);
+    if (menu_is_open()) menuHeld = 1;
+    else if (menuHeld && !*held) menuHeld = 0;
+    if (menuHeld) *held = 0;
     return 1;
 }
 
