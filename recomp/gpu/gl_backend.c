@@ -2,16 +2,18 @@
  *
  * The EFB (the GPU's embedded framebuffer, 640x528) is an offscreen
  * framebuffer rendered at RECOMP_GX_SCALE times the native resolution
- * (default 2). TEV, the GPU's programmable color combiner, runs in one
- * "uber" fragment shader driven by uniforms, so any stage setup draws
- * without compiling a new shader. Copies of the EFB to the XFB are
- * presented in a window; RECOMP_GX_DUMP=<dir> also writes them as BMPs.
+ * (default 2), and 4/3 as wide again in 16:9. TEV, the GPU's
+ * programmable color combiner, runs in one "uber" fragment shader driven
+ * by uniforms, so any stage setup draws without compiling a new shader.
+ * Copies of the EFB to the XFB are presented in a window at the shape
+ * they have on a TV; RECOMP_GX_DUMP=<dir> also writes them as BMPs.
  *
  * Environment:
  *   RECOMP_GX_SCALE=n          internal resolution multiplier
  *   RECOMP_GX_HIDDEN=1         do not show the window
  *   RECOMP_GX_DUMP=<dir>       write presented frames as BMP files
  *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30) */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -516,7 +518,13 @@ static void build_copy_program(void) {
 
 static HWND sWnd;
 static HDC sDC;
-static int sScale = 2;
+/* EFB pixels to GL pixels. In 16:9 the game squeezes a wide picture into
+ * the EFB's 640 columns for the TV to stretch out, so the EFB gets 4/3 as
+ * many pixels across: the stretched picture is then at full resolution. */
+static double sScaleX = 2, sScaleY = 2;
+static double sPixelAspect = 1; /* width of an EFB pixel on screen, over its height */
+#define GLX(x) ((GLint)floor((x) * sScaleX + 0.5))
+#define GLY(y) ((GLint)floor((y) * sScaleY + 0.5))
 static GLuint sEfbFbo, sEfbColor, sEfbDepth;
 static GLuint sWhite;
 static const char* sDumpDir;
@@ -535,7 +543,13 @@ void gxb_init(void) {
     HGLRC rc;
     const char* v;
     uint32_t white = 0xFFFFFFFF;
-    if ((v = getenv("RECOMP_GX_SCALE")) && atoi(v) > 0) sScale = atoi(v);
+    extern int hle_widescreen(void);
+    if ((v = getenv("RECOMP_GX_SCALE")) && atoi(v) > 0) sScaleX = sScaleY = atoi(v);
+    if (hle_widescreen()) {
+        sPixelAspect = 4.0 / 3.0;
+        sScaleX *= sPixelAspect;
+        r.right = (LONG)(r.right * sPixelAspect + 0.5);
+    }
     sDumpDir = getenv("RECOMP_GX_DUMP");
     if ((v = getenv("RECOMP_GX_DUMP_EVERY")) && atoi(v) > 0) sDumpEvery = atoi(v);
 
@@ -568,7 +582,7 @@ void gxb_init(void) {
 
     glGenTextures(1, &sEfbColor);
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * sScale, EFB_H * sScale, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(EFB_W), GLY(EFB_H), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     p_glGenRenderbuffers(1, &sEfbDepth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, sEfbDepth);
@@ -576,7 +590,7 @@ void gxb_init(void) {
      * scenes put their depths within a few millionths of 1, where a 24-bit
      * buffer fed by float math can't tell surfaces one GX step apart (the
      * picture in the picture confirmation dialog lost to its frame). */
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, EFB_W * sScale, EFB_H * sScale);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, GLX(EFB_W), GLY(EFB_H));
     p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     p_glGenFramebuffers(1, &sEfbFbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, sEfbFbo);
@@ -734,8 +748,11 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
     }
     glDisable(GL_CULL_FACE);
 
-    glViewport((GLint)(st->viewport[0] * sScale), (GLint)((EFB_H - (st->viewport[1] + st->viewport[3])) * sScale),
-               (GLsizei)(st->viewport[2] * sScale), (GLsizei)(st->viewport[3] * sScale));
+    /* Edges are scaled and rounded, rather than the size, so neighbouring
+     * rectangles still meet at a fractional scale. */
+    glViewport(GLX(st->viewport[0]), GLY(EFB_H - (st->viewport[1] + st->viewport[3])),
+               GLX(st->viewport[0] + st->viewport[2]) - GLX(st->viewport[0]),
+               GLY(EFB_H - st->viewport[1]) - GLY(EFB_H - (st->viewport[1] + st->viewport[3])));
     glDepthRange(1.0 - (st->viewport[5] > 1 ? 1 : st->viewport[5]), 1.0 - (st->viewport[4] < 0 ? 0 : st->viewport[4]));
     /* Face culling (GX_CULL_NONE, FRONT, BACK, ALL). GX's front faces wind
      * counter-clockwise in GL's window coordinates, GL's default. Games
@@ -749,8 +766,8 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
         glCullFace(kCull[st->cull_mode]);
     }
     glEnable(GL_SCISSOR_TEST);
-    glScissor(st->scissor[0] * sScale, (EFB_H - st->scissor[3]) * sScale, (st->scissor[2] - st->scissor[0]) * sScale,
-              (st->scissor[3] - st->scissor[1]) * sScale);
+    glScissor(GLX(st->scissor[0]), GLY(EFB_H - st->scissor[3]), GLX(st->scissor[2]) - GLX(st->scissor[0]),
+              GLY(EFB_H - st->scissor[1]) - GLY(EFB_H - st->scissor[3]));
 
     if (st->xf && st->xf_dirty_lo < st->xf_dirty_hi) {
         /* Only the XF words written since the last draw. */
@@ -805,7 +822,7 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
         t->h = h;
         glGenTextures(1, &t->tex);
         glBindTexture(GL_TEXTURE_2D, t->tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w * sScale, h * sScale, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(w), GLY(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -821,7 +838,7 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glViewport(0, 0, w * sScale, h * sScale);
+    glViewport(0, 0, GLX(w), GLY(h));
     p_glUseProgram(sCopyProgram);
     p_glBindVertexArray(sCopyVao);
     p_glActiveTexture(GL_TEXTURE0);
@@ -870,19 +887,29 @@ static void dump_bmp(const char* path, int w, int h) {
 static void gxb_present_gl(int x, int y, int cw, int ch) {
     RECT r;
     MSG msg;
-    int w, h;
+    int w, h, dw, dh;
+    double aspect;
     GetClientRect(sWnd, &r);
     w = r.right - r.left;
     h = r.bottom - r.top;
-    /* The copied rectangle of the EFB, scaled to the window. */
+    /* The copied rectangle of the EFB, as large as fits in the window at
+     * the shape it has on a TV (an EFB pixel is square in 4:3, 4/3 as wide
+     * in 16:9), with black bars on the sides left over. */
+    aspect = ch > 0 ? cw * sPixelAspect / ch : 1;
+    dw = w;
+    dh = (int)(w / aspect + 0.5);
+    if (dh > h) {
+        dh = h;
+        dw = (int)(h * aspect + 0.5);
+    }
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sEfbFbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, w, h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    p_glBlitFramebuffer(x * sScale, (EFB_H - y - ch) * sScale, (x + cw) * sScale, (EFB_H - y) * sScale, 0, 0, w, h,
-                        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    p_glBlitFramebuffer(GLX(x), GLY(EFB_H - y - ch), GLX(x + cw), GLY(EFB_H - y), (w - dw) / 2, (h - dh) / 2,
+                        (w - dw) / 2 + dw, (h - dh) / 2 + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0) {
         char path[512];
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);

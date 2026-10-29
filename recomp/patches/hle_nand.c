@@ -311,7 +311,7 @@ typedef struct {
 
 static const ScDefault kScDefaults[] = {
     {"IPL.LNG", SC_BYTE, 1},  /* English */
-    {"IPL.AR", SC_BYTE, 0},   /* 4:3 */
+    {"IPL.AR", SC_BYTE, 0},   /* 4:3 (reported as hle_widescreen() says) */
     {"IPL.SND", SC_BYTE, 1},  /* stereo */
     {"IPL.PGS", SC_BYTE, 0},  /* no progressive scan */
     {"IPL.E60", SC_BYTE, 1},  /* EuRGB60 (PAL only) */
@@ -413,6 +413,20 @@ static void ensure_sysconf(void) {
     fclose(f);
     HLE_LOG("NAND: wrote default system settings to SYSCONF");
 }
+
+int hle_widescreen(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("RECOMP_WIDESCREEN");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* u8 SCGetAspectRatio(void): the TV's shape from SYSCONF (IPL.AR), as the
+ * game reads it once at start-up. Answered from hle_widescreen() instead,
+ * so the setting doesn't depend on a SYSCONF already on the NAND. */
+void f_8023E860(ppc_t* c) { c->r[3] = hle_widescreen() ? 1 : 0; }
 
 /* The system menu's setting.txt: text lines, XOR-scrambled with a rotating
  * key, padded to 0x100 bytes. */

@@ -105,7 +105,13 @@ The title, menus and the movie intro run at a steady 60 fps (the window
 title shows the frame rate and the slowest frame of the last second).
 A Wii's NTSC video runs at 59.94 Hz; here the refresh and the game's
 frame timing run at 60 Hz by default, to match PC displays
-(`RECOMP_VI_HZ=59.94` restores the original). THP movie frames are
+(`RECOMP_VI_HZ=59.94` restores the original). The console is set up
+for a 16:9 TV by default, so the game draws its widescreen pictures and
+layouts. It squeezes them into the EFB's 640 columns for a TV to
+stretch out; the EFB is rendered 4/3 as wide as it is scaled tall, so
+the stretched picture is at full resolution. Frames are shown at the
+shape they have on a TV, with black bars filling the rest of the
+window. THP movie frames are
 decoded natively (`hle_thp.c`). EFB copies are converted to their copy
 format, and the EFB depth is stored reversed in a float buffer, for the
 precision GX scenes need near the far plane. 3D lighting is implemented
@@ -154,7 +160,11 @@ Diagnostics:
   `RECOMP_GX_DUMP_EVERY=<n>` changes the interval.
 - `RECOMP_GX_HIDDEN=1` keeps the window hidden.
 - `RECOMP_GX_SCALE=<n>` sets the internal resolution multiplier
-  (default 2).
+  (default 2). The game shows 456 lines, so the picture is 456n lines
+  tall; at 3 in 16:9 it is 2560x1368, pixel for pixel across a 1440p
+  display.
+- `RECOMP_WIDESCREEN=0` sets the console up for a 4:3 TV instead of
+  16:9.
 - `RECOMP_PAD_SCRIPT="<seconds>:<buttons> ..."` presses buttons at set
   times, for unattended runs: `"10:2 10.3: 22:right 22.3:"` presses 2 at
   10 s and right at 22 s. Buttons: up down left right a b 1 2 plus minus
@@ -196,7 +206,7 @@ Diagnostics:
 | `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
 | `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
 | `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. |
-| `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. It also provides what a US console's system menu leaves there: `SYSCONF` (English, 4:3, stereo, Wii Remote settings) and `setting.txt` (region USA). |
+| `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. It also provides what a US console's system menu leaves there: `SYSCONF` (English, stereo, Wii Remote settings) and `setting.txt` (region USA). `SCGetAspectRatio` reports a 16:9 TV unless `RECOMP_WIDESCREEN=0`. |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
