@@ -52,6 +52,7 @@ typedef struct Fiber {
     Resume* irq[MAX_NESTED_INTERRUPTS];
     uint32_t irq_ctx[MAX_NESTED_INTERRUPTS];
     int irq_depth;
+    int exited; /* its thread called OSExitThread; the slot can be reused */
 } Fiber;
 
 static Fiber sFibers[MAX_THREADS];
@@ -111,6 +112,9 @@ static void WINAPI fiber_main(void* arg) {
     ppc_icall(c, entry);
     /* Returning from the thread function goes to its LR, OSExitThread. */
     if (ret != kOSExitThread) HLE_WARN("thread %08X returned to %08X", f->ctx, ret);
+    /* OSExitThread switches away for good: a thread created later at the
+     * same address gets a new fiber (OSLoadContext). */
+    f->exited = 1;
     ppc_icall(c, kOSExitThread);
     HLE_WARN("thread %08X: OSExitThread returned", f->ctx);
     exit(1);
@@ -187,12 +191,24 @@ void f_80209080(ppc_t* c) {
         longjmp(sCurrent->irq[sCurrent->irq_depth - 1]->jb, 1);
     }
     f = fiber_for(ctx);
-    if (!f) {
-        if (sFiberCount >= MAX_THREADS) {
-            HLE_WARN("too many threads");
-            exit(1);
+    if (!f || f->exited) {
+        /* A new thread: in the slot of the one that ran at this address
+         * before, or of any thread that has exited, or a new slot. */
+        int i;
+        for (i = 0; !f && i < sFiberCount; i++) {
+            if (sFibers[i].exited) f = &sFibers[i];
         }
-        f = &sFibers[sFiberCount++];
+        if (!f) {
+            if (sFiberCount >= MAX_THREADS) {
+                HLE_WARN("too many threads");
+                exit(1);
+            }
+            f = &sFibers[sFiberCount++];
+        }
+#ifdef _WIN32
+        if (f->handle) DeleteFiber(f->handle);
+#endif
+        memset(f, 0, sizeof(*f));
         f->ctx = ctx;
 #ifdef _WIN32
         f->handle = CreateFiber(FIBER_STACK, fiber_main, f);
@@ -271,4 +287,14 @@ void hle_dump_threads(void) {
         fprintf(stderr, "thread %08X%s:\n", f->ctx, f == sCurrent ? " (running)" : "");
         if (f != sCurrent && f->resume) ppc_backtrace(&f->resume->regs);
     }
+}
+
+/* BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param,
+ * void* stack, u32 stackSize, OSPriority priority, u16 attr): a thread
+ * created where an earlier one ran (one that exited or was cancelled)
+ * must start on a new fiber, not continue the old one's. */
+void f_80210740(ppc_t* c) {
+    Fiber* f = fiber_for(c->r[3]);
+    if (f && f != sCurrent) f->exited = 1;
+    f_80210740_orig(c);
 }

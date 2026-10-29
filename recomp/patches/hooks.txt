@@ -49,3 +49,4 @@
 0x8024A5C0 WPADCanSendStreamData  # hle_wpad.c
 0x8024A650 WPADSendStreamData  # hle_wpad.c
 
+0x80210740 OSCreateThread  # hle_thread.c: a reused OSThread gets a new fiber
