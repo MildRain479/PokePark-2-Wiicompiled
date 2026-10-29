@@ -592,22 +592,32 @@ void gxb_present(int x, int y, int cw, int ch) {
     SwapBuffers(sDC);
     sPresented++;
     {
-        /* Frames per second, in the window title and, with RECOMP_FPS=1,
-         * on stderr. */
-        static DWORD since;
+        /* Frames per second and the longest frame of the last second, in
+         * the window title and, with RECOMP_FPS=1, on stderr. */
+        static LARGE_INTEGER freq, since, last;
         static unsigned frames;
-        DWORD now = GetTickCount();
-        frames++;
-        if (!since) since = now;
-        if (now - since >= 1000) {
-            char title[64];
-            double fps = frames * 1000.0 / (now - since);
+        static double worst;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (!freq.QuadPart) {
+            QueryPerformanceFrequency(&freq);
+            since = last = now;
+        } else {
+            double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+            if (ms > worst) worst = ms;
+            frames++;
+            last = now;
+        }
+        if (now.QuadPart - since.QuadPart >= freq.QuadPart) {
+            char title[96];
+            double fps = frames * (double)freq.QuadPart / (now.QuadPart - since.QuadPart);
             const char* e = getenv("RECOMP_FPS");
-            snprintf(title, sizeof(title), "PokePark (recompiled) - %.1f fps", fps);
+            snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms", fps, worst);
             SetWindowTextA(sWnd, title);
-            if (e && *e == '1') fprintf(stderr, "fps: %.1f\n", fps);
+            if (e && *e == '1') fprintf(stderr, "fps: %.2f, slowest frame %.1f ms\n", fps, worst);
             since = now;
             frames = 0;
+            worst = 0;
         }
     }
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {

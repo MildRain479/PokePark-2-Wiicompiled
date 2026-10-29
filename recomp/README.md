@@ -101,9 +101,12 @@ buffered): the title movie's soundtrack, menu music and sound effects.
 There is no reverb or other effects yet, and the Wii Remote speaker is
 silent.
 
-The title, menus and the movie intro run at 60 fps, with the host
-thread idle about half the time (the window title shows the frame
-rate). Text in some dialog boxes renders as garbled glyphs, and 3D
+The title, menus and the movie intro run at a steady 60 fps (the window
+title shows the frame rate and the slowest frame of the last second).
+A Wii's NTSC video runs at 59.94 Hz; here the refresh and the game's
+frame timing run at 60 Hz by default, to match PC displays
+(`RECOMP_VI_HZ=59.94` restores the original). THP movie frames are
+decoded natively (`hle_thp.c`). Text in some dialog boxes renders as garbled glyphs, and 3D
 lighting is missing; those are graphics bugs still to fix.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
@@ -156,7 +159,11 @@ Diagnostics:
 - `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
   before the watchdog stops a run (for finding what a stuck game is
   polling).
-- `RECOMP_FPS=1` prints the frame rate every second.
+- `RECOMP_FPS=1` prints the frame rate and slowest frame every second.
+- `RECOMP_VI_HZ=<rate>` sets the video refresh and frame rate (default
+  60; 59.94 is the Wii's).
+- `RECOMP_THP=orig` decodes THP movies with the game's own decoder;
+  `RECOMP_THP=check` runs both and reports how far they differ.
 - `RECOMP_PROFILE=<seconds>` samples the game's host thread about once a
   millisecond from that point until the watchdog stops the run, then
   lists the host functions it was in most; recompiled functions show
@@ -178,7 +185,8 @@ Diagnostics:
 | `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Volume ramps, the aux (effects) buses and the remote speaker are not mixed. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
-| `hle_game.c` | Not hardware: game changes. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
+| `hle_thp.c` | THP movie video: `THPVideoDecode` decoded natively (baseline JPEG without byte stuffing, written as I8 tiles). The game's decoder took ~12 ms a frame in recompiled code. The output matches it to within a few levels on under 0.5% of bytes (IDCT rounding). |
+| `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
 
 **Memory differences from a Wii:**
 - **MEM2:** the game also gets the top of MEM2 that IOS normally keeps
@@ -251,9 +259,8 @@ Not implemented yet:
 
   This matters for bit-exact physics and replays; none of the current
   tests showed a difference.
-- **Performance.** Measured so far only on movies and menus, which run
-  at 60 fps. Most of the busy time is THP decoding (Huffman and inverse
-  DCT in recompiled code); a native THP decoder would remove it. In
-  general every register lives in memory (`c->r[n]`), and caching
-  registers in locals per function is the usual next step. Gameplay has
-  not been profiled yet.
+- **Performance.** Measured so far only on movies and menus, which hold
+  60 fps with frames on time even with other programs loading the
+  machine. In general every register lives in memory (`c->r[n]`), and
+  caching registers in locals per function is the usual next step.
+  Gameplay has not been profiled yet.

@@ -7,6 +7,7 @@
  * then shows for a few more seconds after the load has finished. Here
  * Strap hands over to the title as soon as the load is done, and Hold is
  * skipped. RECOMP_BOOT_SCREENS=1 keeps the original screens. */
+#include <math.h>
 #include <stdlib.h>
 
 #include "hle.h"
@@ -46,5 +47,29 @@ void f_80173E10(ppc_t* c) {
         f_801741F0(c);
         f_80019620(c); /* SceneManager::Get */
         f_8016C950(c); /* sets fChangeScene (+0x2C) */
+    }
+}
+
+/* Frame pacing: the game times its updates and draws in fixed steps on
+ * the time base, computed at start-up as (bus clock / 4) times 1/59.94 s
+ * and 2/59.94 s (for 30 fps) by four schedulers, each with its own copy of
+ * the two constants. They are set to the emulated refresh rate instead
+ * (hle_irq.c), so the steps agree with the retrace. Each is rounded down
+ * to at most one retrace period, as the originals are: a step even
+ * slightly longer leaves some frames without one (30 fps). */
+static const uint32_t kFrameStepConsts[] = {0x80487540, 0x804877A0, 0x80488924, 0x80488990};
+
+static float step_const(double frames) {
+    double hz = hle_vi_hz(), ticks = PPC_TB_HZ * frames / hz;
+    float f = (float)(frames / hz);
+    while ((double)f * PPC_TB_HZ > ticks) f = nextafterf(f, 0.0f);
+    return f;
+}
+
+void hle_game_init(void) {
+    size_t i;
+    for (i = 0; i < sizeof(kFrameStepConsts) / sizeof(kFrameStepConsts[0]); i++) {
+        ST32(kFrameStepConsts[i], f32_bits(step_const(1)));
+        ST32(kFrameStepConsts[i] + 4, f32_bits(step_const(2)));
     }
 }

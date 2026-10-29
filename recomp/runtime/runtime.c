@@ -84,8 +84,31 @@ static struct {
 } sOverrides[MAX_OVERRIDES];
 static int sOverrideCount;
 
+/* Indirect calls (bctrl, function pointers, virtual calls) look their
+ * target up here. For main.dol's code, below 0x80400000, a table indexed
+ * by address answers in one load; it is built on first use and follows
+ * overrides. */
+#define DIRECT_BASE 0x80000000u
+#define DIRECT_COUNT 0x100000u /* 4 MB of code, one entry per word */
+static ppc_func* sDirect;
+
+static void build_direct(void) {
+    unsigned i;
+    sDirect = (ppc_func*)calloc(DIRECT_COUNT, sizeof(ppc_func));
+    if (!sDirect) return;
+    for (i = 0; i < ppc_func_count; i++) {
+        uint32_t a = ppc_func_table[i].addr;
+        if (a - DIRECT_BASE < DIRECT_COUNT * 4) sDirect[(a - DIRECT_BASE) >> 2] = ppc_func_table[i].fn;
+    }
+    for (i = 0; i < (unsigned)sOverrideCount; i++) {
+        uint32_t a = sOverrides[i].addr;
+        if (a - DIRECT_BASE < DIRECT_COUNT * 4) sDirect[(a - DIRECT_BASE) >> 2] = sOverrides[i].fn;
+    }
+}
+
 void ppc_set_override(uint32_t addr, ppc_func fn) {
     int i;
+    if (sDirect && addr - DIRECT_BASE < DIRECT_COUNT * 4) sDirect[(addr - DIRECT_BASE) >> 2] = fn;
     for (i = 0; i < sOverrideCount; i++) {
         if (sOverrides[i].addr == addr) { sOverrides[i].fn = fn; return; }
     }
@@ -99,6 +122,8 @@ void ppc_set_override(uint32_t addr, ppc_func fn) {
 ppc_func ppc_lookup(uint32_t addr) {
     unsigned lo = 0, hi = ppc_func_count;
     int i;
+    if (!sDirect) build_direct();
+    if (sDirect && addr - DIRECT_BASE < DIRECT_COUNT * 4 && !(addr & 3)) return sDirect[(addr - DIRECT_BASE) >> 2];
     for (i = 0; i < sOverrideCount; i++) {
         if (sOverrides[i].addr == addr) return sOverrides[i].fn;
     }

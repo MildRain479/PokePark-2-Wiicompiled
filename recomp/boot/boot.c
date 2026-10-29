@@ -18,6 +18,7 @@ void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
 void input_init(void);
 void audio_init(void);
+void hle_game_init(void);
 
 static ppc_t* gCpu;
 
@@ -253,6 +254,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     setup_low_memory();
+    hle_game_init();
     {
         /* <dir>/sys/main.dol -> <dir>/disc */
         char root[1024];
@@ -286,6 +288,12 @@ int main(int argc, char** argv) {
             VirtualProtect(gWatchPage, 0x1000, PAGE_READONLY, &old);
         }
     }
+#ifdef _WIN32
+    /* The whole game runs on this thread and sleeps between retraces;
+     * above-normal priority gets it woken on time when other programs
+     * keep the CPU busy. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
     gx_init();
     input_init();
     audio_init();

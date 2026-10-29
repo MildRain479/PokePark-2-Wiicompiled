@@ -82,12 +82,15 @@ static int dec_expired(void) {
     return ppc_dec_deadline(&deadline) && (int64_t)(ppc_timebase() - deadline) >= 0;
 }
 
-/* Vertical retrace, 59.94 times a second (NTSC), once VIInit has
- * registered its handler for the VI interrupt. */
+/* Vertical retrace, once VIInit has registered its handler for the VI
+ * interrupt. The game's frames follow it. A Wii's NTSC output retraces
+ * 59.94 times a second; here the default is 60, to match PC displays (the
+ * game runs 0.1% faster; sound is clocked separately). RECOMP_VI_HZ sets
+ * another rate, e.g. 59.94 for the original. */
 #define INTERRUPT_PI_VI 24
 #define VI_DI0 0xCC002030u
 static const uint32_t kInterruptHandlerTable = 0x80486AF0; /* holds the table's address */
-static const uint64_t kRetracePeriod = PPC_TB_HZ * 1001 / 60000;
+static uint64_t sRetracePeriod;
 static uint64_t sNextRetrace;
 uint32_t g_retrace_count;
 
@@ -96,9 +99,20 @@ static uint32_t interrupt_handler(int n) {
     return table ? LD32(table + 4u * n) : 0;
 }
 
+double hle_vi_hz(void) {
+    static double hz;
+    if (!hz) {
+        const char* e = getenv("RECOMP_VI_HZ");
+        hz = e ? atof(e) : 60.0;
+        if (hz < 1 || hz > 1000) hz = 60.0;
+    }
+    return hz;
+}
+
 static int retrace_due(void) {
     if (!interrupt_handler(INTERRUPT_PI_VI)) return 0;
-    if (!sNextRetrace) sNextRetrace = ppc_timebase() + kRetracePeriod;
+    if (!sRetracePeriod) sRetracePeriod = (uint64_t)(PPC_TB_HZ / hle_vi_hz() + 0.5);
+    if (!sNextRetrace) sNextRetrace = ppc_timebase() + sRetracePeriod;
     return (int64_t)(ppc_timebase() - sNextRetrace) >= 0;
 }
 
@@ -186,7 +200,7 @@ void hle_deliver(ppc_t* c) {
                 ppc_dec_disarm();
                 hle_interrupt(c, kDecrementerHandler, EXC_DECREMENTER, LD32(0x800000D4));
             } else if (which == MAX_TIMERS + 1) {
-                sNextRetrace += kRetracePeriod;
+                sNextRetrace += sRetracePeriod;
                 g_retrace_count++;
                 if (g_gx_flush) g_gx_flush();
                 ST16(VI_DI0, LD16(VI_DI0) | 0x8000);
@@ -211,6 +225,37 @@ void hle_deliver(ppc_t* c) {
     }
 }
 
+/* Waits until the time base reaches deadline. Sleep() wakes on the
+ * system timer tick (15.6 ms by default), up to a tick late. A
+ * high-resolution waitable timer wakes within a fraction of a millisecond;
+ * it is set a quarter millisecond early and a short spin covers the rest,
+ * which keeps frames on time even on a busy machine for little CPU. */
+#define SPIN_TICKS (PPC_TB_HZ / 4000) /* 0.25 ms */
+static void sleep_until(uint64_t deadline) {
+#ifdef _WIN32
+    static HANDLE timer;
+    if (!timer) {
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    }
+    for (;;) {
+        int64_t left = (int64_t)(deadline - ppc_timebase());
+        if (left <= 0) return;
+        if (left > (int64_t)SPIN_TICKS) {
+            /* In 100 ns units, negative for a relative time. */
+            LARGE_INTEGER due;
+            due.QuadPart = -((left - (int64_t)SPIN_TICKS) * 10000000 / (int64_t)PPC_TB_HZ);
+            if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+            else Sleep(1);
+        } else {
+            YieldProcessor();
+        }
+    }
+#else
+    while ((int64_t)(deadline - ppc_timebase()) > 0) {}
+#endif
+}
+
 int hle_wait_for_event(ppc_t* c) {
     uint64_t deadline = 0, dec;
     int have = 0;
@@ -233,14 +278,7 @@ int hle_wait_for_event(ppc_t* c) {
             }
         }
         if (!have) return 0;
-        /* Sleep until the next timer event. */
-        for (;;) {
-            int64_t left = (int64_t)(deadline - ppc_timebase());
-            if (left <= 0) break;
-#ifdef _WIN32
-            Sleep((DWORD)(left * 1000 / (int64_t)PPC_TB_HZ));
-#endif
-        }
+        sleep_until(deadline);
     }
     hle_deliver(c);
     return 1;

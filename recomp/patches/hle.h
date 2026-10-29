@@ -29,6 +29,9 @@ void hle_timer_start(int id, uint64_t period, void (*fire)(ppc_t* c));
 void hle_timer_stop(int id);
 enum { HLE_TIMER_AUDIO = 0, HLE_TIMER_PAD = 1 };
 
+/* The emulated video refresh rate (RECOMP_VI_HZ, default 60). */
+double hle_vi_hz(void);
+
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);
 
