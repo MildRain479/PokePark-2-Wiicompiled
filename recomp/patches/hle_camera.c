@@ -5,11 +5,17 @@
  * Pikachu.
  *
  * The mouse turns the yaw and its target directly: the game carries the
- * turn on as if its own camera had swung there. The pitch is the game's
- * (it follows the slope ahead), so the mouse's tilt is an offset: the
- * stored pitch carries it, which is what places the eye, and the two
- * functions that work the pitch out see the game's own value. B, which
- * recenters the game's camera, also clears the tilt. */
+ * turn on as if its own camera had swung there. While Pikachu moves, the
+ * game works the yaw out afresh each frame from where the eye was, so
+ * that the camera trails behind; the mouse swings that eye around the
+ * point looked at by the same angle, so the turn holds while running
+ * too. The pitch is the game's (it follows the slope ahead), so the
+ * mouse's tilt is an offset: the stored pitch carries it, which is what
+ * places the eye, and the two functions that work the pitch out see the
+ * game's own value. B, which recenters the game's camera, also clears the
+ * tilt. */
+#include <math.h>
+
 #include "hle.h"
 #include "host_input.h"
 
@@ -17,9 +23,11 @@ void (*g_host_mouse_read)(float* dx, float* dy);
 
 /* nsDelhi::nsCamera::CameraPlayer */
 enum {
-    CAM_PITCH = 0xC8, /* degrees, 0-360; more raises the eye */
-    CAM_YAW = 0xCC,   /* degrees, 0-360; more turns the view left */
-    CAM_YAW_TO = 0xD8 /* the yaw's easing target */
+    CAM_EYE = 0x0C,    /* the eye last placed */
+    CAM_PITCH = 0xC8,  /* degrees, 0-360; more raises the eye */
+    CAM_YAW = 0xCC,    /* degrees, 0-360; more turns the view left */
+    CAM_YAW_TO = 0xD8, /* the yaw's easing target */
+    CAM_AT = 0xEC      /* the point looked at, trailing Pikachu */
 };
 
 /* Degrees per pixel of mouse movement, and how far the mouse can tilt the
@@ -31,6 +39,16 @@ enum {
 static uint32_t sCam;                     /* the camera being turned */
 static float sTilt;                       /* the mouse's pitch offset */
 static uint32_t sGamePitch, sOurPitch;    /* as stored (float bits) */
+
+/* Swings the eye around the point looked at, so that the yaw from it to
+ * that point grows by deg (Atan2Fixed(x, z), as the game takes it). */
+static void swing_eye(uint32_t cam, float deg) {
+    float r = deg * 3.14159265f / 180.0f, s = sinf(r), co = cosf(r);
+    float x = (float)ld_f32(cam + CAM_EYE) - (float)ld_f32(cam + CAM_AT);
+    float z = (float)ld_f32(cam + CAM_EYE + 8) - (float)ld_f32(cam + CAM_AT + 8);
+    st_f32(cam + CAM_EYE, (float)ld_f32(cam + CAM_AT) + x * co + z * s);
+    st_f32(cam + CAM_EYE + 8, (float)ld_f32(cam + CAM_AT + 8) + z * co - x * s);
+}
 
 static float wrap360(float a) { return a >= 360.0f ? a - 360.0f : a < 0.0f ? a + 360.0f : a; }
 
@@ -67,6 +85,7 @@ void f_80023630(ppc_t* c) {
         float cur = (float)ld_f32(cam + CAM_YAW) + yaw, wrapped = wrap360(cur);
         st_f32(cam + CAM_YAW, wrapped);
         st_f32(cam + CAM_YAW_TO, (float)ld_f32(cam + CAM_YAW_TO) + yaw + (wrapped - cur));
+        swing_eye(cam, yaw);
     }
     /* Moving the mouse down raises the eye to look down on Pikachu. */
     sTilt += dy * MOUSE_SENSITIVITY;
