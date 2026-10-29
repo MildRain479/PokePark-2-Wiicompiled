@@ -23,7 +23,7 @@
 #pragma comment(lib, "winmm.lib")
 
 #define BLOCK_FRAMES 384 /* 12 ms */
-#define BLOCKS 16
+#define BLOCKS 10 /* at most 120 ms queued */
 #define PRIME_BLOCKS 7 /* 84 ms */
 
 static HWAVEOUT sOut;

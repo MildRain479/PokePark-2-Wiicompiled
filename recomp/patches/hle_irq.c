@@ -159,27 +159,54 @@ void hle_deliver(ppc_t* c) {
             HLE_LOG("interrupt: %08X [%s](%08X, %08X)", p.fn, ppc_func_name(p.fn), p.r3, p.r4);
             if (p.fn) hle_interrupt(c, p.fn, p.r3, p.r4);
             if (p.after) p.after(c, p.data);
-        } else if (dec_expired()) {
-            ppc_dec_disarm();
-            hle_interrupt(c, kDecrementerHandler, EXC_DECREMENTER, LD32(0x800000D4));
-        } else if (timer_due() >= 0) {
-            int t = timer_due();
-            uint64_t now = ppc_timebase();
-            sTimers[t].next += sTimers[t].period;
-            /* Ticks delayed by a short stall are caught up (each audio
-             * tick is 3 ms of sound, so skipping them would cut the
-             * sound); after a long one (over 250 ms), the cadence resumes
-             * instead of bursting. */
-            if ((int64_t)(now - sTimers[t].next) > (int64_t)(PPC_TB_HZ / 4)) sTimers[t].next = now + sTimers[t].period;
-            sTimers[t].fire(c);
-        } else if (retrace_due()) {
-            sNextRetrace += kRetracePeriod;
-            g_retrace_count++;
-            if (g_gx_flush) g_gx_flush();
-            ST16(VI_DI0, LD16(VI_DI0) | 0x8000);
-            hle_interrupt(c, interrupt_handler(INTERRUPT_PI_VI), INTERRUPT_PI_VI, LD32(0x800000D4));
-        } else {
-            break;
+            continue;
+        }
+        /* Timed events that are due, oldest first. After a stall several
+         * are overdue at once, and they must interleave as they would
+         * have on time: the THP player, for one, refills its audio ring
+         * from the retrace callback while the audio timer plays it, and
+         * running all the audio ticks first would play past the refill. */
+        {
+            uint64_t now = ppc_timebase(), when = 0, dec;
+            int which = -1, i; /* 0..MAX_TIMERS-1 timer, MAX_TIMERS dec, MAX_TIMERS+1 retrace */
+            if (ppc_dec_deadline(&dec) && (int64_t)(now - dec) >= 0) {
+                which = MAX_TIMERS;
+                when = dec;
+            }
+            for (i = 0; i < MAX_TIMERS; i++) {
+                if (sTimers[i].active && (int64_t)(now - sTimers[i].next) >= 0 &&
+                    (which < 0 || (int64_t)(sTimers[i].next - when) < 0)) {
+                    which = i;
+                    when = sTimers[i].next;
+                }
+            }
+            if (retrace_due() && (which < 0 || (int64_t)(sNextRetrace - when) < 0)) which = MAX_TIMERS + 1;
+            if (which < 0) break;
+            if (which == MAX_TIMERS) {
+                ppc_dec_disarm();
+                hle_interrupt(c, kDecrementerHandler, EXC_DECREMENTER, LD32(0x800000D4));
+            } else if (which == MAX_TIMERS + 1) {
+                sNextRetrace += kRetracePeriod;
+                g_retrace_count++;
+                if (g_gx_flush) g_gx_flush();
+                ST16(VI_DI0, LD16(VI_DI0) | 0x8000);
+                hle_interrupt(c, interrupt_handler(INTERRUPT_PI_VI), INTERRUPT_PI_VI, LD32(0x800000D4));
+                return;
+            } else {
+                sTimers[which].next += sTimers[which].period;
+                /* Ticks delayed by a short stall are caught up (each audio
+                 * tick is 3 ms of sound, so skipping them would cut the
+                 * sound); after a long one (over 250 ms), the cadence
+                 * resumes instead of bursting. */
+                if ((int64_t)(now - sTimers[which].next) > (int64_t)(PPC_TB_HZ / 4)) sTimers[which].next = now + sTimers[which].period;
+                sTimers[which].fire(c);
+                /* One tick per delivery: a tick often wakes a thread that
+                 * must run before the next one (the THP player refills
+                 * its audio ring from a thread each audio frame wakes),
+                 * so overdue ticks are spread over the following delivery
+                 * points instead of run back to back. */
+                return;
+            }
         }
     }
 }
