@@ -106,21 +106,35 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
             info->ContextRecord->EFlags |= 0x100;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        if (a >= (uintptr_t)g_mem && a < (uintptr_t)g_mem + 0x40000000u) {
-            fprintf(stderr, "boot: guest memory fault at physical %08X (%s)\n", (unsigned)(a - (uintptr_t)g_mem),
-                    r->ExceptionInformation[0] ? "write" : "read");
-            if (gCpu) ppc_backtrace(gCpu);
-        } else {
-            fprintf(stderr, "boot: host memory fault at %p (%s), on the %s thread\n", (void*)a,
-                    r->ExceptionInformation[0] ? "write" : "read",
-                    GetCurrentThreadId() == gGameThreadId ? "game" : "another");
-            host_backtrace(info->ContextRecord);
-        }
+        /* Faults elsewhere go to the faulting code's own handlers first:
+         * the graphics driver probes memory and catches the faults itself
+         * (NVIDIA's OpenGL driver does, on its own threads), and this
+         * handler sees them before it does. Only one nobody handles ends
+         * the run (on_unhandled). */
+        if (a < (uintptr_t)g_mem || a >= (uintptr_t)g_mem + 0x40000000u) return EXCEPTION_CONTINUE_SEARCH;
+        fprintf(stderr, "boot: guest memory fault at physical %08X (%s)\n", (unsigned)(a - (uintptr_t)g_mem),
+                r->ExceptionInformation[0] ? "write" : "read");
+        if (gCpu) ppc_backtrace(gCpu);
         ppc_dump_trace();
         fflush(stderr);
         ExitProcess(3);
     }
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG WINAPI on_unhandled(EXCEPTION_POINTERS* info) {
+    EXCEPTION_RECORD* r = info->ExceptionRecord;
+    const char* thread = GetCurrentThreadId() == gGameThreadId ? "game" : "another";
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+        fprintf(stderr, "boot: host memory fault at %p (%s), on the %s thread\n", (void*)r->ExceptionInformation[1],
+                r->ExceptionInformation[0] ? "write" : "read", thread);
+    else
+        fprintf(stderr, "boot: host exception %08lX at %p, on the %s thread\n", (unsigned long)r->ExceptionCode,
+                r->ExceptionAddress, thread);
+    host_backtrace(info->ContextRecord);
+    ppc_dump_trace();
+    fflush(stderr);
+    ExitProcess(3);
 }
 
 /* Stops a boot that hangs (usually polling hardware that isn't emulated)
@@ -357,6 +371,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     gGameThreadId = GetCurrentThreadId();
     AddVectoredExceptionHandler(1, on_fault);
+    SetUnhandledExceptionFilter(on_unhandled);
     CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)(argc > 2 ? atoi(argv[2]) : 10), 0, NULL);
     if (getenv("RECOMP_PROFILE")) {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &gGameThread, 0, FALSE,
