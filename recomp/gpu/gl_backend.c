@@ -38,6 +38,7 @@ typedef char GLchar;
 typedef ptrdiff_t GLsizeiptr;
 typedef ptrdiff_t GLintptr;
 #define GL_ARRAY_BUFFER 0x8892
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_STREAM_DRAW 0x88E0
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_VERTEX_SHADER 0x8B31
@@ -368,7 +369,7 @@ static void print_gl_stats(void) {
         sGlCalls[k] = 0;
     }
 }
-static GLuint sProgram, sVao, sVbo, sXfUbo;
+static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef;
 
 static GLuint compile(GLenum type, const char* src) {
@@ -426,18 +427,20 @@ static void build_program(void) {
     p_glBindVertexArray(sVao);
     p_glGenBuffers(1, &sVbo);
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
+    p_glGenBuffers(1, &sIbo);
+    p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sIbo); /* part of the vertex array's state */
     for (i = 0; i < 3; i++) {
         p_glEnableVertexAttribArray(i);
-        p_glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, mtx) + i * 4 * sizeof(float)));
+        p_glVertexAttribPointer(i, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, mtx) + i * 4));
     }
     p_glEnableVertexAttribArray(3);
     p_glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, pos));
     p_glEnableVertexAttribArray(4);
     p_glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, nrm));
     p_glEnableVertexAttribArray(5);
-    p_glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
+    p_glVertexAttribPointer(5, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
     p_glEnableVertexAttribArray(6);
-    p_glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
+    p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
     for (i = 0; i < 4; i++) {
         p_glEnableVertexAttribArray(7 + i);
         p_glVertexAttribPointer(7 + i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, tex) + i * 4 * sizeof(float)));
@@ -794,7 +797,7 @@ static GLenum blend_factor(GLenum f, int efb_alpha) {
 /* Mirrored for the reversed depth. */
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL, GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
 
-static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int count) {
+static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count) {
     GLint cin[64], ain[64], cop[64], aop[64], map[64], sel[64], swap[16], alpha[4];
     GLfloat reg[16], konst[16], aref[4];
     int i;
@@ -910,8 +913,9 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
                           (GLsizeiptr)(st->xf_dirty_hi - st->xf_dirty_lo) * 4, st->xf + st->xf_dirty_lo);
     }
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(GXVertex), v, GL_STREAM_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices * sizeof(GXVertex), v, GL_STREAM_DRAW);
+    p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(uint32_t), index, GL_STREAM_DRAW);
+    glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, NULL);
 }
 
 static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
@@ -1198,9 +1202,9 @@ void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* r
     GL_LEAVE(GLK_TEXTURE_UPDATE);
 }
 
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count) {
+void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count) {
     GL_ENTER();
-    gxb_draw_triangles_gl(st, v, count);
+    gxb_draw_triangles_gl(st, v, vertices, index, count);
     GL_LEAVE(GLK_DRAW);
 }
 

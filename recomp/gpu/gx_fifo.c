@@ -50,6 +50,9 @@ static uint32_t sXfPacked[GX_XF_WORDS];
 static int sXfDirtyLo = 0, sXfDirtyHi = GX_XF_WORDS;
 
 static void flush_batch(void);
+/* Set when anything build_state reads may have changed: draws in between
+ * reuse the state built last. */
+static int sStateDirty = 1;
 
 static void xf_write(uint32_t addr, uint32_t value) {
     int i;
@@ -62,6 +65,7 @@ static void xf_write(uint32_t addr, uint32_t value) {
     /* The pending batch is drawn with the XF state as it is now. */
     flush_batch();
     sXfPacked[i] = value;
+    if (addr >= 0x101A && addr <= 0x101F) sStateDirty = 1; /* the viewport */
     if (i < sXfDirtyLo) sXfDirtyLo = i;
     if (i + 1 > sXfDirtyHi) sXfDirtyHi = i + 1;
 }
@@ -116,6 +120,11 @@ typedef struct VtxFormat {
     int col_cnt[2], col_fmt[2];
     int tex_cnt[8], tex_fmt[8], tex_shift[8];
     int size;
+    /* Worked out once for read_vertex: component counts and sizes, the
+     * fixed-point scales, and which texture matrices and coordinates are
+     * present (bit i for each). */
+    int pos_n, pos_cs, nrm_cs, nrm_bytes, tex_n[8], tex_cs[8], texmtx_mask, tex_mask;
+    float pos_scale, nrm_scale, tex_scale[8];
 } VtxFormat;
 
 static int comp_size(int fmt) {
@@ -193,10 +202,45 @@ static void get_format(int vat, VtxFormat* f) {
         else if (f->tex[i]) size += index_size(f->tex[i]);
     }
     f->size = size;
+
+    f->pos_n = f->pos_cnt ? 3 : 2;
+    f->pos_cs = comp_size(f->pos_fmt);
+    f->pos_scale = 1.0f / (float)(1u << f->pos_shift);
+    f->nrm_cs = comp_size(f->nrm_fmt);
+    f->nrm_scale = f->nrm_fmt == 1 ? 1.0f / 64 : f->nrm_fmt == 3 ? 1.0f / 16384 : 1.0f;
+    f->nrm_bytes = f->nrm == ATTR_DIRECT ? f->nrm_cs * (f->nrm_cnt ? 9 : 3)
+                                         : index_size(f->nrm) * (f->nrm_cnt && f->nrm_index3 ? 3 : 1);
+    for (i = 0; i < 8; i++) {
+        f->tex_n[i] = f->tex_cnt[i] ? 2 : 1;
+        f->tex_cs[i] = comp_size(f->tex_fmt[i]);
+        f->tex_scale[i] = 1.0f / (float)(1u << f->tex_shift[i]);
+        if (f->texmtx[i]) f->texmtx_mask |= 1 << i;
+        if (f->tex[i]) f->tex_mask |= 1 << i;
+    }
 }
 
-static float read_comp(const uint8_t* p, int fmt, int shift) {
-    float scale = 1.0f / (float)(1u << shift);
+/* The vertex formats, worked out again only when their registers change
+ * (a draw command names one; the park sends 22,000 a frame). */
+static VtxFormat sFormats[8];
+static uint32_t sFormatRegs[8][5];
+static uint8_t sFormatValid[8];
+
+static const VtxFormat* format(int vat) {
+    uint32_t regs[5];
+    regs[0] = cp[0x50];
+    regs[1] = cp[0x60];
+    regs[2] = cp[0x70 + vat];
+    regs[3] = cp[0x80 + vat];
+    regs[4] = cp[0x90 + vat];
+    if (!sFormatValid[vat] || memcmp(regs, sFormatRegs[vat], sizeof(regs)) != 0) {
+        get_format(vat, &sFormats[vat]);
+        memcpy(sFormatRegs[vat], regs, sizeof(regs));
+        sFormatValid[vat] = 1;
+    }
+    return &sFormats[vat];
+}
+
+static float read_comp(const uint8_t* p, int fmt, float scale) {
     switch (fmt) {
     case 0: return p[0] * scale;
     case 1: return (int8_t)p[0] * scale;
@@ -211,42 +255,40 @@ static float read_comp(const uint8_t* p, int fmt, int shift) {
     }
 }
 
-static void read_color(const uint8_t* p, int fmt, float out[4]) {
+/* Colors widen to 8 bits per channel as the GPU widens them, repeating
+ * the high bits in the low ones. */
+static void read_color(const uint8_t* p, int fmt, uint8_t out[4]) {
     uint32_t v;
     switch (fmt) {
     case 0: /* RGB565 */
         v = rd16(p);
-        out[0] = ((v >> 11) & 31) / 31.0f;
-        out[1] = ((v >> 5) & 63) / 63.0f;
-        out[2] = (v & 31) / 31.0f;
-        out[3] = 1.0f;
+        out[0] = (uint8_t)(((v >> 8) & 0xF8) | ((v >> 13) & 7));
+        out[1] = (uint8_t)(((v >> 3) & 0xFC) | ((v >> 9) & 3));
+        out[2] = (uint8_t)(((v << 3) & 0xF8) | ((v >> 2) & 7));
+        out[3] = 255;
         break;
     case 1: /* RGB888 */
     case 2: /* RGB888x */
-        out[0] = p[0] / 255.0f;
-        out[1] = p[1] / 255.0f;
-        out[2] = p[2] / 255.0f;
-        out[3] = 1.0f;
+        out[0] = p[0];
+        out[1] = p[1];
+        out[2] = p[2];
+        out[3] = 255;
         break;
     case 3: /* RGBA4444 */
-        v = rd16(p);
-        out[0] = ((v >> 12) & 15) / 15.0f;
-        out[1] = ((v >> 8) & 15) / 15.0f;
-        out[2] = ((v >> 4) & 15) / 15.0f;
-        out[3] = (v & 15) / 15.0f;
+        out[0] = (uint8_t)((p[0] >> 4) * 17);
+        out[1] = (uint8_t)((p[0] & 15) * 17);
+        out[2] = (uint8_t)((p[1] >> 4) * 17);
+        out[3] = (uint8_t)((p[1] & 15) * 17);
         break;
     case 4: /* RGBA6666 */
         v = ((uint32_t)p[0] << 16) | (p[1] << 8) | p[2];
-        out[0] = ((v >> 18) & 63) / 63.0f;
-        out[1] = ((v >> 12) & 63) / 63.0f;
-        out[2] = ((v >> 6) & 63) / 63.0f;
-        out[3] = (v & 63) / 63.0f;
+        out[0] = (uint8_t)((((v >> 18) & 63) << 2) | ((v >> 22) & 3));
+        out[1] = (uint8_t)((((v >> 12) & 63) << 2) | ((v >> 16) & 3));
+        out[2] = (uint8_t)((((v >> 6) & 63) << 2) | ((v >> 10) & 3));
+        out[3] = (uint8_t)(((v & 63) << 2) | ((v >> 4) & 3));
         break;
     default: /* RGBA8888 */
-        out[0] = p[0] / 255.0f;
-        out[1] = p[1] / 255.0f;
-        out[2] = p[2] / 255.0f;
-        out[3] = p[3] / 255.0f;
+        memcpy(out, p, 4);
         break;
     }
 }
@@ -256,73 +298,68 @@ static const uint8_t* array_ptr(int array, uint32_t index) {
     return MA((cp[0xA0 + array] & 0x3FFFFFFF) + index * (cp[0xB0 + array] & 0xFF));
 }
 
+static uint32_t read_index(const uint8_t** p, int type) {
+    uint32_t idx;
+    if (type == ATTR_INDEX8) return *(*p)++;
+    idx = rd16(*p);
+    *p += 2;
+    return idx;
+}
 
+/* Reads the attributes the format has into v, which holds the defaults
+ * for the rest (vertex_template). */
 static const uint8_t* read_vertex(const uint8_t* p, const VtxFormat* f, GXVertex* v) {
     int i;
-    uint32_t mi_a = xf[0x1018], mi_b = xf[0x1019];
-    v->mtx[0] = (float)(f->pnmtx ? *p++ : (int)(mi_a & 0x3F));
-    for (i = 0; i < 8; i++) {
-        int def = i < 4 ? (int)((mi_a >> (6 + 6 * i)) & 0x3F) : (int)((mi_b >> (6 * (i - 4))) & 0x3F);
-        v->mtx[1 + i] = (float)(f->texmtx[i] ? *p++ : def);
+    if (f->pnmtx) v->mtx[0] = *p++;
+    if (f->texmtx_mask) {
+        for (i = 0; i < 8; i++) {
+            if (f->texmtx_mask & (1 << i)) v->mtx[1 + i] = *p++;
+        }
     }
-    v->mtx[9] = v->mtx[10] = v->mtx[11] = 0.0f;
     if (f->pos) {
         const uint8_t* src = p;
-        int n = f->pos_cnt ? 3 : 2, cs = comp_size(f->pos_fmt);
-        if (f->pos != ATTR_DIRECT) {
-            uint32_t idx = f->pos == ATTR_INDEX8 ? *p : rd16(p);
-            p += index_size(f->pos);
-            src = array_ptr(0, idx);
-        } else {
-            p += cs * n;
-        }
-        for (i = 0; i < 3; i++) v->pos[i] = i < n ? read_comp(src + cs * i, f->pos_fmt, f->pos_shift) : 0.0f;
-    } else {
-        v->pos[0] = v->pos[1] = v->pos[2] = 0.0f;
+        if (f->pos != ATTR_DIRECT) src = array_ptr(0, read_index(&p, f->pos));
+        else p += f->pos_cs * f->pos_n;
+        v->pos[0] = read_comp(src, f->pos_fmt, f->pos_scale);
+        v->pos[1] = read_comp(src + f->pos_cs, f->pos_fmt, f->pos_scale);
+        if (f->pos_n == 3) v->pos[2] = read_comp(src + 2 * f->pos_cs, f->pos_fmt, f->pos_scale);
     }
     if (f->nrm) {
-        int cs = comp_size(f->nrm_fmt), shift = f->nrm_fmt == 1 ? 6 : f->nrm_fmt == 3 ? 14 : 0;
         const uint8_t* src = p;
-        if (f->nrm != ATTR_DIRECT) {
-            uint32_t idx = f->nrm == ATTR_INDEX8 ? *p : rd16(p);
-            p += index_size(f->nrm) * (f->nrm_cnt && f->nrm_index3 ? 3 : 1);
-            src = array_ptr(1, idx);
-        } else {
-            p += cs * (f->nrm_cnt ? 9 : 3);
-        }
-        for (i = 0; i < 3; i++) v->nrm[i] = read_comp(src + cs * i, f->nrm_fmt, shift);
-    } else {
-        v->nrm[0] = v->nrm[1] = v->nrm[2] = 0.0f;
+        if (f->nrm != ATTR_DIRECT) src = array_ptr(1, f->nrm == ATTR_INDEX8 ? *p : rd16(p));
+        p += f->nrm_bytes;
+        for (i = 0; i < 3; i++) v->nrm[i] = read_comp(src + f->nrm_cs * i, f->nrm_fmt, f->nrm_scale);
     }
     for (i = 0; i < 2; i++) {
         if (f->col[i] == ATTR_DIRECT) {
             read_color(p, f->col_fmt[i], v->color[i]);
             p += color_size(f->col_fmt[i]);
         } else if (f->col[i]) {
-            uint32_t idx = f->col[i] == ATTR_INDEX8 ? *p : rd16(p);
-            p += index_size(f->col[i]);
-            read_color(array_ptr(2 + i, idx), f->col_fmt[i], v->color[i]);
-        } else {
-            v->color[i][0] = v->color[i][1] = v->color[i][2] = v->color[i][3] = 1.0f;
+            read_color(array_ptr(2 + i, read_index(&p, f->col[i])), f->col_fmt[i], v->color[i]);
         }
     }
-    for (i = 0; i < 8; i++) {
-        int n = f->tex_cnt[i] ? 2 : 1, cs = comp_size(f->tex_fmt[i]), k;
-        const uint8_t* src = p;
-        if (!f->tex[i]) {
-            v->tex[i][0] = v->tex[i][1] = 0.0f;
-            continue;
+    if (f->tex_mask) {
+        for (i = 0; i < 8; i++) {
+            const uint8_t* src = p;
+            if (!(f->tex_mask & (1 << i))) continue;
+            if (f->tex[i] != ATTR_DIRECT) src = array_ptr(4 + i, read_index(&p, f->tex[i]));
+            else p += f->tex_cs[i] * f->tex_n[i];
+            v->tex[i][0] = read_comp(src, f->tex_fmt[i], f->tex_scale[i]);
+            if (f->tex_n[i] == 2) v->tex[i][1] = read_comp(src + f->tex_cs[i], f->tex_fmt[i], f->tex_scale[i]);
         }
-        if (f->tex[i] != ATTR_DIRECT) {
-            uint32_t idx = f->tex[i] == ATTR_INDEX8 ? *p : rd16(p);
-            p += index_size(f->tex[i]);
-            src = array_ptr(4 + i, idx);
-        } else {
-            p += cs * n;
-        }
-        for (k = 0; k < 2; k++) v->tex[i][k] = k < n ? read_comp(src + cs * k, f->tex_fmt[i], f->tex_shift[i]) : 0.0f;
     }
     return p;
+}
+
+/* What a vertex holds before its attributes are read: the default matrix
+ * indices (MATINDEX_A and B), white for absent colors, zeros. */
+static void vertex_template(GXVertex* t) {
+    uint32_t mi_a = xf[0x1018], mi_b = xf[0x1019];
+    int i;
+    memset(t, 0, sizeof(*t));
+    t->mtx[0] = (uint8_t)(mi_a & 0x3F);
+    for (i = 0; i < 8; i++) t->mtx[1 + i] = (uint8_t)(i < 4 ? (mi_a >> (6 + 6 * i)) & 0x3F : (mi_b >> (6 * (i - 4))) & 0x3F);
+    memset(t->color, 255, sizeof(t->color));
 }
 
 /* ------------------------------------------------------------------------ */
@@ -352,19 +389,36 @@ static uint64_t mix64(uint64_t k) {
     return k ^ (k >> 31);
 }
 
-/* Hashes every byte, eight at a time: textures are checked for changes on
- * every frame they are used. */
+/* Hashes every byte: textures are checked for changes on every frame they
+ * are used. Four independent lanes of eight bytes, so the multiplies
+ * overlap instead of each waiting for the last. */
 static uint32_t hash_bytes(const uint8_t* p, int n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ (uint64_t)n;
+    const uint64_t m = 0xFF51AFD7ED558CCDull;
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ (uint64_t)n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull,
+             h3 = 0x27D4EB2F165667C5ull, h;
     int i;
-    for (i = 0; i + 8 <= n; i += 8) {
+    for (i = 0; i + 32 <= n; i += 32) {
+        uint64_t w[4];
+        memcpy(w, p + i, 32);
+        h0 = (h0 ^ w[0]) * m;
+        h1 = (h1 ^ w[1]) * m;
+        h2 = (h2 ^ w[2]) * m;
+        h3 = (h3 ^ w[3]) * m;
+        h0 ^= h0 >> 29;
+        h1 ^= h1 >> 29;
+        h2 ^= h2 >> 29;
+        h3 ^= h3 >> 29;
+    }
+    h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 * 0xC2B2AE3D27D4EB4Full) ^ (h3 * 0x165667B19E3779F9ull);
+    for (; i + 8 <= n; i += 8) {
         uint64_t w;
         memcpy(&w, p + i, 8);
-        h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+        h = (h ^ w) * m;
         h ^= h >> 29;
     }
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
-    return (uint32_t)(h ^ (h >> 32));
+    h ^= h >> 32;
+    return (uint32_t)h;
 }
 
 /* EFB copies made to textures, looked up before main memory. */
@@ -425,6 +479,7 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int
     sCopies[i].bytes = copy_bytes(fmt, width, height);
     sCopies[i].mem_hash = sCopies[i].bytes > 0 ? hash_bytes(MA(addr), sCopies[i].bytes) : 0;
     sCopies[i].checked = sFrame + 1;
+    sStateDirty = 1; /* draws sampling addr now get the copy */
 }
 
 static uint32_t texture_for_map(int map) {
@@ -628,8 +683,6 @@ static void build_state(GXDrawState* st) {
 /* ------------------------------------------------------------------------ */
 /* Draws */
 
-static GXVertex* sVerts;
-static int sVertCap;
 static unsigned sDrawCount, sVertexCount;
 
 /* RECOMP_GX_DEBUG_FRAME=n prints every draw of frame n. */
@@ -695,8 +748,8 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
         float sx = cw != 0 ? (cx / cw * 0.5f + 0.5f) * st->viewport[2] + st->viewport[0] : 0;
         float sy = cw != 0 ? (0.5f - cy / cw * 0.5f) * st->viewport[3] + st->viewport[1] : 0;
         fprintf(stderr, "   v%d mtx %.0f pos %.3f %.3f %.3f col %.2f %.2f %.2f %.2f tex %.3f %.3f  view z %.6f depth %.8f screen %.0f,%.0f\n", i,
-                v[i].mtx[0], v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].color[0][0], v[i].color[0][1], v[i].color[0][2],
-                v[i].color[0][3], v[i].tex[0][0], v[i].tex[0][1], vz, cw != 0 ? 1.0f + cz / cw : 0.0f, sx, sy);
+                (float)v[i].mtx[0], v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].color[0][0] / 255.0f,
+                v[i].color[0][1] / 255.0f, v[i].color[0][2] / 255.0f, v[i].color[0][3] / 255.0f, v[i].tex[0][0], v[i].tex[0][1], vz, cw != 0 ? 1.0f + cz / cw : 0.0f, sx, sy);
     }
 }
 
@@ -705,21 +758,62 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
  * and each backend draw costs far more than its vertices. A batch is
  * drawn before anything that changes what it would look like: different
  * state, an XF write (xf_write), a texture's contents changing
- * (texture_for_map), or an EFB copy, clear or present (efb_copy). */
-static GXDrawState sBatchState;
+ * (texture_for_map), or an EFB copy, clear or present (efb_copy).
+ *
+ * Vertices are decoded straight into the batch, each once, and the
+ * primitives become indices into them. */
+static GXDrawState sState, sBatchState;
 static GXVertex* sBatch;
-static int sBatchCount, sBatchCap;
+static uint32_t* sIndex;
+static int sBatchVerts, sBatchCap, sIndexCount, sIndexCap;
 
 static void flush_batch(void) {
-    if (!sBatchCount) return;
-    gxb_draw_triangles(&sBatchState, sBatch, sBatchCount);
-    sBatchCount = 0;
+    if (!sIndexCount) return;
+    gxb_draw_triangles(&sBatchState, sBatch, sBatchVerts, sIndex, sIndexCount);
+    sBatchVerts = sIndexCount = 0;
 }
 
-static void emit(GXVertex* tri, int n) {
-    GXDrawState st;
+/* Makes the batch one drawn with the current state, drawing the pending
+ * one first if its state differs. */
+static void use_current_state(void) {
+    int rebuilt = sStateDirty;
+    if (rebuilt) {
+        build_state(&sState); /* may draw the pending batch, if a texture changes */
+        sStateDirty = 0;
+    }
+    /* Everything but the XF fields, which build_state leaves zero. A
+     * pending batch already has the current state unless it was rebuilt. */
+    if (!sIndexCount || (rebuilt && memcmp(&sState, &sBatchState, offsetof(GXDrawState, xf)) != 0)) {
+        flush_batch();
+        sBatchState = sState;
+        sBatchState.xf = sXfPacked;
+        sBatchState.xf_dirty_lo = sXfDirtyLo;
+        sBatchState.xf_dirty_hi = sXfDirtyHi;
+        sXfDirtyLo = GX_XF_WORDS;
+        sXfDirtyHi = 0;
+    }
+}
+
+/* Draws count vertices of format f from p as primitive prim. */
+static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count) {
     static int skipLo = -2, skipHi = -1;
-    if (n <= 0) return;
+    GXVertex tpl, *v;
+    uint32_t* ix;
+    uint32_t base;
+    int tris, i;
+    switch (prim) {
+    case 0x80: /* quads */
+    case 0x88: /* quads (alternate encoding) */
+        tris = count / 4 * 2;
+        break;
+    case 0x90: tris = count / 3; break; /* triangles */
+    case 0x98: /* triangle strip */
+    case 0xA0: /* triangle fan */
+        tris = count - 2;
+        break;
+    default: return; /* lines and points are not drawn yet */
+    }
+    if (tris <= 0) return;
     if (skipLo == -2) {
         /* RECOMP_GX_SKIP=<first>-<last>: drop those draws (numbered from 0
          * in each frame), to find which draws make up something on
@@ -732,62 +826,52 @@ static void emit(GXVertex* tri, int n) {
         sDrawCount++;
         return;
     }
-    build_state(&st); /* may draw the pending batch, if a texture changes */
-    if ((long)sFrame == sDebugFrame) debug_draw(&st, tri, n);
-    /* Everything but the XF fields, which build_state leaves zero. */
-    if (!sBatchCount || memcmp(&st, &sBatchState, offsetof(GXDrawState, xf)) != 0) {
-        flush_batch();
-        st.xf = sXfPacked;
-        st.xf_dirty_lo = sXfDirtyLo;
-        st.xf_dirty_hi = sXfDirtyHi;
-        sXfDirtyLo = GX_XF_WORDS;
-        sXfDirtyHi = 0;
-        sBatchState = st;
-    }
-    if (sBatchCount + n > sBatchCap) {
-        sBatchCap = (sBatchCount + n) * 2;
+    use_current_state();
+    if (sBatchVerts + count > sBatchCap) {
+        sBatchCap = (sBatchVerts + count) * 2;
         sBatch = (GXVertex*)realloc(sBatch, (size_t)sBatchCap * sizeof(GXVertex));
     }
-    memcpy(sBatch + sBatchCount, tri, (size_t)n * sizeof(GXVertex));
-    sBatchCount += n;
-    sDrawCount++;
-}
-
-static void draw(int prim, const GXVertex* v, int count) {
-    int n = 0, i;
-    int max = count * 3;
-    if (max > sVertCap) {
-        sVertCap = max * 2;
-        sVerts = (GXVertex*)realloc(sVerts, sVertCap * sizeof(GXVertex));
+    if (sIndexCount + 3 * tris > sIndexCap) {
+        sIndexCap = (sIndexCount + 3 * tris) * 2;
+        sIndex = (uint32_t*)realloc(sIndex, (size_t)sIndexCap * sizeof(uint32_t));
     }
+    base = (uint32_t)sBatchVerts;
+    v = sBatch + base;
+    vertex_template(&tpl);
+    for (i = 0; i < count; i++) {
+        v[i] = tpl;
+        p = read_vertex(p, f, &v[i]);
+    }
+    if ((long)sFrame == sDebugFrame) debug_draw(&sBatchState, v, count);
+    ix = sIndex + sIndexCount;
     switch (prim) {
-    case 0x80: /* quads */
-    case 0x88: /* quads (alternate encoding) */
+    case 0x80:
+    case 0x88:
         for (i = 0; i + 3 < count; i += 4) {
-            sVerts[n++] = v[i]; sVerts[n++] = v[i + 1]; sVerts[n++] = v[i + 2];
-            sVerts[n++] = v[i]; sVerts[n++] = v[i + 2]; sVerts[n++] = v[i + 3];
+            *ix++ = base + i; *ix++ = base + i + 1; *ix++ = base + i + 2;
+            *ix++ = base + i; *ix++ = base + i + 2; *ix++ = base + i + 3;
         }
         break;
-    case 0x90: /* triangles */
+    case 0x90:
         for (i = 0; i + 2 < count; i += 3) {
-            sVerts[n++] = v[i]; sVerts[n++] = v[i + 1]; sVerts[n++] = v[i + 2];
+            *ix++ = base + i; *ix++ = base + i + 1; *ix++ = base + i + 2;
         }
         break;
-    case 0x98: /* triangle strip */
+    case 0x98: /* every other triangle turned round, to keep the winding */
         for (i = 0; i + 2 < count; i++) {
-            if (i & 1) { sVerts[n++] = v[i + 1]; sVerts[n++] = v[i]; sVerts[n++] = v[i + 2]; }
-            else { sVerts[n++] = v[i]; sVerts[n++] = v[i + 1]; sVerts[n++] = v[i + 2]; }
+            if (i & 1) { *ix++ = base + i + 1; *ix++ = base + i; *ix++ = base + i + 2; }
+            else { *ix++ = base + i; *ix++ = base + i + 1; *ix++ = base + i + 2; }
         }
         break;
-    case 0xA0: /* triangle fan */
+    default:
         for (i = 1; i + 1 < count; i++) {
-            sVerts[n++] = v[0]; sVerts[n++] = v[i]; sVerts[n++] = v[i + 1];
+            *ix++ = base; *ix++ = base + i; *ix++ = base + i + 1;
         }
         break;
-    default: /* lines and points are not drawn yet */
-        return;
     }
-    emit(sVerts, n);
+    sBatchVerts += count;
+    sIndexCount = (int)(ix - sIndex);
+    sDrawCount++;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -854,6 +938,7 @@ static void efb_copy(uint32_t exec) {
         gxb_present(x, y, w, h);
         sFrame++;
         sDrawCount = sVertexCount = 0;
+        sStateDirty = 1; /* textures are checked again each frame */
     } else {
         int fmt = (int)(((exec >> 4) & 7) | (((exec >> 3) & 1) << 3));
         gxb_copy_to_texture(dst, x, y, w, h, fmt, (exec >> 15) & 1, (bp[0x43] & 7) == 1);
@@ -872,9 +957,10 @@ static void bp_write(uint32_t v) {
         bp_mask = val;
         return;
     }
-    bp[reg] = (bp[reg] & ~bp_mask) | (val & bp_mask);
+    val = (bp[reg] & ~bp_mask) | (val & bp_mask);
     bp_mask = 0xFFFFFF;
-    val = bp[reg];
+    if (bp[reg] != val) sStateDirty = 1;
+    bp[reg] = val;
     if (reg >= 0xE0 && reg <= 0xE7) set_tev_color((int)reg, val);
     else if (reg == 0x65) load_tlut();
     else if (reg == 0x52) efb_copy(val);
@@ -886,8 +972,6 @@ static void bp_write(uint32_t v) {
 /* ------------------------------------------------------------------------ */
 /* Command parsing */
 
-static GXVertex* sRaw;
-static int sRawCap;
 static unsigned sErrors;
 
 /* Decodes complete commands from p[0..len) and returns the bytes used.
@@ -935,24 +1019,15 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
             bp_write(rd32(c + 1));
             pos += 5;
         } else if (op >= 0x80 && op < 0xC0) {
-            VtxFormat f;
-            int count, i;
-            const uint8_t* vp;
+            const VtxFormat* f;
+            int count;
             if (left < 3) { *need = 3; break; }
-            get_format(op & 7, &f);
+            f = format(op & 7);
             count = rd16(c + 1);
-            if (left < 3 + (size_t)count * f.size) { *need = 3 + (size_t)count * f.size; break; }
-            if (count > sRawCap) {
-                sRawCap = count * 2;
-                sRaw = (GXVertex*)realloc(sRaw, sRawCap * sizeof(GXVertex));
-            }
-            vp = c + 3;
-            for (i = 0; i < count; i++) {
-                vp = read_vertex(vp, &f, &sRaw[i]);
-            }
+            if (left < 3 + (size_t)count * f->size) { *need = 3 + (size_t)count * f->size; break; }
             sVertexCount += (unsigned)count;
-            draw(op & 0xF8, sRaw, count);
-            pos += 3 + (size_t)count * f.size;
+            draw(op & 0xF8, c + 3, f, count);
+            pos += 3 + (size_t)count * f->size;
         } else {
             if (sErrors++ < 20) {
                 fprintf(stderr, "gx: unknown command %02X at offset %zu (%s); skipping a byte\n", op, pos,

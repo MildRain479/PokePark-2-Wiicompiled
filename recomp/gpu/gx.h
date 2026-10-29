@@ -15,11 +15,11 @@
  * vertex shader transforms it with the XF state (matrices, lights,
  * texture coordinate generation), as the GPU's transform unit does. */
 typedef struct GXVertex {
-    float mtx[12];     /* position matrix index, texture matrix indices 0..7, unused */
-    float pos[3];      /* object space */
+    uint8_t mtx[12];     /* position matrix index, texture matrix indices 0..7, unused */
+    float pos[3];        /* object space */
     float nrm[3];
-    float color[2][4]; /* vertex colors 0 and 1, RGBA 0..1 (1 when absent) */
-    float tex[8][2];   /* texture coordinates as sent */
+    uint8_t color[2][4]; /* vertex colors 0 and 1, RGBA (255 when absent) */
+    float tex[8][2];     /* texture coordinates as sent */
 } GXVertex;
 
 /* The XF state as the vertex shader reads it: XF memory words 0x000-0x67F
@@ -65,7 +65,9 @@ uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, i
 /* Replaces a texture's contents (same size). */
 void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba);
 void gxb_texture_free(uint32_t handle);
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int count);
+/* Draws triangles: count indices into the vertices v, three to a
+ * triangle. */
+void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count);
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
 /* Copies an EFB rectangle to a texture, converted to copy format `fmt`
  * (exec bits 3-6) and stored as the game reads it back: an I8 copy as
