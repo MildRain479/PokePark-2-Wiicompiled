@@ -52,3 +52,4 @@
 0x80210740 OSCreateThread  # hle_thread.c: a reused OSThread gets a new fiber
 0x8028B590 THPVideoDecode  # hle_thp.c: native THP video decoding
 0x801776E0 ThpManager::virt0x18  # hle_game.c: RECOMP_SKIP_MOVIES
+0x8020C320 ReadFont  # hle_font.c: the system font from host glyphs

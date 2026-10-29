@@ -18,6 +18,7 @@ void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
 void input_init(void);
 void audio_init(void);
+void font_init(void);
 void hle_game_init(void);
 
 static ppc_t* gCpu;
@@ -85,6 +86,22 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
             /* Not the watched range: let this one write through, then
              * single-step and re-protect. */
             DWORD old;
+            VirtualProtect(gWatchPage, 0x1000, PAGE_READWRITE, &old);
+            info->ContextRecord->EFlags |= 0x100;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (gWatchPage && (uint8_t*)a >= gWatchPage && (uint8_t*)a < gWatchPage + 0x1000 && getenv("RECOMP_WATCH_LOG")) {
+            /* RECOMP_WATCH_LOG=1: log who writes the range (the guest
+             * function entered last), once per change of writer, and let
+             * the write through. */
+            static uint32_t lastWriter;
+            uint32_t writer = g_trace[(g_trace_pos - 1) & 255];
+            DWORD old;
+            if (writer != lastWriter) {
+                fprintf(stderr, "watch: %08X written by %08X %s (lr %08X %s)\n", (unsigned)(a - (uintptr_t)g_mem),
+                        writer, ppc_func_name(writer), gCpu ? gCpu->lr : 0, gCpu ? ppc_func_name(gCpu->lr) : "");
+                lastWriter = writer;
+            }
             VirtualProtect(gWatchPage, 0x1000, PAGE_READWRITE, &old);
             info->ContextRecord->EFlags |= 0x100;
             return EXCEPTION_CONTINUE_EXECUTION;
@@ -259,6 +276,18 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     if (gCpu) ppc_backtrace(gCpu);
     hle_dump_threads();
     {
+        /* RECOMP_DUMP_MEM=<file>: save MEM1 (24 MB) then MEM2 (64 MB), as
+         * the guest sees them, for offline inspection. */
+        const char* path = getenv("RECOMP_DUMP_MEM");
+        FILE* f = path ? fopen(path, "wb") : NULL;
+        if (f) {
+            fwrite(MA(0x80000000), 1, 0x01800000, f);
+            fwrite(MA(0x90000000), 1, 0x04000000, f);
+            fclose(f);
+            fprintf(stderr, "boot: guest memory saved to %s\n", path);
+        }
+    }
+    {
         /* RECOMP_PEEK=<address>,<length>: dump guest memory on timeout. */
         const char* p = getenv("RECOMP_PEEK");
         if (p) {
@@ -383,6 +412,7 @@ int main(int argc, char** argv) {
     gx_init();
     input_init();
     audio_init();
+    font_init();
     c = gCpu = (ppc_t*)calloc(1, sizeof(ppc_t));
     c->msr = 0x00002032; /* FP available, instruction and data translation on */
     printf("boot: entering __start at %08X\n", entry);

@@ -29,7 +29,15 @@
 
 static char sRoot[512] = "nand";
 
-void hle_nand_set_root(const char* root) { strncpy(sRoot, root, sizeof(sRoot) - 1); }
+static void ensure_sysconf(void);
+static void ensure_setting_txt(void);
+
+/* Also fills in the system settings a console's NAND would have. */
+void hle_nand_set_root(const char* root) {
+    strncpy(sRoot, root, sizeof(sRoot) - 1);
+    ensure_sysconf();
+    ensure_setting_txt();
+}
 
 /* Host path for a NAND path; rejects anything that could escape the root. */
 static int host_path(const char* nand, char* out, size_t n) {
@@ -281,4 +289,153 @@ int32_t hle_nand_ioctlv(uint32_t type, uint32_t vec, uint32_t nin, uint32_t nout
     }
     HLE_WARN("/dev/fs ioctlv 0x%X: unhandled", type);
     return FS_EINVAL;
+}
+
+/* ------------------------------------------------------------------------ */
+/* System settings */
+
+/* What a US console's system menu leaves on the NAND: SYSCONF (language,
+ * display, sound, Wii Remote settings) and setting.txt (region). Without
+ * them the SDK falls back to defaults, among them the Japanese language:
+ * the game then shows its Japanese placeholders (the default name
+ * "Pikachu" in katakana, a dummy name graphic in the picture confirmation dialog). */
+
+#define SYSCONF_SIZE 0x4000
+enum { SC_BIGARRAY = 1, SC_SMALLARRAY, SC_BYTE, SC_SHORT, SC_LONG, SC_LONGLONG, SC_BOOL };
+
+typedef struct {
+    const char* name;
+    int type;
+    uint32_t value;
+} ScDefault;
+
+static const ScDefault kScDefaults[] = {
+    {"IPL.LNG", SC_BYTE, 1},  /* English */
+    {"IPL.AR", SC_BYTE, 0},   /* 4:3 */
+    {"IPL.SND", SC_BYTE, 1},  /* stereo */
+    {"IPL.PGS", SC_BYTE, 0},  /* no progressive scan */
+    {"IPL.E60", SC_BYTE, 1},  /* EuRGB60 (PAL only) */
+    {"IPL.SSV", SC_BYTE, 0},  /* screen saver off */
+    {"IPL.CB", SC_LONG, 0},   /* counter bias */
+    {"BT.MOT", SC_BYTE, 1},   /* Wii Remote rumble on */
+    {"BT.BAR", SC_BYTE, 0},   /* sensor bar below the screen */
+    {"BT.SENS", SC_LONG, 3},  /* sensor bar sensitivity */
+    {"BT.SPKV", SC_BYTE, 0x58}, /* Wii Remote speaker volume */
+};
+
+/* One parsed SYSCONF entry: its bytes, from the type/name byte on. */
+typedef struct {
+    char name[32];
+    const uint8_t* data;
+    int size;
+} ScEntry;
+
+static int sc_entry_size(const uint8_t* p, const uint8_t* end) {
+    int type = p[0] >> 5, nlen = (p[0] & 31) + 1, n = 1 + nlen;
+    const uint8_t* v = p + n;
+    if (v >= end) return -1;
+    switch (type) {
+    case SC_BIGARRAY: return n + 2 + ((v[0] << 8) | v[1]) + 1;
+    case SC_SMALLARRAY: return n + 1 + v[0] + 1;
+    case SC_BYTE: case SC_BOOL: return n + 1;
+    case SC_SHORT: return n + 2;
+    case SC_LONG: return n + 4;
+    case SC_LONGLONG: return n + 8;
+    }
+    return -1;
+}
+
+/* Builds the file from the entries, in order. Returns 0 if they don't fit. */
+static int sc_build(uint8_t* out, const ScEntry* e, int n) {
+    int i, pos = 6 + 2 * (n + 1);
+    memset(out, 0, SYSCONF_SIZE);
+    memcpy(out, "SCv0", 4);
+    out[4] = (uint8_t)(n >> 8);
+    out[5] = (uint8_t)n;
+    for (i = 0; i < n; i++) {
+        if (pos + e[i].size > SYSCONF_SIZE - 4) return 0;
+        out[6 + 2 * i] = (uint8_t)(pos >> 8);
+        out[7 + 2 * i] = (uint8_t)pos;
+        memcpy(out + pos, e[i].data, (size_t)e[i].size);
+        pos += e[i].size;
+    }
+    out[6 + 2 * n] = (uint8_t)(pos >> 8);
+    out[7 + 2 * n] = (uint8_t)pos;
+    memcpy(out + SYSCONF_SIZE - 4, "SCed", 4);
+    return 1;
+}
+
+/* Adds the settings above to SYSCONF where missing, keeping the rest. */
+static void ensure_sysconf(void) {
+    static uint8_t old[SYSCONF_SIZE], out[SYSCONF_SIZE], extra[sizeof(kScDefaults) / sizeof(kScDefaults[0])][16];
+    ScEntry e[256];
+    char host[600];
+    int n = 0, i, k, changed = 0;
+    FILE* f;
+    snprintf(host, sizeof(host), "%s/shared2/sys/SYSCONF", sRoot);
+    f = fopen(host, "rb");
+    if (f) {
+        if (fread(old, 1, SYSCONF_SIZE, f) != SYSCONF_SIZE || memcmp(old, "SCv0", 4)) memset(old, 0, sizeof(old));
+        fclose(f);
+    }
+    if (!memcmp(old, "SCv0", 4)) {
+        int count = (old[4] << 8) | old[5];
+        for (i = 0; i < count && n < 256; i++) {
+            int off = (old[6 + 2 * i] << 8) | old[7 + 2 * i], size;
+            if (off <= 0 || off >= SYSCONF_SIZE) break;
+            size = sc_entry_size(old + off, old + SYSCONF_SIZE);
+            if (size <= 0 || off + size > SYSCONF_SIZE) break;
+            e[n].data = old + off;
+            e[n].size = size;
+            snprintf(e[n].name, sizeof(e[n].name), "%.*s", (old[off] & 31) + 1, (const char*)old + off + 1);
+            n++;
+        }
+    }
+    for (k = 0; k < (int)(sizeof(kScDefaults) / sizeof(kScDefaults[0])); k++) {
+        const ScDefault* d = &kScDefaults[k];
+        int nlen = (int)strlen(d->name), vlen = d->type == SC_LONG ? 4 : 1, j;
+        for (i = 0; i < n && strcmp(e[i].name, d->name); i++) {}
+        if (i < n || n == 256) continue;
+        extra[k][0] = (uint8_t)((d->type << 5) | (nlen - 1));
+        memcpy(&extra[k][1], d->name, (size_t)nlen);
+        for (j = 0; j < vlen; j++) extra[k][1 + nlen + j] = (uint8_t)(d->value >> (8 * (vlen - 1 - j)));
+        e[n].data = extra[k];
+        e[n].size = 1 + nlen + vlen;
+        strcpy(e[n].name, d->name);
+        n++;
+        changed = 1;
+    }
+    if (!changed || !sc_build(out, e, n)) return;
+    ensure_parent(host);
+    f = fopen(host, "wb");
+    if (!f) return;
+    fwrite(out, 1, SYSCONF_SIZE, f);
+    fclose(f);
+    HLE_LOG("NAND: wrote default system settings to SYSCONF");
+}
+
+/* The system menu's setting.txt: text lines, XOR-scrambled with a rotating
+ * key, padded to 0x100 bytes. */
+static void ensure_setting_txt(void) {
+    static const char kText[] = "AREA=USA\r\nMODEL=RVL-001(USA)\r\nDVD=0\r\nMPCH=0x7FFE\r\nCODE=LU\r\n"
+                                "SERNO=000000000\r\nVIDEO=NTSC\r\nGAME=US\r\n";
+    uint8_t buf[0x100];
+    uint32_t key = 0x73B5DBFA;
+    char host[600];
+    FILE* f;
+    size_t i;
+    snprintf(host, sizeof(host), "%s/title/00000001/00000002/data/setting.txt", sRoot);
+    if (exists(host)) return;
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, kText, sizeof(kText) - 1);
+    for (i = 0; i < sizeof(buf); i++) {
+        buf[i] ^= (uint8_t)key;
+        key = (key << 1) | (key >> 31);
+    }
+    ensure_parent(host);
+    f = fopen(host, "wb");
+    if (!f) return;
+    fwrite(buf, 1, sizeof(buf), f);
+    fclose(f);
+    HLE_LOG("NAND: wrote setting.txt (USA)");
 }
