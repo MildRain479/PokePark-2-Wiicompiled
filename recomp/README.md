@@ -106,10 +106,11 @@ title shows the frame rate and the slowest frame of the last second).
 A Wii's NTSC video runs at 59.94 Hz; here the refresh and the game's
 frame timing run at 60 Hz by default, to match PC displays
 (`RECOMP_VI_HZ=59.94` restores the original). THP movie frames are
-decoded natively (`hle_thp.c`). Graphics bugs still to fix: some dialogs
-show a second, noticeably smaller dialog box behind the real one, its
-border crossing the text (something the game hides is drawn), and in Mew's intro a 3D object near the center is drawn dark.
-3D lighting is implemented but not yet checked in gameplay.
+decoded natively (`hle_thp.c`). Graphics bugs still to fix: in Mew's
+intro in the park, Mew (a lit, skinned model) is drawn as a dark
+silhouette, and the picture confirmation dialog shows a grey square where
+the chosen picture should be. 3D lighting is implemented but not yet
+checked in gameplay.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
 
@@ -164,6 +165,13 @@ Diagnostics:
 - `RECOMP_FPS=1` prints the frame rate, the slowest frame and how busy
   the game thread was every second, with OpenGL calls and time per
   entry point.
+- `RECOMP_GX_SKIP=<first>-<last>` drops those draws (numbered from 0 in
+  each frame), to find which draws make up something on screen;
+  `RECOMP_GX_COPY_LOG=1` logs each new EFB copy target.
+- `RECOMP_WATCH_LOG=1`, with `RECOMP_WATCH`, logs every function that
+  writes the watched range instead of stopping at the first.
+- `RECOMP_DUMP_MEM=<file>` saves MEM1 and MEM2 when the watchdog stops a
+  run.
 - `RECOMP_SKIP_MOVIES=1` ends movies that don't loop after about a
   second (the 56 s opening), for reaching the park quickly in tests.
 - `RECOMP_VI_HZ=<rate>` sets the video refresh and frame rate (default
@@ -183,7 +191,7 @@ Diagnostics:
 | `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
 | `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
 | `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. |
-| `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. |
+| `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. It also provides what a US console's system menu leaves there: `SYSCONF` (English, 4:3, stereo, Wii Remote settings) and `setting.txt` (region USA). |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
@@ -191,6 +199,7 @@ Diagnostics:
 | `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Volume ramps, the aux (effects) buses and the remote speaker are not mixed. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
+| `hle_font.c` | The Wii system font, which `OSInitFont` reads from the boot ROM: `ReadFont` builds the ANSI font from host glyphs (`host_font.h`; GDI's Segoe UI Semibold in `recomp/boot/font_win32.c`), in the ROM font's format, and the SDK expands it as usual. |
 | `hle_thp.c` | THP movie video: `THPVideoDecode` decoded natively (baseline JPEG without byte stuffing, written as I8 tiles). The game's decoder took ~12 ms a frame in recompiled code. The output matches it to within a few levels on under 0.5% of bytes (IDCT rounding). |
 | `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`. The boot skips the Strap (safety) and Hold (sideways) screens: Strap hands over to the title as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer, and Hold, a further 6 s, is skipped. `RECOMP_BOOT_SCREENS=1` keeps both. |
 

@@ -371,12 +371,46 @@ static uint32_t hash_bytes(const uint8_t* p, int n) {
 typedef struct CopyTex {
     uint32_t addr, handle;
     int width, height;
+    int bytes;        /* size of the copy in guest memory */
+    uint32_t mem_hash; /* of that memory when the copy was made */
+    uint64_t checked;  /* frame its memory was last checked in, plus 1 */
 } CopyTex;
 static CopyTex sCopies[64];
 static int sCopyCount;
 
-void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height) {
+/* Size in guest memory of an EFB copy of the given copy format (the
+ * texture copy formats, R4 to GB8), from its bytes per texel. */
+static int copy_bytes(int fmt, int width, int height) {
+    static const int kTexFmt[16] = {0, 1, 1, 3, 3, 3, 6, 1, 1, 1, 1, 3, 3, 1, 1, 1}; /* I4, I8, IA8, RGBA8 sizes */
+    return gx_texture_size(kTexFmt[fmt & 15], width, height);
+}
+
+/* The copy lives on the GPU only: guest memory at its address keeps what
+ * was there. If that memory changes later, the game has put something
+ * else there (a texture loaded from disc, say), and the copy no longer
+ * stands for it. */
+static int copy_still_valid(CopyTex* t) {
+    /* Once a frame: a full-screen copy is over a megabyte, and a frame can
+     * sample it many times. */
+    if (t->checked == sFrame + 1) return 1;
+    if (t->bytes > 0 && hash_bytes(MA(t->addr), t->bytes) != t->mem_hash) return 0;
+    t->checked = sFrame + 1;
+    return 1;
+}
+
+void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt) {
     int i;
+    if (getenv("RECOMP_GX_COPY_LOG")) {
+        static uint32_t seen[256];
+        static int nseen;
+        int k;
+        for (k = 0; k < nseen && seen[k] != addr; k++) {}
+        if (k == nseen && nseen < 256) {
+            seen[nseen++] = addr;
+            fprintf(stderr, "gx: EFB copy target %08X %dx%d fmt %d (frame %llu, %d registered)\n", addr, width, height,
+                    fmt, (unsigned long long)sFrame, sCopyCount);
+        }
+    }
     for (i = 0; i < sCopyCount; i++) {
         if (sCopies[i].addr == addr) break;
     }
@@ -388,6 +422,9 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height) {
     sCopies[i].handle = handle;
     sCopies[i].width = width;
     sCopies[i].height = height;
+    sCopies[i].bytes = copy_bytes(fmt, width, height);
+    sCopies[i].mem_hash = sCopies[i].bytes > 0 ? hash_bytes(MA(addr), sCopies[i].bytes) : 0;
+    sCopies[i].checked = sFrame + 1;
 }
 
 static uint32_t texture_for_map(int map) {
@@ -409,7 +446,11 @@ static uint32_t texture_for_map(int map) {
         if (copy >= 0) fprintf(stderr, " %dx%d)\n", sCopies[copy].width, sCopies[copy].height);
     }
     for (i = 0; i < sCopyCount; i++) {
-        if (sCopies[i].addr == addr) return sCopies[i].handle;
+        if (sCopies[i].addr != addr) continue;
+        if (copy_still_valid(&sCopies[i])) return sCopies[i].handle;
+        /* Stale: forget it and use what is in memory now. */
+        sCopies[i] = sCopies[--sCopyCount];
+        break;
     }
     if (!addr || size <= 0) return 0;
     key = ((uint64_t)addr << 32) ^ ((uint64_t)fmt << 28) ^ ((uint64_t)width << 14) ^ (uint64_t)height ^
@@ -568,6 +609,22 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
             st->viewport[5], st->scissor[0], st->scissor[1], st->scissor[2], st->scissor[3], st->num_stages,
             st->blend_enable, st->blend_src, st->blend_dst, st->z_enable, st->z_func, st->z_update, st->color_update,
             st->alpha_update);
+    fprintf(stderr, "   alpha test %d %d / %d %d logic %d; chan0 ctrl %X/%X mat %08X amb %08X; konst0 %.2f %.2f %.2f %.2f\n",
+            st->alpha_func[0], st->alpha_ref[0], st->alpha_func[1], st->alpha_ref[1], st->alpha_logic, xf[0x100E],
+            xf[0x1010], xf[0x100C], xf[0x100A], st->konst[0][0], st->konst[0][1], st->konst[0][2], st->konst[0][3]);
+    if (xf[0x100E] & 2) {
+        /* A lit channel: its lights' color, cos and distance attenuation,
+         * position and direction. */
+        uint32_t mask = ((xf[0x100E] >> 2) & 15) | (((xf[0x100E] >> 11) & 15) << 4), j;
+        for (j = 0; j < 8; j++) {
+            uint32_t b = 0x600 + j * 16;
+            if (!(mask & (1u << j))) continue;
+            fprintf(stderr, "   light %u: color %08X cos %g %g %g dist %g %g %g pos %g %g %g dir %g %g %g\n", j, xf[b + 3],
+                    xf_float(b + 4), xf_float(b + 5), xf_float(b + 6), xf_float(b + 7), xf_float(b + 8), xf_float(b + 9),
+                    xf_float(b + 10), xf_float(b + 11), xf_float(b + 12), xf_float(b + 13), xf_float(b + 14),
+                    xf_float(b + 15));
+        }
+    }
     for (i = 0; i < st->num_stages && i < 3; i++) {
         const GXTevStage* t = &st->stage[i];
         fprintf(stderr, "   stage %d: c %d %d %d %d a %d %d %d %d tex %d(map %d coord %d) ch %d k %d/%d -> %d/%d\n", i,
@@ -584,9 +641,23 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
         fprintf(stderr, " (%d); MATINDEX_A %08X, CP 0xAC %08X 0xBC %08X\n", nz, xf[0x1018], cp[0xAC], cp[0xBC]);
     }
     for (i = 0; i < n && i < 3; i++) {
-        fprintf(stderr, "   v%d mtx %.0f pos %.3f %.3f %.3f col %.2f %.2f %.2f %.2f tex %.3f %.3f\n", i, v[i].mtx[0],
-                v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].color[0][0], v[i].color[0][1], v[i].color[0][2],
-                v[i].color[0][3], v[i].tex[0][0], v[i].tex[0][1]);
+        /* The vertex's view-space z and its depth as GX computes it (the
+         * shader does the same on the GPU). */
+        uint32_t m = (uint32_t)v[i].mtx[0] * 4 + 8;
+        float vz = xf_float(m) * v[i].pos[0] + xf_float(m + 1) * v[i].pos[1] + xf_float(m + 2) * v[i].pos[2] + xf_float(m + 3);
+        float cz = xf[0x1026] ? xf_float(0x1024) * vz + xf_float(0x1025) : xf_float(0x1024) * vz + xf_float(0x1025);
+        float cw = xf[0x1026] ? 1.0f : -vz;
+        uint32_t mr = (uint32_t)v[i].mtx[0] * 4;
+        float vx = xf_float(mr) * v[i].pos[0] + xf_float(mr + 1) * v[i].pos[1] + xf_float(mr + 2) * v[i].pos[2] + xf_float(mr + 3);
+        float vy = xf_float(mr + 4) * v[i].pos[0] + xf_float(mr + 5) * v[i].pos[1] + xf_float(mr + 6) * v[i].pos[2] + xf_float(mr + 7);
+        float cx = xf[0x1026] ? xf_float(0x1020) * vx + xf_float(0x1021) : xf_float(0x1020) * vx + xf_float(0x1021) * vz;
+        float cy = xf[0x1026] ? xf_float(0x1022) * vy + xf_float(0x1023) : xf_float(0x1022) * vy + xf_float(0x1023) * vz;
+        /* Screen position in the 640x456 EFB (y down). */
+        float sx = cw != 0 ? (cx / cw * 0.5f + 0.5f) * st->viewport[2] + st->viewport[0] : 0;
+        float sy = cw != 0 ? (0.5f - cy / cw * 0.5f) * st->viewport[3] + st->viewport[1] : 0;
+        fprintf(stderr, "   v%d mtx %.0f pos %.3f %.3f %.3f col %.2f %.2f %.2f %.2f tex %.3f %.3f  view z %.6f depth %.8f screen %.0f,%.0f\n", i,
+                v[i].mtx[0], v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].color[0][0], v[i].color[0][1], v[i].color[0][2],
+                v[i].color[0][3], v[i].tex[0][0], v[i].tex[0][1], vz, cw != 0 ? 1.0f + cz / cw : 0.0f, sx, sy);
     }
 }
 
@@ -608,7 +679,20 @@ static void flush_batch(void) {
 
 static void emit(GXVertex* tri, int n) {
     GXDrawState st;
+    static int skipLo = -2, skipHi = -1;
     if (n <= 0) return;
+    if (skipLo == -2) {
+        /* RECOMP_GX_SKIP=<first>-<last>: drop those draws (numbered from 0
+         * in each frame), to find which draws make up something on
+         * screen. */
+        const char* e = getenv("RECOMP_GX_SKIP");
+        skipLo = -1;
+        if (e && sscanf(e, "%d-%d", &skipLo, &skipHi) != 2) skipLo = skipHi = -1;
+    }
+    if ((int)sDrawCount >= skipLo && (int)sDrawCount <= skipHi) {
+        sDrawCount++;
+        return;
+    }
     build_state(&st); /* may draw the pending batch, if a texture changes */
     if ((long)sFrame == sDebugFrame) debug_draw(&st, tri, n);
     /* Everything but the XF fields, which build_state leaves zero. */

@@ -643,6 +643,17 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
     glViewport((GLint)(st->viewport[0] * sScale), (GLint)((EFB_H - (st->viewport[1] + st->viewport[3])) * sScale),
                (GLsizei)(st->viewport[2] * sScale), (GLsizei)(st->viewport[3] * sScale));
     glDepthRange(st->viewport[4] < 0 ? 0 : st->viewport[4], st->viewport[5] > 1 ? 1 : st->viewport[5]);
+    /* Face culling (GX_CULL_NONE, FRONT, BACK, ALL). GX's front faces wind
+     * counter-clockwise in GL's window coordinates, GL's default. Games
+     * rely on it: the picture confirmation dialog hides a placeholder pane
+     * by turning it away from the camera. */
+    if (st->cull_mode == 0) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        static const GLenum kCull[4] = {GL_BACK, GL_FRONT, GL_BACK, GL_FRONT_AND_BACK};
+        glEnable(GL_CULL_FACE);
+        glCullFace(kCull[st->cull_mode]);
+    }
     glEnable(GL_SCISSOR_TEST);
     glScissor(st->scissor[0] * sScale, (EFB_H - st->scissor[3]) * sScale, (st->scissor[2] - st->scissor[0]) * sScale,
               (st->scissor[3] - st->scissor[1]) * sScale);
@@ -672,7 +683,7 @@ static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_
     if (mask) glClear(mask);
 }
 
-void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height);
+void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt);
 
 /* EFB copies to textures. GX textures have row 0 at the top while the EFB
  * framebuffer has it at the bottom, so the copy flips. */
@@ -687,7 +698,6 @@ static int sTargetCount;
 static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int clear) {
     CopyTarget* t = NULL;
     int i;
-    (void)fmt;
     (void)clear;
     for (i = 0; i < sTargetCount; i++) {
         if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) t = &sTargets[i];
@@ -714,7 +724,7 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
     glDisable(GL_SCISSOR_TEST);
     p_glBlitFramebuffer(x * sScale, (EFB_H - y) * sScale, (x + w) * sScale, (EFB_H - y - h) * sScale, 0, 0, w * sScale,
                         h * sScale, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    gx_register_copy(addr, t->tex, w, h);
+    gx_register_copy(addr, t->tex, w, h, fmt);
 }
 
 static void dump_bmp(const char* path, int w, int h) {
