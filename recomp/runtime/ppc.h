@@ -178,8 +178,61 @@ double ppc_fctiw(ppc_t* c, double v);
 
 static inline void ppc_dcbz(uint32_t a) { memset(MA(a & ~31u), 0, 32); }
 
-void psq_load(ppc_t* c, int fd, uint32_t ea, int w, int i);
-void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i);
+/* Paired-single quantized loads and stores, inline: the THP decoder
+ * runs them for every pixel. */
+/* 2^k for the GQR's 6-bit signed scale (-32..31), built from the exponent
+ * bits: exact, and much cheaper than ldexp. */
+static inline double psq_pow2(int k) { return bits_f64((uint64_t)(1023 + k) << 52); }
+
+static inline double psq_dequant(uint32_t raw, int type, int scale) {
+    double v;
+    switch (type) {
+    case 4: v = (double)(uint8_t)raw; break;
+    case 5: v = (double)(uint16_t)raw; break;
+    case 6: v = (double)(int8_t)raw; break;
+    case 7: v = (double)(int16_t)raw; break;
+    default: return (double)bits_f32(raw);
+    }
+    return v * psq_pow2(-((scale & 0x20) ? scale - 64 : scale));
+}
+
+static inline uint32_t psq_quant(double v, int type, int scale, double lo, double hi) {
+    v *= psq_pow2((scale & 0x20) ? scale - 64 : scale);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    (void)type;
+    return (uint32_t)(int32_t)v;
+}
+
+static inline void psq_load(ppc_t* c, int fd, uint32_t ea, int w, int i) {
+    uint32_t gqr = c->gqr[i];
+    int type = (gqr >> 16) & 7, scale = (gqr >> 24) & 0x3F;
+    int size = type == 4 || type == 6 ? 1 : type == 5 || type == 7 ? 2 : 4;
+    uint32_t r0, r1 = 0;
+    if (size == 1) { r0 = LD8(ea); if (!w) r1 = LD8(ea + 1); }
+    else if (size == 2) { r0 = LD16(ea); if (!w) r1 = LD16(ea + 2); }
+    else { r0 = LD32(ea); if (!w) r1 = LD32(ea + 4); }
+    c->f[fd] = psq_dequant(r0, type, scale);
+    c->ps1[fd] = w ? 1.0 : psq_dequant(r1, type, scale);
+}
+
+static inline void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i) {
+    uint32_t gqr = c->gqr[i];
+    int type = gqr & 7, scale = (gqr >> 8) & 0x3F;
+    double v[2];
+    int n;
+    v[0] = c->f[fs];
+    v[1] = c->ps1[fs];
+    for (n = 0; n < (w ? 1 : 2); n++) {
+        switch (type) {
+        case 4: ST8(ea + n, psq_quant(v[n], type, scale, 0, 255)); break;
+        case 5: ST16(ea + 2 * n, psq_quant(v[n], type, scale, 0, 65535)); break;
+        case 6: ST8(ea + n, psq_quant(v[n], type, scale, -128, 127)); break;
+        case 7: ST16(ea + 2 * n, psq_quant(v[n], type, scale, -32768, 32767)); break;
+        default: st_f32(ea + 4 * n, v[n]); break;
+        }
+    }
+}
 uint32_t ppc_mfspr(ppc_t* c, int spr);
 void ppc_mtspr(ppc_t* c, int spr, uint32_t v);
 uint32_t ppc_mftb(ppc_t* c, int tbr);

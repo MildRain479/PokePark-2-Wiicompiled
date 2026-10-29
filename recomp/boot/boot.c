@@ -84,6 +84,78 @@ static void dump_calls(int n) {
     }
 }
 
+/* RECOMP_PROFILE=<seconds>: from that many seconds in until the watchdog
+ * stops the run, samples where the game's host thread is about once a
+ * millisecond, then lists the host functions it was in most (recompiled
+ * guest functions are f_<address>). */
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "winmm.lib")
+
+#define MAX_SAMPLES 400000
+static HANDLE gGameThread;
+static DWORD64 gSamples[MAX_SAMPLES];
+static volatile LONG gSampleCount;
+
+static DWORD WINAPI profiler(LPVOID arg) {
+    CONTEXT ctx;
+    Sleep((DWORD)(uintptr_t)arg * 1000);
+    timeBeginPeriod(1);
+    for (;;) {
+        Sleep(1);
+        if (SuspendThread(gGameThread) == (DWORD)-1) continue;
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(gGameThread, &ctx) && gSampleCount < MAX_SAMPLES) gSamples[gSampleCount++] = ctx.Rip;
+        ResumeThread(gGameThread);
+    }
+    return 0;
+}
+
+typedef struct {
+    char name[96];
+    unsigned count;
+} ProfileEntry;
+
+static int by_count(const void* a, const void* b) {
+    unsigned x = ((const ProfileEntry*)a)->count, y = ((const ProfileEntry*)b)->count;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void dump_profile(void) {
+    static ProfileEntry entries[4096];
+    int used = 0, i, j, n = (int)gSampleCount;
+    union {
+        SYMBOL_INFO info;
+        char buf[sizeof(SYMBOL_INFO) + 128];
+    } sym;
+    SuspendThread(gGameThread);
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    for (i = 0; i < n; i++) {
+        DWORD64 disp;
+        const char* name = "?";
+        memset(&sym, 0, sizeof(sym));
+        sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym.info.MaxNameLen = 127;
+        if (SymFromAddr(GetCurrentProcess(), gSamples[i], &disp, &sym.info)) name = sym.info.Name;
+        for (j = 0; j < used && strcmp(entries[j].name, name); j++) {}
+        if (j == used) {
+            if (used == 4096) continue;
+            strncpy(entries[used].name, name, sizeof(entries[used].name) - 1);
+            entries[used++].count = 0;
+        }
+        entries[j].count++;
+    }
+    qsort(entries, used, sizeof(entries[0]), by_count);
+    fprintf(stderr, "profile: %d samples\n", n);
+    for (i = 0; i < used && i < 60; i++) {
+        uint32_t guest = 0;
+        sscanf(entries[i].name, "f_%x", &guest);
+        fprintf(stderr, "  %5.1f%%  %-40s %s\n", 100.0 * entries[i].count / (n ? n : 1), entries[i].name,
+                guest ? ppc_func_name(guest) : "");
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID arg) {
     DWORD secs = (DWORD)(uintptr_t)arg;
     const char* calls = getenv("RECOMP_CALLS");
@@ -95,6 +167,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
     } else {
         Sleep(secs * 1000);
     }
+    if (gSampleCount) dump_profile();
     fprintf(stderr, "boot: still running after %u s; stopping\n", (unsigned)secs);
     ppc_dump_trace();
     if (gCpu) ppc_backtrace(gCpu);
@@ -169,6 +242,11 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, on_fault);
     CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)(argc > 2 ? atoi(argv[2]) : 10), 0, NULL);
+    if (getenv("RECOMP_PROFILE")) {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &gGameThread, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS);
+        CreateThread(NULL, 0, profiler, (LPVOID)(uintptr_t)atoi(getenv("RECOMP_PROFILE")), 0, NULL);
+    }
 #endif
     if (ppc_mem_init() != 0 || ppc_load_dol(argv[1], &entry) != 0) {
         fprintf(stderr, "could not load %s\n", argv[1]);

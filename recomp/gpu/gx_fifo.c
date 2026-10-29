@@ -428,11 +428,19 @@ typedef struct TexEntry {
 #define TEX_CACHE 2048
 static TexEntry sTexCache[TEX_CACHE];
 
+/* Hashes every byte, eight at a time: textures are checked for changes on
+ * every frame they are used. */
 static uint32_t hash_bytes(const uint8_t* p, int n) {
-    uint32_t h = 2166136261u;
-    int step = n > 65536 ? n / 16384 : 1, i;
-    for (i = 0; i < n; i += step) h = (h ^ p[i]) * 16777619u;
-    return h;
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ (uint64_t)n;
+    int i;
+    for (i = 0; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return (uint32_t)(h ^ (h >> 32));
 }
 
 /* EFB copies made to textures, looked up before main memory. */

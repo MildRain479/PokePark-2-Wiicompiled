@@ -591,6 +591,25 @@ void gxb_present(int x, int y, int cw, int ch) {
     }
     SwapBuffers(sDC);
     sPresented++;
+    {
+        /* Frames per second, in the window title and, with RECOMP_FPS=1,
+         * on stderr. */
+        static DWORD since;
+        static unsigned frames;
+        DWORD now = GetTickCount();
+        frames++;
+        if (!since) since = now;
+        if (now - since >= 1000) {
+            char title[64];
+            double fps = frames * 1000.0 / (now - since);
+            const char* e = getenv("RECOMP_FPS");
+            snprintf(title, sizeof(title), "PokePark (recompiled) - %.1f fps", fps);
+            SetWindowTextA(sWnd, title);
+            if (e && *e == '1') fprintf(stderr, "fps: %.1f\n", fps);
+            since = now;
+            frames = 0;
+        }
+    }
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);

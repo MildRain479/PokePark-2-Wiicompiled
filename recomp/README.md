@@ -101,10 +101,10 @@ buffered): the title movie's soundtrack, menu music and sound effects.
 There is no reverb or other effects yet, and the Wii Remote speaker is
 silent.
 
-The game runs at about 30-50 fps while the title movie plays (THP
-decoding is slow; performance hasn't been worked on). Text in some
-dialog boxes renders as garbled glyphs; that is a graphics bug still to
-find.
+The title, menus and the movie intro run at 60 fps, with the host
+thread idle about half the time (the window title shows the frame
+rate). Text in some dialog boxes renders as garbled glyphs, and 3D
+lighting is missing; those are graphics bugs still to fix.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways):
 
@@ -156,6 +156,11 @@ Diagnostics:
 - `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
   before the watchdog stops a run (for finding what a stuck game is
   polling).
+- `RECOMP_FPS=1` prints the frame rate every second.
+- `RECOMP_PROFILE=<seconds>` samples the game's host thread about once a
+  millisecond from that point until the watchdog stops the run, then
+  lists the host functions it was in most; recompiled functions show
+  with their guest names. `ZwDelayExecution` is idle time.
 
 **How the hardware is replaced** (`recomp/patches/`, all through
 `hooks.txt`):
@@ -246,6 +251,9 @@ Not implemented yet:
 
   This matters for bit-exact physics and replays; none of the current
   tests showed a difference.
-- **Performance** has not been measured yet. Every register lives in
-  memory (`c->r[n]`). Caching registers in locals per function is the
-  usual next step.
+- **Performance.** Measured so far only on movies and menus, which run
+  at 60 fps. Most of the busy time is THP decoding (Huffman and inverse
+  DCT in recompiled code); a native THP decoder would remove it. In
+  general every register lives in memory (`c->r[n]`), and caching
+  registers in locals per function is the usual next step. Gameplay has
+  not been profiled yet.
