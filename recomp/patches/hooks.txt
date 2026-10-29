@@ -54,3 +54,5 @@
 0x801776E0 ThpManager::virt0x18  # hle_game.c: RECOMP_SKIP_MOVIES
 0x8020C320 ReadFont  # hle_font.c: the system font from host glyphs
 0x80023630 CameraPlayer::virt0x18  # hle_camera.c: mouse camera
+0x80025280 CameraPlayer::fn_80025280  # hle_camera.c: mouse tilt (pitch target)
+0x800284C0 EaseAngle  # hle_camera.c: mouse tilt (pitch easing)
