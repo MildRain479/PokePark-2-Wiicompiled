@@ -64,11 +64,24 @@ static void host_backtrace(const CONTEXT* fault) {
         memset(&sym, 0, sizeof(sym));
         sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
         sym.info.MaxNameLen = 127;
-        if (SymFromAddr(proc, frame.AddrPC.Offset, &disp, &sym.info))
-            fprintf(stderr, "  %016llX %s+0x%llx\n", (unsigned long long)frame.AddrPC.Offset, sym.info.Name,
-                    (unsigned long long)disp);
-        else
-            fprintf(stderr, "  %016llX ?\n", (unsigned long long)frame.AddrPC.Offset);
+        {
+            /* The module and offset too: in a driver without symbols the
+             * name is only the nearest export, often far away. */
+            HMODULE mod = NULL;
+            char path[MAX_PATH] = "?";
+            const char* base;
+            DWORD64 pc = frame.AddrPC.Offset;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)pc, &mod))
+                GetModuleFileNameA(mod, path, sizeof(path));
+            base = strrchr(path, '\\') ? strrchr(path, '\\') + 1 : path;
+            if (SymFromAddr(proc, pc, &disp, &sym.info))
+                fprintf(stderr, "  %016llX %s+0x%llx (%s+0x%llx)\n", (unsigned long long)pc, sym.info.Name,
+                        (unsigned long long)disp, base, (unsigned long long)(pc - (DWORD64)mod));
+            else
+                fprintf(stderr, "  %016llX ? (%s+0x%llx)\n", (unsigned long long)pc, base,
+                        (unsigned long long)(pc - (DWORD64)mod));
+        }
     }
 }
 
@@ -135,6 +148,23 @@ static LONG WINAPI on_unhandled(EXCEPTION_POINTERS* info) {
     host_backtrace(info->ContextRecord);
     ppc_dump_trace();
     fflush(stderr);
+    if (getenv("RECOMP_MINIDUMP")) {
+        /* RECOMP_MINIDUMP=<file>: a minidump of the process, for a
+         * debugger (with all memory if RECOMP_MINIDUMP_FULL=1). */
+        HANDLE f = CreateFileA(getenv("RECOMP_MINIDUMP"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        MINIDUMP_EXCEPTION_INFORMATION e;
+        MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo |
+                                             MiniDumpWithHandleData | MiniDumpWithUnloadedModules |
+                                             (getenv("RECOMP_MINIDUMP_FULL") ? MiniDumpWithFullMemory : 0));
+        e.ThreadId = GetCurrentThreadId();
+        e.ExceptionPointers = info;
+        e.ClientPointers = FALSE;
+        if (f != INVALID_HANDLE_VALUE) {
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f, type, &e, NULL, NULL);
+            CloseHandle(f);
+            fprintf(stderr, "boot: wrote %s\n", getenv("RECOMP_MINIDUMP"));
+        }
+    }
     ExitProcess(3);
 }
 

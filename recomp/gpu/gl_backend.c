@@ -15,7 +15,9 @@
  *   RECOMP_GX_SCALE=n          internal resolution multiplier, over the settings
  *   RECOMP_GX_HIDDEN=1         do not show the window
  *   RECOMP_GX_DUMP=<dir>       write presented frames as BMP files
- *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30) */
+ *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30)
+ *   RECOMP_GL_PRESENT=swapbuffers  present with SwapBuffers, not DXGI (see "Presenting")
+ *   RECOMP_GL_DEBUG=1          debug context, printing the driver's error messages */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <GL/gl.h>
+#define COBJMACROS
+#include <d3d11.h>
+#include <dxgi1_5.h>
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxguid.lib")
 
 
 #include "gx.h"
@@ -585,6 +593,12 @@ static void build_overlay_program(void) {
 
 static HWND sWnd;
 static HDC sDC;
+/* The DC the GL context is current on: a hidden window's of its own when
+ * presenting through DXGI, else sDC. */
+static HDC sGlDC;
+/* What the window's picture is drawn into: sWinFbo, the size of the
+ * window's client area, when presenting through DXGI, else 0. */
+static GLuint sWinFbo;
 /* EFB pixels to GL pixels. In 16:9 the game squeezes a wide picture into
  * the EFB's 640 columns for the TV to stretch out: its cameras project a
  * 16:9 picture onto the 640x456 it shows. So the EFB gets as many more
@@ -700,6 +714,291 @@ static void resolve(void) {
     sMsDirty = 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Presenting
+ *
+ * The window is shown through a DXGI swapchain of our own, with the GL
+ * picture handed over in a D3D11 texture (WGL_NV_DX_interop2), rather
+ * than by SwapBuffers. On NVIDIA, SwapBuffers on a window presents
+ * through a DXGI swapchain the driver keeps itself ("layered on DXGI"),
+ * and that path crashed about once in 40 minutes of play, usually just
+ * after a slow frame: one of the driver's threads (or the game thread,
+ * inside SwapBuffers) called ID3D11DeviceContext4::Wait with a fence that
+ * was never made, a read of address 0 in d3d11.dll. That call is not made
+ * for ordinary frames (none in 15,000 presents), only on some rarer path
+ * of the driver's, and nothing in the GL calls made before it is wrong
+ * (a debug context reports nothing). The GL context is made on a hidden
+ * window of its own, never presented, so that path is never entered.
+ *
+ * Flip model, discarding, and with tearing allowed where the system
+ * supports it, so presenting doesn't wait for the display (as
+ * SwapInterval 0 did). Each frame the picture is drawn into sWinFbo as
+ * it was into the window, then flipped into the shared texture (D3D's
+ * row 0 is the top) and copied to the back buffer.
+ *
+ * Without the extension, or with RECOMP_GL_PRESENT=swapbuffers, the
+ * context moves to the game's window and SwapBuffers presents it. */
+
+typedef HANDLE(WINAPI* PFN_wglDXOpenDeviceNV)(void*);
+typedef HANDLE(WINAPI* PFN_wglDXRegisterObjectNV)(HANDLE, void*, GLuint, GLenum, GLenum);
+typedef BOOL(WINAPI* PFN_wglDXUnregisterObjectNV)(HANDLE, HANDLE);
+typedef BOOL(WINAPI* PFN_wglDXLockObjectsNV)(HANDLE, GLint, HANDLE*);
+static PFN_wglDXRegisterObjectNV p_wglDXRegisterObjectNV;
+static PFN_wglDXUnregisterObjectNV p_wglDXUnregisterObjectNV;
+static PFN_wglDXLockObjectsNV p_wglDXLockObjectsNV, p_wglDXUnlockObjectsNV;
+#define WGL_ACCESS_WRITE_DISCARD_NV 0x0002
+
+static ID3D11Device* sD3d;
+static ID3D11DeviceContext* sD3dCtx;
+static IDXGISwapChain1* sChain;
+static ID3D11Texture2D* sShared; /* the picture, written by GL */
+static HANDLE sInteropDev, sInterop;
+static GLuint sWinColor, sSharedFbo, sSharedColor;
+static int sChainW, sChainH, sTearing;
+
+/* Sets up presenting through DXGI; 0 if it can't be. The D3D11 device
+ * must be on the GL context's adapter: the first adapter the interop
+ * accepts. */
+static int dx_init(void) {
+    PFN_wglDXOpenDeviceNV open = (PFN_wglDXOpenDeviceNV)(void*)wglGetProcAddress("wglDXOpenDeviceNV");
+    IDXGIFactory1* f1 = NULL;
+    IDXGIFactory2* f2 = NULL;
+    IDXGIFactory5* f5 = NULL;
+    IDXGIAdapter1* adapter;
+    DXGI_SWAP_CHAIN_DESC1 d;
+    UINT i;
+    p_wglDXRegisterObjectNV = (PFN_wglDXRegisterObjectNV)(void*)wglGetProcAddress("wglDXRegisterObjectNV");
+    p_wglDXUnregisterObjectNV = (PFN_wglDXUnregisterObjectNV)(void*)wglGetProcAddress("wglDXUnregisterObjectNV");
+    p_wglDXLockObjectsNV = (PFN_wglDXLockObjectsNV)(void*)wglGetProcAddress("wglDXLockObjectsNV");
+    p_wglDXUnlockObjectsNV = (PFN_wglDXLockObjectsNV)(void*)wglGetProcAddress("wglDXUnlockObjectsNV");
+    if (!open || !p_wglDXRegisterObjectNV || !p_wglDXUnregisterObjectNV || !p_wglDXLockObjectsNV ||
+        !p_wglDXUnlockObjectsNV) {
+        fprintf(stderr, "gl: no WGL_NV_DX_interop2\n");
+        return 0;
+    }
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&f1))) return 0;
+    for (i = 0; !sInteropDev && IDXGIFactory1_EnumAdapters1(f1, i, &adapter) == S_OK; i++) {
+        DXGI_ADAPTER_DESC1 ad;
+        IDXGIAdapter1_GetDesc1(adapter, &ad);
+        if (!(ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+            SUCCEEDED(D3D11CreateDevice((IDXGIAdapter*)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
+                                        D3D11_SDK_VERSION, &sD3d, NULL, &sD3dCtx))) {
+            sInteropDev = open(sD3d);
+            if (!sInteropDev) {
+                ID3D11DeviceContext_Release(sD3dCtx);
+                ID3D11Device_Release(sD3d);
+                sD3d = NULL;
+                sD3dCtx = NULL;
+            }
+        }
+        IDXGIAdapter1_Release(adapter);
+    }
+    if (!sInteropDev || FAILED(IDXGIFactory1_QueryInterface(f1, &IID_IDXGIFactory2, (void**)&f2))) {
+        fprintf(stderr, "gl: no D3D11 device the GL context can share with\n");
+        IDXGIFactory1_Release(f1);
+        return 0;
+    }
+    if (SUCCEEDED(IDXGIFactory1_QueryInterface(f1, &IID_IDXGIFactory5, (void**)&f5))) {
+        BOOL tearing = FALSE;
+        if (SUCCEEDED(IDXGIFactory5_CheckFeatureSupport(f5, DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing,
+                                                        sizeof(tearing))))
+            sTearing = tearing != FALSE;
+        IDXGIFactory5_Release(f5);
+    }
+    memset(&d, 0, sizeof(d));
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    d.BufferCount = 2;
+    d.Scaling = DXGI_SCALING_STRETCH;
+    d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    d.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    d.Flags = sTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    if (FAILED(IDXGIFactory2_CreateSwapChainForHwnd(f2, (IUnknown*)sD3d, sWnd, &d, NULL, NULL, &sChain))) {
+        fprintf(stderr, "gl: no DXGI swapchain for the window\n");
+        sChain = NULL;
+    } else {
+        /* Alt+Enter is the game's own (borderless fullscreen). */
+        IDXGIFactory2_MakeWindowAssociation(f2, sWnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+    }
+    IDXGIFactory2_Release(f2);
+    IDXGIFactory1_Release(f1);
+    if (!sChain) return 0;
+    p_glGenFramebuffers(1, &sWinFbo);
+    p_glGenFramebuffers(1, &sSharedFbo);
+    return 1;
+}
+
+/* Sizes the swapchain, the shared texture and sWinFbo to the window's
+ * client area, w x h (not 0). */
+static void dx_size(int w, int h) {
+    D3D11_TEXTURE2D_DESC t;
+    HRESULT hr;
+    if (w == sChainW && h == sChainH) return;
+    if (sInterop) {
+        p_wglDXUnregisterObjectNV(sInteropDev, sInterop);
+        sInterop = NULL;
+        p_glDeleteRenderbuffers(1, &sSharedColor);
+        p_glDeleteRenderbuffers(1, &sWinColor);
+        ID3D11Texture2D_Release(sShared);
+        sShared = NULL;
+    }
+    hr = IDXGISwapChain1_ResizeBuffers(sChain, 0, w, h, DXGI_FORMAT_UNKNOWN,
+                                       sTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+    if (FAILED(hr)) {
+        /* Nothing is shown until a resize works (tried each frame). */
+        static int reported;
+        if (!reported++) fprintf(stderr, "gl: resizing the swapchain to %d x %d failed (%08lX)\n", w, h, (unsigned long)hr);
+        return;
+    }
+    memset(&t, 0, sizeof(t));
+    t.Width = w;
+    t.Height = h;
+    t.MipLevels = 1;
+    t.ArraySize = 1;
+    t.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    t.SampleDesc.Count = 1;
+    t.Usage = D3D11_USAGE_DEFAULT;
+    t.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(sD3d, &t, NULL, &sShared))) {
+        fprintf(stderr, "gl: no %d x %d shared texture\n", w, h);
+        sShared = NULL;
+        return;
+    }
+    p_glGenRenderbuffers(1, &sSharedColor);
+    sInterop = p_wglDXRegisterObjectNV(sInteropDev, sShared, sSharedColor, GL_RENDERBUFFER, WGL_ACCESS_WRITE_DISCARD_NV);
+    if (!sInterop) {
+        fprintf(stderr, "gl: sharing the %d x %d texture failed\n", w, h);
+        p_glDeleteRenderbuffers(1, &sSharedColor);
+        ID3D11Texture2D_Release(sShared);
+        sShared = NULL;
+        return;
+    }
+    p_wglDXLockObjectsNV(sInteropDev, 1, &sInterop);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sSharedFbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, sSharedColor);
+    p_wglDXUnlockObjectsNV(sInteropDev, 1, &sInterop);
+    p_glGenRenderbuffers(1, &sWinColor);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, sWinColor);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sWinFbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, sWinColor);
+    sChainW = w;
+    sChainH = h;
+}
+
+/* Writes the shared texture, as presented, to a BMP (RECOMP_GX_DUMP). */
+static void dump_shared(const char* path) {
+    D3D11_TEXTURE2D_DESC t;
+    D3D11_MAPPED_SUBRESOURCE m;
+    ID3D11Texture2D* staging;
+    FILE* f;
+    if (!sShared) return;
+    ID3D11Texture2D_GetDesc(sShared, &t);
+    t.Usage = D3D11_USAGE_STAGING;
+    t.BindFlags = 0;
+    t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateTexture2D(sD3d, &t, NULL, &staging))) return;
+    ID3D11DeviceContext_CopyResource(sD3dCtx, (ID3D11Resource*)staging, (ID3D11Resource*)sShared);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(sD3dCtx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &m))) {
+        if ((f = fopen(path, "wb")) != NULL) {
+            uint8_t hdr[54] = {'B', 'M'};
+            uint8_t* row = (uint8_t*)malloc((size_t)t.Width * 4);
+            UINT x, y;
+            *(uint32_t*)(hdr + 2) = 54 + t.Width * t.Height * 4;
+            hdr[10] = 54;
+            hdr[14] = 40;
+            *(int32_t*)(hdr + 18) = (int32_t)t.Width;
+            *(int32_t*)(hdr + 22) = -(int32_t)t.Height; /* top row first, as D3D has it */
+            hdr[26] = 1;
+            hdr[28] = 32;
+            fwrite(hdr, 1, 54, f);
+            for (y = 0; y < t.Height; y++) {
+                const uint8_t* px = (const uint8_t*)m.pData + (size_t)y * m.RowPitch;
+                for (x = 0; x < t.Width; x++) {
+                    row[x * 4] = px[x * 4 + 2];
+                    row[x * 4 + 1] = px[x * 4 + 1];
+                    row[x * 4 + 2] = px[x * 4];
+                    row[x * 4 + 3] = 255;
+                }
+                fwrite(row, 4, t.Width, f);
+            }
+            free(row);
+            fclose(f);
+        }
+        ID3D11DeviceContext_Unmap(sD3dCtx, (ID3D11Resource*)staging, 0);
+    }
+    ID3D11Texture2D_Release(staging);
+}
+
+/* Shows what was drawn into the window's framebuffer, w x h. */
+static void window_present(int w, int h) {
+    ID3D11Texture2D* back;
+    HRESULT hr;
+    static int failures;
+    if (!sChain) {
+        SwapBuffers(sDC);
+        return;
+    }
+    if (!sInterop || w != sChainW || h != sChainH) return; /* minimized, or no shared texture */
+    if (!p_wglDXLockObjectsNV(sInteropDev, 1, &sInterop)) {
+        if (failures++ < 5) fprintf(stderr, "gl: locking the shared texture failed\n");
+        return;
+    }
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sWinFbo);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sSharedFbo);
+    p_glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_wglDXUnlockObjectsNV(sInteropDev, 1, &sInterop);
+    if (SUCCEEDED(IDXGISwapChain1_GetBuffer(sChain, 0, &IID_ID3D11Texture2D, (void**)&back))) {
+        ID3D11DeviceContext_CopyResource(sD3dCtx, (ID3D11Resource*)back, (ID3D11Resource*)sShared);
+        ID3D11Texture2D_Release(back);
+    }
+    hr = IDXGISwapChain1_Present(sChain, 0, sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
+}
+
+/* RECOMP_GL_DEBUG=1: a debug context (compatibility profile, as the
+ * shaders need), with the driver's messages about errors and misuse
+ * printed as each call makes them. */
+static void APIENTRY debug_message(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
+                                   const GLchar* message, const void* user) {
+    static unsigned count;
+    (void)source;
+    (void)length;
+    (void)user;
+    if (severity == 0x826B /* GL_DEBUG_SEVERITY_NOTIFICATION */) return;
+    if (++count > 200) return;
+    fprintf(stderr, "gl debug: type %04X id %u severity %04X: %s\n", type, id, severity, message);
+}
+
+static HGLRC debug_context(HGLRC legacy) {
+    typedef HGLRC(WINAPI * PFN_create)(HDC, HGLRC, const int*);
+    typedef void(APIENTRY * PFN_callback)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar*, const void*);
+    typedef void(APIENTRY * PFN_set_callback)(PFN_callback, const void*);
+    static const int attribs[] = {0x2091, 4,      /* WGL_CONTEXT_MAJOR_VERSION_ARB */
+                                  0x2092, 6,      /* WGL_CONTEXT_MINOR_VERSION_ARB */
+                                  0x2094, 1,      /* WGL_CONTEXT_FLAGS_ARB: WGL_CONTEXT_DEBUG_BIT_ARB */
+                                  0x9126, 2,      /* WGL_CONTEXT_PROFILE_MASK_ARB: compatibility */
+                                  0};
+    PFN_create create = (PFN_create)(void*)wglGetProcAddress("wglCreateContextAttribsARB");
+    PFN_set_callback set_callback;
+    HGLRC rc = create ? create(sGlDC, NULL, attribs) : NULL;
+    if (!rc) {
+        fprintf(stderr, "gl: no debug context\n");
+        return legacy;
+    }
+    wglMakeCurrent(sGlDC, rc);
+    wglDeleteContext(legacy);
+    set_callback = (PFN_set_callback)(void*)wglGetProcAddress("glDebugMessageCallback");
+    if (set_callback) {
+        glEnable(0x92E0); /* GL_DEBUG_OUTPUT */
+        glEnable(0x8242); /* GL_DEBUG_OUTPUT_SYNCHRONOUS */
+        set_callback(debug_message, NULL);
+    }
+    fprintf(stderr, "gl: debug context, synchronous debug output\n");
+    return rc;
+}
+
 void gxb_init(void) {
     WNDCLASSA wc;
     PIXELFORMATDESCRIPTOR pfd;
@@ -732,13 +1031,29 @@ void gxb_init(void) {
     pfd.iPixelType = PFD_TYPE_RGBA;
     pfd.cColorBits = 32;
     pfd.cDepthBits = 24;
-    SetPixelFormat(sDC, ChoosePixelFormat(sDC, &pfd), &pfd);
-    rc = wglCreateContext(sDC);
-    wglMakeCurrent(sDC, rc);
+    /* The context starts on a hidden window of its own (see Presenting). */
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.lpszClassName = "PokeParkRecompGL";
+    RegisterClassA(&wc);
+    sGlDC = GetDC(CreateWindowA("PokeParkRecompGL", "", WS_POPUP, 0, 0, 16, 16, NULL, NULL, wc.hInstance, NULL));
+    SetPixelFormat(sGlDC, ChoosePixelFormat(sGlDC, &pfd), &pfd);
+    rc = wglCreateContext(sGlDC);
+    wglMakeCurrent(sGlDC, rc);
+    if ((v = getenv("RECOMP_GL_DEBUG")) && *v && *v != '0') rc = debug_context(rc);
     v = getenv("RECOMP_GX_HIDDEN");
     sHidden = v && *v && *v != '0';
     if (!sHidden) ShowWindow(sWnd, SW_SHOW);
     load_gl();
+    v = getenv("RECOMP_GL_PRESENT");
+    if (!(v && strcmp(v, "swapbuffers") == 0) && dx_init()) {
+        fprintf(stderr, "gl: presenting through DXGI (flip model%s)\n", sTearing ? ", tearing allowed" : "");
+    } else {
+        /* SwapBuffers on the game's window: the context moves there. */
+        SetPixelFormat(sDC, GetPixelFormat(sGlDC), &pfd);
+        wglMakeCurrent(sDC, rc);
+        sGlDC = sDC;
+        fprintf(stderr, "gl: presenting with SwapBuffers\n");
+    }
     fprintf(stderr, "gl: %s, %s\n", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     glGetIntegerv(GL_MAX_SAMPLES, &sMaxSamples);
     build_program();
@@ -1251,9 +1566,10 @@ static void present_output(int x, int y, int cw, int ch) {
         dh = h;
         dw = (int)(h * aspect + 0.5);
     }
+    if (sChain && w > 0 && h > 0) dx_size(w, h);
     resolve();
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sEfbFbo);
-    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sWinFbo);
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, w, h);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1268,7 +1584,7 @@ static void present_output(int x, int y, int cw, int ch) {
     {
         const uint32_t* menu = menu_draw(w, h);
         if (menu) {
-            p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, sWinFbo);
             p_glUseProgram(sOverlayProgram);
             p_glBindVertexArray(sCopyVao);
             p_glActiveTexture(GL_TEXTURE0);
@@ -1285,13 +1601,18 @@ static void present_output(int x, int y, int cw, int ch) {
             p_glBindVertexArray(sVao);
         }
     }
-    if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0) {
+    if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0 && !sChain) {
         char path[512];
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
         dump_bmp(path, w, h);
     }
-    SwapBuffers(sDC);
+    window_present(w, h);
+    if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0 && sChain) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
+        dump_shared(path);
+    }
     sPresented++;
     {
         /* Frames per second and the longest frame of the last second, in

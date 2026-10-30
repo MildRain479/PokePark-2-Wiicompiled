@@ -229,6 +229,12 @@ Diagnostics:
   millisecond from that point until the watchdog stops the run, then
   lists the host functions it was in most; recompiled functions show
   with their guest names. `ZwDelayExecution` is idle time.
+- `RECOMP_GL_DEBUG=1` uses a debug GL context and prints the driver's
+  messages about errors and misuse as each call makes them.
+- `RECOMP_MINIDUMP=<file>` writes a minidump when the run ends on a
+  host fault (`RECOMP_MINIDUMP_FULL=1`: with all memory), for a
+  debugger. Host backtraces name the module and offset of each frame,
+  as a driver without symbols shows only its nearest export.
 
 **How the hardware is replaced** (`recomp/patches/`, all through
 `hooks.txt`):
@@ -301,6 +307,17 @@ runs unchanged.
   - Copies to the XFB are presented in the window, without waiting for
     the display (the game paces itself; a display whose refresh stalled
     held the game at 7 fps).
+  - Presenting goes through a DXGI swapchain of the backend's own (flip
+    model, tearing allowed), the picture handed from GL in a shared D3D11
+    texture (`WGL_NV_DX_interop2`), not through `SwapBuffers`. NVIDIA's
+    driver presents a GL window through a DXGI swapchain it keeps itself,
+    and that path crashed about once in 40 minutes of play, just after
+    slow scene-change frames: on some rare path the driver calls
+    `ID3D11DeviceContext4::Wait` with a fence it never made (a read of
+    address 0 in `d3d11.dll`). The GL context lives on a hidden window
+    of its own, so the driver never presents. Without the extension, or
+    with `RECOMP_GL_PRESENT=swapbuffers`, `SwapBuffers` presents as
+    before.
   - Each draw changes only the GL state that differs from the last.
   - Above 60 fps, the newest frame is recorded (its draws with their
     state and XF state, clears, EFB copies) and drawn again while the
