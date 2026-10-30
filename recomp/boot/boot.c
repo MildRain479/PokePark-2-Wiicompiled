@@ -1,7 +1,8 @@
 /* Boot harness: loads main.dol, sets up low memory the way the Wii's
  * system menu and apploader leave it, and runs the game's __start.
  *
- * Usage: boot <main.dol> [timeout seconds, default 10]
+ * Usage: boot [<main.dol> [time limit, seconds]]: without arguments, the
+ * game in an R8AE01 folder beside the program or above it, no time limit.
  *
  * The disc is read from a "disc" directory next to the directory holding
  * main.dol (orig/R8AE01/disc for orig/R8AE01/sys/main.dol), holding sys/
@@ -392,11 +393,53 @@ static void setup_low_memory(void) {
     ST32(0x80003188, 0x00090204); /* IOS version the apploader saw */
 }
 
+/* The game's main.dol, in an R8AE01 folder (or orig\R8AE01, as in the
+ * source tree) beside the program or in a folder above it. */
+static int find_game(char* out, size_t n) {
+#ifdef _WIN32
+    char dir[1024], *slash;
+    static const char* const kPlaces[] = {"R8AE01\\sys\\main.dol", "orig\\R8AE01\\sys\\main.dol"};
+    size_t i;
+    if (!GetModuleFileNameA(NULL, dir, sizeof(dir) - 64)) return 0;
+    while ((slash = strrchr(dir, '\\')) != NULL) {
+        *slash = '\0';
+        for (i = 0; i < sizeof(kPlaces) / sizeof(kPlaces[0]); i++) {
+            snprintf(out, n, "%s\\%s", dir, kPlaces[i]);
+            if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return 1;
+        }
+    }
+#endif
+    (void)out;
+    (void)n;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     ppc_t* c;
     uint32_t entry;
+    static char found[1024];
+    static char* defaultArgs[2];
+    if (argc < 2 && find_game(found, sizeof(found))) {
+        /* Started without arguments (double-clicked): the game found
+         * beside the program or above it, and no time limit. */
+        defaultArgs[0] = argv[0];
+        defaultArgs[1] = found;
+        argv = defaultArgs;
+        argc = 2;
+#ifdef _WIN32
+        {
+            /* A console of our own (not a terminal's): close it. */
+            DWORD pid;
+            if (GetConsoleProcessList(&pid, 1) == 1) FreeConsole();
+        }
+#endif
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <main.dol>\n", argv[0]);
+        fprintf(stderr, "usage: %s <main.dol> [seconds]\n(or put the game's R8AE01 folder, with sys\\main.dol and disc, beside it)\n", argv[0]);
+#ifdef _WIN32
+        MessageBoxA(NULL, "Put the game's R8AE01 folder (with sys\\main.dol and disc) beside the program.", "PokePark",
+                    MB_ICONERROR);
+#endif
         return 2;
     }
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -404,7 +447,8 @@ int main(int argc, char** argv) {
     gGameThreadId = GetCurrentThreadId();
     AddVectoredExceptionHandler(1, on_fault);
     SetUnhandledExceptionFilter(on_unhandled);
-    CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)(argc > 2 ? atoi(argv[2]) : 10), 0, NULL);
+    /* A time limit (seconds), for test runs. */
+    if (argc > 2) CreateThread(NULL, 0, watchdog, (LPVOID)(uintptr_t)atoi(argv[2]), 0, NULL);
     if (getenv("RECOMP_PROFILE")) {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &gGameThread, 0, FALSE,
                         DUPLICATE_SAME_ACCESS);

@@ -7,6 +7,8 @@ Usage:
     python tools/recomp/build.py --release       # optimize across files (MSVC
                                                  # /GL /LTCG): a few % faster,
                                                  # each build ~70 s
+    python tools/recomp/build.py --release --dist  # ...and put the game program
+                                                 # in build/recomp/dist
 
 Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 """
@@ -108,6 +110,8 @@ def main():
     ap.add_argument("--run", choices=sorted(TARGETS))
     ap.add_argument("--opt", default=None, help="optimization flag (default /O2 or -O2)")
     ap.add_argument("--release", action="store_true", help="whole-program optimization (MSVC /GL with /LTCG)")
+    ap.add_argument("--dist", action="store_true",
+                    help="copy the boot program, as PokePark.exe, and its files to build/recomp/dist")
     ap.add_argument("args", nargs="*", help="extra arguments for --run")
     args = ap.parse_args()
     global OBJ
@@ -135,6 +139,14 @@ def main():
         build_cc(common, TARGETS, args.opt or "-O2")
     # The button prompt icons, beside the program (prompts_win32.c).
     shutil.copytree(os.path.join(ROOT, "recomp", "assets", "prompts"), os.path.join(OUT, "prompts"), dirs_exist_ok=True)
+    if args.dist:
+        # Started without arguments it finds the game in an R8AE01 folder
+        # beside it or above it (boot.c), so this runs in place.
+        dist = os.path.join(OUT, "dist")
+        os.makedirs(dist, exist_ok=True)
+        shutil.copy2(os.path.join(OUT, "boot.exe"), os.path.join(dist, "PokePark.exe"))
+        shutil.copytree(os.path.join(OUT, "prompts"), os.path.join(dist, "prompts"), dirs_exist_ok=True)
+        print("dist:", dist)
     if args.run:
         exe = os.path.join(OUT, args.run + (".exe" if os.name == "nt" else ""))
         sys.exit(subprocess.call([exe, DOL] + args.args))
