@@ -34,6 +34,21 @@ static int valid_frame_rate(int fps) {
 }
 
 void hle_set_fov(int percent); /* hle_camera.c */
+void hle_request_minigame(int at); /* hle_game.c */
+
+/* The minigames, by At number, for the Debug section. */
+static const struct {
+    int at;
+    const char* name;
+} kMinigames[] = {
+    {1, "Absol's Hurdle Bounce"},         {2, "Rayquaza's Balloon Panic"},   {3, "Venusaur's Vine Swing"},
+    {4, "Tangrowth's Swing-Along"},       {5, "Dusknoir's Speed Slam"},      {6, "Gyarados' Aqua Dash"},
+    {7, "Pelipper's Circle Circuit"},     {9, "Empoleon's Snow Slide"},      {10, "Bastiodon's Panel Crush"},
+    {11, "Rhyperior's Bumper Burn"},      {12, "Blaziken's Boulder Bash"},   {13, "Rotom's Spooky Shoot-'em-Up"},
+    {15, "Salamence's Air Race"},         {16, "Bulbasaur's Daring Dash"},
+};
+#define MINIGAMES ((int)(sizeof(kMinigames) / sizeof(kMinigames[0])))
+static int sMinigame;
 #define FOV_MIN 80
 #define FOV_MAX 150
 
@@ -257,7 +272,7 @@ void settings_load(void) {
 /* ------------------------------------------------------------------------ */
 /* The menu */
 
-enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_FPS, ROW_FOV, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
+enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_FPS, ROW_FOV, ROW_MINIGAME, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
 /* Columns of a binding row: two keyboard/mouse slots, two controller. */
 #define COLS 4
 enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
@@ -288,6 +303,9 @@ static void change(int d) {
         g_settings.frame_rate = kFrameRates[(i + d + FRAME_RATES) % FRAME_RATES];
         apply_frame_rate();
         break;
+    case ROW_MINIGAME:
+        sMinigame = (sMinigame + d + MINIGAMES) % MINIGAMES;
+        return;
     case ROW_FOV:
         g_settings.fov = g_settings.fov + 5 * d < FOV_MIN ? FOV_MIN : g_settings.fov + 5 * d > FOV_MAX ? FOV_MAX : g_settings.fov + 5 * d;
         hle_set_fov(g_settings.fov);
@@ -309,6 +327,9 @@ static void change(int d) {
 static void activate(void) {
     if (sRow >= ROW_BIND && sRow < ROW_RESET) {
         sCapture = sCol < BIND_SLOTS ? CAPTURE_KEY : CAPTURE_PAD;
+    } else if (sRow == ROW_MINIGAME) {
+        hle_request_minigame(kMinigames[sMinigame].at);
+        set_open(0);
     } else if (sRow == ROW_RESET) {
         settings_default_controls();
         settings_save();
@@ -480,6 +501,7 @@ static void value_text(int row, char* out, size_t n) {
                      g_settings.frame_rate == 30 ? " (original)" : g_settings.frame_rate > 60 ? " (interpolated)" : "");
         break;
     }
+    case ROW_MINIGAME: snprintf(out, n, "%s (Enter, from the park)", kMinigames[sMinigame].name); break;
     case ROW_FOV: snprintf(out, n, g_settings.fov == 100 ? "100%% (original)" : "%d%%", g_settings.fov); break;
     case ROW_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case ROW_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
@@ -488,7 +510,7 @@ static void value_text(int row, char* out, size_t n) {
 }
 
 const uint32_t* menu_draw(int w, int h) {
-    static const char* const kSettingLabel[] = {"Fullscreen", "Internal resolution", "Anti-aliasing", "Frame rate", "Field of view",
+    static const char* const kSettingLabel[] = {"Fullscreen", "Internal resolution", "Anti-aliasing", "Frame rate", "Field of view", "Test minigame",
                                                 "Camera sensitivity", "Invert camera tilt"};
     int pw, ph, x0, y0, x, y, i, k, cell, valueX;
     char buf[64];
@@ -496,7 +518,7 @@ const uint32_t* menu_draw(int w, int h) {
     if (w != sW || h != sH) setup(w, h);
     memset(sPixels, 0, (size_t)w * h * 4);
     pw = sLine * 30 < w - 2 * sLine ? sLine * 30 : w - 2 * sLine;
-    ph = sLine * 30;
+    ph = sLine * 32;
     x0 = (w - pw) / 2;
     y0 = (h - ph) / 2 < 0 ? 0 : (h - ph) / 2;
     fill(x0, y0, pw, ph, kPanel);
@@ -511,8 +533,8 @@ const uint32_t* menu_draw(int w, int h) {
     y += sLine * 2;
 
     for (i = 0; i < ROW_COUNT; i++) {
-        if (i == ROW_FULLSCREEN || i == ROW_SENSITIVITY || i == ROW_BIND) {
-            text(x, y, kHead, i == ROW_FULLSCREEN ? "Display" : i == ROW_SENSITIVITY ? "Mouse" : "Controls");
+        if (i == ROW_FULLSCREEN || i == ROW_MINIGAME || i == ROW_SENSITIVITY || i == ROW_BIND) {
+            text(x, y, kHead, i == ROW_FULLSCREEN ? "Display" : i == ROW_MINIGAME ? "Debug" : i == ROW_SENSITIVITY ? "Mouse" : "Controls");
             if (i == ROW_BIND) {
                 text(valueX, y, kDim, "Keyboard and mouse");
                 text(valueX + 2 * cell, y, kDim, "Controller");

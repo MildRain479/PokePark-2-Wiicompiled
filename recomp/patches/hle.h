@@ -40,6 +40,8 @@ int hle_widescreen(void);
 int hle_in_minigame(void);
 /* hle_game.c: the minigame being played (its At number, 1-16), or 0. */
 int hle_minigame(void);
+/* hle_game.c: enters minigame at (1-16) for testing, from the park. */
+void hle_request_minigame(int at);
 /* hle_motion.c: the remote's motion in the minigame being played, from
  * keys, sticks and the mouse, for report number report. Returns 0 outside
  * a minigame; otherwise sets acc (accelerometer x, y, z) and returns 1,

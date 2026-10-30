@@ -62,3 +62,5 @@
 0x80019AF0 FrustumForCamera  # hle_camera.c: the same for culling
 0x80136B20 nsDelhi::nsAttraction::AttractionManager::LoadAttractionResources  # hle_game.c: which minigame is playing
 0x801FA730 nw4r::ut::detail::ResFontBase::SetResourceBuffer  # hle_prompts.c: button prompts as the bound keys
+0x80171630 SceneSpecializerPark::RunBegin  # hle_game.c: entering a minigame for testing
+0x8017C0D0 load_attraction_ranking  # hle_game.c: no records when entered for testing
