@@ -18,6 +18,7 @@
 int hle_widescreen(void);
 int display_scale(void); /* gl_backend.c: as applied */
 int display_msaa(void);
+void hle_set_frame_rate(int fps); /* hle_game.c */
 
 HostSettings g_settings;
 
@@ -120,7 +121,8 @@ void settings_save(void) {
     fprintf(f, "[display]\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "scale = %d ; internal resolution: 0 fits the window, or 1-%d\n", g_settings.scale, MAX_SCALE);
-    fprintf(f, "msaa = %d ; anti-aliasing samples: 1 (off), 2, 4 or 8\n\n", g_settings.msaa);
+    fprintf(f, "msaa = %d ; anti-aliasing samples: 1 (off), 2, 4 or 8\n", g_settings.msaa);
+    fprintf(f, "frame_rate = %d ; 30 (the game's own) or 60\n\n", g_settings.frame_rate);
     fprintf(f, "[mouse]\n");
     fprintf(f, "sensitivity = %.2f ; camera turn, times the default\n", g_settings.mouse_sensitivity);
     fprintf(f, "invert_tilt = %d\n\n", g_settings.invert_tilt);
@@ -144,6 +146,7 @@ void settings_load(void) {
     FILE* f;
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
+    g_settings.frame_rate = 30;
     g_settings.mouse_sensitivity = 1.0f;
     settings_default_controls();
     f = fopen(settings_path(), "r");
@@ -169,6 +172,7 @@ void settings_load(void) {
             if (!strcmp(name, "fullscreen")) g_settings.fullscreen = atoi(p) != 0;
             if (!strcmp(name, "scale")) g_settings.scale = atoi(p) < 0 ? 0 : atoi(p) > MAX_SCALE ? MAX_SCALE : atoi(p);
             if (!strcmp(name, "msaa")) g_settings.msaa = valid_msaa(atoi(p));
+            if (!strcmp(name, "frame_rate")) g_settings.frame_rate = atoi(p) >= 60 ? 60 : 30;
         } else if (!strcmp(section, "mouse")) {
             if (!strcmp(name, "sensitivity")) {
                 float s = (float)atof(p);
@@ -191,12 +195,13 @@ void settings_load(void) {
         }
     }
     fclose(f);
+    hle_set_frame_rate(g_settings.frame_rate);
 }
 
 /* ------------------------------------------------------------------------ */
 /* The menu */
 
-enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
+enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_FPS, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
 /* Columns of a binding row: two keyboard/mouse slots, two controller. */
 #define COLS 4
 enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
@@ -221,6 +226,10 @@ static void change(int d) {
     case ROW_MSAA:
         for (i = 0; i < 4 && kMsaa[i] != g_settings.msaa; i++) {}
         g_settings.msaa = kMsaa[(i + d + 4) % 4];
+        break;
+    case ROW_FPS:
+        g_settings.frame_rate = g_settings.frame_rate == 60 ? 30 : 60;
+        hle_set_frame_rate(g_settings.frame_rate);
         break;
     case ROW_SENSITIVITY: {
         int tenths = (int)(g_settings.mouse_sensitivity * 10 + 0.5f) + d;
@@ -401,6 +410,7 @@ static void value_text(int row, char* out, size_t n) {
         else if (ms < g_settings.msaa) snprintf(out, n, "%dx MSAA (this GPU does %dx)", g_settings.msaa, ms);
         else snprintf(out, n, "%dx MSAA", g_settings.msaa);
         break;
+    case ROW_FPS: snprintf(out, n, g_settings.frame_rate == 60 ? "60 fps" : "30 fps (original)"); break;
     case ROW_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case ROW_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
     default: out[0] = '\0';
@@ -408,7 +418,7 @@ static void value_text(int row, char* out, size_t n) {
 }
 
 const uint32_t* menu_draw(int w, int h) {
-    static const char* const kSettingLabel[] = {"Fullscreen", "Internal resolution", "Anti-aliasing",
+    static const char* const kSettingLabel[] = {"Fullscreen", "Internal resolution", "Anti-aliasing", "Frame rate",
                                                 "Camera sensitivity", "Invert camera tilt"};
     int pw, ph, x0, y0, x, y, i, k, cell, valueX;
     char buf[64];
@@ -416,7 +426,7 @@ const uint32_t* menu_draw(int w, int h) {
     if (w != sW || h != sH) setup(w, h);
     memset(sPixels, 0, (size_t)w * h * 4);
     pw = sLine * 30 < w - 2 * sLine ? sLine * 30 : w - 2 * sLine;
-    ph = sLine * 27;
+    ph = sLine * 28;
     x0 = (w - pw) / 2;
     y0 = (h - ph) / 2 < 0 ? 0 : (h - ph) / 2;
     fill(x0, y0, pw, ph, kPanel);

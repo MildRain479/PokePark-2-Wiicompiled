@@ -29,6 +29,7 @@ typedef struct {
     int fullscreen;          /* borderless, on the window's monitor */
     int scale;               /* internal resolution multiplier; 0 picks one for the window */
     int msaa;                /* anti-aliasing samples: 1 (off), 2, 4 or 8 */
+    int frame_rate;          /* 30 (the game's own) or 60 */
     float mouse_sensitivity; /* camera turn per pixel, times the default */
     int invert_tilt;         /* mouse up looks down */
     int key[ACT_COUNT][BIND_SLOTS];      /* Windows virtual-key codes (mouse buttons too); 0 = none */

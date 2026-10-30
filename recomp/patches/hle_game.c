@@ -93,6 +93,50 @@ void hle_game_init(void) {
     }
 }
 
+/* Frame rate. The main loop draws on its 30 Hz alarm (clock 1) after
+ * running one update per 60 Hz pad sample (clock 0), and each scene sets
+ * clock 1's period from the scene table: one step (60 fps) for the title
+ * and menus, two (30 fps) in the park. At 60 fps clock 1 is held to one
+ * step, so the loop draws after every update. The updates themselves are
+ * untouched: Pikachu's movement through walking, dashing and jumping is the
+ * same position for position, animations advance per update (UpdateFrame
+ * is called as often), and what runs twice as often is only posing and
+ * drawing models at the current frame. */
+#define CLOCKS 0x80374AB0 /* static_80374ab0::_static: two clocks of 0x70 bytes */
+#define CLOCK_SIZE 0x70
+#define CLOCK_WANT_PERIOD 0x40 /* u64, taken up by the clock's next tick */
+
+static int sFrameRate;        /* 0: the game's own; 60: every update */
+static uint64_t sScenePeriod; /* clock 1's period as the scene set it */
+
+static uint64_t draw_period(void) {
+    uint64_t one = step_ticks(step_const());
+    return sFrameRate >= 60 && sScenePeriod > one ? one : sScenePeriod;
+}
+
+/* void set_frame_limit(Clocks*, int clock, u64 period) */
+void f_8000BE20(ppc_t* c) {
+    if (c->r[4] == 1) {
+        uint64_t p;
+        sScenePeriod = ((uint64_t)c->r[5] << 32) | c->r[6];
+        p = draw_period();
+        c->r[5] = (uint32_t)(p >> 32);
+        c->r[6] = (uint32_t)p;
+    }
+    f_8000BE20_orig(c);
+}
+
+/* Sets the frame rate (30 or 60), from the settings. Takes effect on the
+ * main loop's next tick. */
+void hle_set_frame_rate(int fps) {
+    uint64_t p;
+    sFrameRate = fps;
+    if (!sScenePeriod) return; /* the game hasn't set it up yet */
+    p = draw_period();
+    ST32(CLOCKS + CLOCK_SIZE + CLOCK_WANT_PERIOD, (uint32_t)(p >> 32));
+    ST32(CLOCKS + CLOCK_SIZE + CLOCK_WANT_PERIOD + 4, (uint32_t)p);
+}
+
 /* Movies: the scripts open one (ThpManager syscall 0, with a loop flag),
  * then poll its state (syscall 5: 2 while playing, 3 once finished)
  * before closing it. RECOMP_SKIP_MOVIES=1 reports a movie that doesn't

@@ -148,6 +148,9 @@ gets no input. It has:
 - the internal resolution: fit the window (the multiple of the 456-line
   picture nearest the window's height), or 1x to 6x;
 - anti-aliasing: off, or 2x, 4x or 8x MSAA;
+- frame rate: 30 fps (the game's own in the park) or 60 fps, which has
+  the game draw after every update; the updates (movement, physics,
+  animation) run at 60 a second either way, so nothing speeds up;
 - camera sensitivity and inverted tilt for the mouse;
 - the bindings above, two keys or mouse buttons and two controller
   buttons for each Wii Remote button (Enter, then press the new one; a
