@@ -39,6 +39,18 @@ void f_801741F0(ppc_t* c) {
 /* Whether the scene is a minigame (an attraction). */
 int hle_in_minigame(void) { return sScene == SCENE_ATTRACTION; }
 
+/* void AttractionManager::LoadAttractionResources(int index, ...): loads
+ * At<index + 1>Dat and Res, the minigame about to start. */
+static int sAttraction;
+
+void f_80136B20(ppc_t* c) {
+    sAttraction = (int)c->r[4] + 1;
+    f_80136B20_orig(c);
+}
+
+/* The minigame being played (its At number, 1-16), or 0 outside one. */
+int hle_minigame(void) { return sScene == SCENE_ATTRACTION ? sAttraction : 0; }
+
 /* void SceneSpecializerStrap::RunSystem(void): runs every frame. Once the
  * park has loaded, does what the Strap scene's script does when its time
  * is up (scene syscall 0x15, subcommands 1 and 2): pick the next scene,

@@ -213,26 +213,15 @@ void f_802488A0(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t st = c->r[4], held = 0;
     int16_t ax = 0, ay = 0, az = ACC_ONE_G;
-    int on = chan >= 0 && chan < WPAD_MAX_CHANS && connected(chan);
+    int on = chan >= 0 && chan < WPAD_MAX_CHANS && connected(chan), motion = 0, i;
+    int16_t acc[3], dots[4][2];
     if (on && g_host_pad_read && !g_host_pad_read(chan, &held)) held = 0;
     if (on && chan == 0) held |= script_held();
-    if (on && chan == 0 && hle_in_minigame()) {
-        /* Minigames that score shaking (Bulbasaur's dash, say): a swing
-         * for each press of one shake key after the other, so the faster
-         * the keys go by turns, the faster the shaking, and holding one
-         * does nothing. Swings go one way for the first key, the other
-         * for the second. */
-        static uint32_t last, swingEnd;
-        static int side, sign;
-        uint32_t pressed = held & ~last & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2);
-        int which = pressed == HOST_PAD_SHAKE ? 1 : pressed == HOST_PAD_SHAKE2 ? 2 : 0;
-        last = held;
-        if (which && which != side) {
-            side = which;
-            sign = which == 1 ? 1 : -1;
-            swingEnd = sReports + SWING_REPORTS;
-        }
-        if ((int32_t)(swingEnd - sReports) > 0) ay = (int16_t)(sign * ACC_ONE_G * 5 / 2);
+    if (on && chan == 0 && (motion = hle_motion(held, sReports, acc, dots)) != 0) {
+        /* In minigames, the remote's motion as each asks (hle_motion.c). */
+        ax = acc[0];
+        ay = acc[1];
+        az = acc[2];
     } else if (held & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2)) {
         /* Swing along the remote's length, which is left-right on screen
          * held sideways: +-2.5 g, about 17 times a second. */
@@ -243,7 +232,16 @@ void f_802488A0(ppc_t* c) {
     ST16(st + 0x02, (uint16_t)ax);
     ST16(st + 0x04, (uint16_t)ay);
     ST16(st + 0x06, (uint16_t)az);
-    /* No IR points in view: the pointer is not used. */
+    /* IR points in view: the sensor bar's two dots, where a minigame
+     * uses the pointer; otherwise none, and the pointer is off. */
+    if (motion & 2) {
+        for (i = 0; i < 2; i++) {
+            ST16(st + 0x08 + 8 * i, (uint16_t)dots[i][0]);
+            ST16(st + 0x0A + 8 * i, (uint16_t)dots[i][1]);
+            ST16(st + 0x0C + 8 * i, 4); /* size */
+            ST8(st + 0x0E + 8 * i, (uint8_t)i);
+        }
+    }
     ST8(st + 0x28, on ? WPAD_DEV_CORE : WPAD_DEV_NOT_FOUND);
     ST8(st + 0x29, (uint8_t)(on ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER));
 }

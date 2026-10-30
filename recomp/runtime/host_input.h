@@ -35,3 +35,9 @@ extern void (*g_host_pad_rumble)(int chan, int on);
  * the mouse is captured for the camera; 0 otherwise. Set by the platform
  * layer, read by the camera patch (hle_camera.c). */
 extern void (*g_host_mouse_read)(float* dx, float* dy);
+/* The same movement, collected separately for the remote's pointer in
+ * minigames that use it (hle_motion.c). */
+extern void (*g_host_pointer_read)(float* dx, float* dy);
+/* The controller's sticks, -1 to 1 each (x right, y up), dead zone taken
+ * off; 0 without a controller. */
+extern void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);

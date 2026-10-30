@@ -38,6 +38,13 @@ double hle_vi_hz(void);
 int hle_widescreen(void);
 /* hle_game.c: whether the scene is a minigame (an attraction). */
 int hle_in_minigame(void);
+/* hle_game.c: the minigame being played (its At number, 1-16), or 0. */
+int hle_minigame(void);
+/* hle_motion.c: the remote's motion in the minigame being played, from
+ * keys, sticks and the mouse, for report number report. Returns 0 outside
+ * a minigame; otherwise sets acc (accelerometer x, y, z) and returns 1,
+ * or 3 with dots (two sensor-bar dots in the IR camera's view) set too. */
+int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]);
 
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);

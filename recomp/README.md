@@ -135,6 +135,27 @@ default:
 | shake | Iron Tail | Q / Left Shift (hold) | LB (hold) |
 | shake, in minigames | (Bulbasaur's dash and the like) | Q and E by turns | LB and RB by turns |
 
+**Minigames** (`hle_motion.c`) get the remote held and moved as their
+instructions ask, from the same keys:
+
+| Minigame | Keyboard / mouse | Controller |
+|---|---|---|
+| Absol's Hurdle Bounce, Bulbasaur's Daring Dash, Dusknoir's Speed Slam | run: shake keys by turns (Q, E) | LB, RB by turns |
+| Venusaur's Vine Swing, Tangrowth's Swing-Along | held upright; swing: Q, E by turns, in time; jump: 2 (Space) | LB, RB; A |
+| Blaziken's Boulder Bash | held upright; bat swing: 1 or 2 (left click, Space); recover: Q, E by turns | X or A; LB, RB |
+| Gyarados' Aqua Dash, Empoleon's Snow Slide | steer: left/right (A/D) | left stick |
+| Pelipper's Circle Circuit, Salamence's Air Race, Rhyperior's Bumper Burn | steer: left/right; climb/dive: up/down (W tilts back) | left stick |
+| Rayquaza's Balloon Panic | as flying, then the pointer: mouse | left stick; right stick |
+| Rotom's Spooky Shoot-'em-Up | pointer: mouse | right stick |
+| Bastiodon's Panel Crush | buttons, as on the Wii | |
+
+Tilting eases to 35 degrees (left/right) or 30 (forward/back), and the
+stick tilts in proportion. Directions follow the remote's axes as the
+game reads them; `RECOMP_TILT_FLIP=lr`, `fb` or `lrfb` and
+`RECOMP_POINTER_FLIP=y` turn them round, if a minigame turns out to
+expect them the other way. The pointer is calibrated against the game's
+own (KPAD's) pointer position.
+
 The keyboard counts only while the game window has focus. While it has
 focus the mouse is captured for the camera: Esc lets it go, and a click
 in the window captures it again (that click isn't a dash). The mouse

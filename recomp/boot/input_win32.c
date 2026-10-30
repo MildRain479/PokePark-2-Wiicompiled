@@ -53,7 +53,7 @@ static int has_focus(void) {
 
 static int sCaptured, sReleased, sSwallow, sButtonsLive;
 static POINT sCenter;
-static float sMouseX, sMouseY;
+static float sMouseX, sMouseY, sPointerX, sPointerY;
 
 /* Keeps the cursor in the window while captured, checked on every poll:
  * going fullscreen moves the window. */
@@ -102,6 +102,8 @@ static void mouse(void) {
     if (!sCaptured) return;
     GetCursorPos(&p);
     sMouseX += (float)(p.x - sCenter.x);
+    sPointerX += (float)(p.x - sCenter.x);
+    sPointerY += (float)(p.y - sCenter.y);
     sMouseY += (float)(p.y - sCenter.y);
     if (p.x != sCenter.x || p.y != sCenter.y) SetCursorPos(sCenter.x, sCenter.y);
     if (sSwallow) {
@@ -109,6 +111,31 @@ static void mouse(void) {
         sSwallow = 0;
     }
     sButtonsLive = 1;
+}
+
+static void read_pointer(float* dx, float* dy) {
+    *dx = sPointerX * g_settings.mouse_sensitivity;
+    *dy = sPointerY * g_settings.mouse_sensitivity;
+    sPointerX = sPointerY = 0;
+}
+
+/* A stick axis, -32768 to 32767, as -1 to 1 past a dead zone. */
+static float stick_axis(SHORT v) {
+    const float kDead = 7849.0f; /* XInput's own suggestion for the left stick */
+    float f = (float)v;
+    if (f > kDead) return (f - kDead) / (32767.0f - kDead);
+    if (f < -kDead) return (f + kDead) / (32768.0f - kDead);
+    return 0.0f;
+}
+
+static void read_sticks(float* lx, float* ly, float* rx, float* ry) {
+    XPadState s;
+    *lx = *ly = *rx = *ry = 0;
+    if (!pXInputGetState || pXInputGetState(0, &s) != ERROR_SUCCESS || menu_is_open()) return;
+    *lx = stick_axis(s.Gamepad.sThumbLX);
+    *ly = stick_axis(s.Gamepad.sThumbLY);
+    *rx = stick_axis(s.Gamepad.sThumbRX);
+    *ry = stick_axis(s.Gamepad.sThumbRY);
 }
 
 static void read_mouse(float* dx, float* dy) {
@@ -209,4 +236,6 @@ void input_init(void) {
     g_host_pad_read = read_pad;
     g_host_pad_rumble = rumble;
     g_host_mouse_read = read_mouse;
+    g_host_pointer_read = read_pointer;
+    g_host_sticks_read = read_sticks;
 }
