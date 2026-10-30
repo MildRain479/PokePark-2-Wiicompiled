@@ -132,7 +132,8 @@ default:
 | (none) | turn the camera | mouse | |
 | + / - | | P / M | Start / Back |
 | HOME | | Home / H | right stick click |
-| shake | Iron Tail | Q / Left Shift | LB / RB |
+| shake | Iron Tail | Q / Left Shift (hold) | LB (hold) |
+| shake, in minigames | (Bulbasaur's dash and the like) | Q and E by turns | LB and RB by turns |
 
 The keyboard counts only while the game window has focus. While it has
 focus the mouse is captured for the camera: Esc lets it go, and a click

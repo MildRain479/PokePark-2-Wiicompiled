@@ -36,6 +36,8 @@ double hle_vi_hz(void);
  * on; 0 for 4:3). The game then draws 16:9 pictures squeezed into its
  * 640-pixel-wide frame, as the Wii does for a TV to stretch out. */
 int hle_widescreen(void);
+/* hle_game.c: whether the scene is a minigame (an attraction). */
+int hle_in_minigame(void);
 
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);

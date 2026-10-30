@@ -37,6 +37,8 @@ enum {
 
 /* One g in the accelerometer's units, as calibrated on a typical remote. */
 #define ACC_ONE_G 104
+/* One swing of a shake, in reports (200 a second): 30 ms. */
+#define SWING_REPORTS 6
 
 static struct {
     uint32_t connectCb, extensionCb, samplingCb;
@@ -63,7 +65,7 @@ static void load_script(void) {
         {"up", HOST_PAD_SCREEN_UP}, {"down", HOST_PAD_SCREEN_DOWN}, {"left", HOST_PAD_SCREEN_LEFT},
         {"right", HOST_PAD_SCREEN_RIGHT}, {"a", HOST_PAD_A}, {"b", HOST_PAD_B}, {"1", HOST_PAD_1},
         {"2", HOST_PAD_2}, {"plus", HOST_PAD_PLUS}, {"minus", HOST_PAD_MINUS}, {"home", HOST_PAD_HOME},
-        {"shake", HOST_PAD_SHAKE},
+        {"shake", HOST_PAD_SHAKE}, {"shake2", HOST_PAD_SHAKE2},
     };
     const char* p = getenv("RECOMP_PAD_SCRIPT");
     int cap = 0;
@@ -214,10 +216,27 @@ void f_802488A0(ppc_t* c) {
     int on = chan >= 0 && chan < WPAD_MAX_CHANS && connected(chan);
     if (on && g_host_pad_read && !g_host_pad_read(chan, &held)) held = 0;
     if (on && chan == 0) held |= script_held();
-    if (held & HOST_PAD_SHAKE) {
+    if (on && chan == 0 && hle_in_minigame()) {
+        /* Minigames that score shaking (Bulbasaur's dash, say): a swing
+         * for each press of one shake key after the other, so the faster
+         * the keys go by turns, the faster the shaking, and holding one
+         * does nothing. Swings go one way for the first key, the other
+         * for the second. */
+        static uint32_t last, swingEnd;
+        static int side, sign;
+        uint32_t pressed = held & ~last & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2);
+        int which = pressed == HOST_PAD_SHAKE ? 1 : pressed == HOST_PAD_SHAKE2 ? 2 : 0;
+        last = held;
+        if (which && which != side) {
+            side = which;
+            sign = which == 1 ? 1 : -1;
+            swingEnd = sReports + SWING_REPORTS;
+        }
+        if ((int32_t)(swingEnd - sReports) > 0) ay = (int16_t)(sign * ACC_ONE_G * 5 / 2);
+    } else if (held & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2)) {
         /* Swing along the remote's length, which is left-right on screen
          * held sideways: +-2.5 g, about 17 times a second. */
-        ay = (sReports / 6) & 1 ? ACC_ONE_G * 5 / 2 : -ACC_ONE_G * 5 / 2;
+        ay = (sReports / SWING_REPORTS) & 1 ? ACC_ONE_G * 5 / 2 : -ACC_ONE_G * 5 / 2;
     }
     memset(MA(st), 0, 0x2A);
     ST16(st + 0x00, wpad_buttons(held));

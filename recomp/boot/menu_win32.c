@@ -45,23 +45,23 @@ static void apply_frame_rate(void) {
 HostSettings g_settings;
 
 static const char* const kActionIni[ACT_COUNT] = {
-    "up", "down", "left", "right", "two", "one", "a", "b", "plus", "minus", "home", "shake",
+    "up", "down", "left", "right", "two", "one", "a", "b", "plus", "minus", "home", "shake", "shake2",
 };
 static const char* const kActionLabel[ACT_COUNT] = {
     "Move up", "Move down", "Move left", "Move right", "2: jump, talk", "1: dash",
-    "A: Thunderbolt", "B: recenter camera", "+", "-", "HOME", "Shake",
+    "A: Thunderbolt", "B: recenter camera", "+", "-", "HOME", "Shake", "Shake 2 (minigames)",
 };
 
 void settings_default_controls(void) {
     static const int kKeys[ACT_COUNT][BIND_SLOTS] = {
         {'W', VK_UP}, {'S', VK_DOWN}, {'A', VK_LEFT}, {'D', VK_RIGHT},
         {VK_SPACE, 'X'}, {VK_LBUTTON, 'Z'}, {VK_RBUTTON, VK_RETURN}, {'V', VK_LCONTROL},
-        {'P', 0}, {'M', 0}, {VK_HOME, 'H'}, {'Q', VK_LSHIFT},
+        {'P', 0}, {'M', 0}, {VK_HOME, 'H'}, {'Q', VK_LSHIFT}, {'E', 0},
     };
     static const uint32_t kPad[ACT_COUNT][BIND_SLOTS] = {
         {XPAD_UP, 0}, {XPAD_DOWN, 0}, {XPAD_LEFT, 0}, {XPAD_RIGHT, 0},
         {XPAD_A, 0}, {XPAD_X, 0}, {XPAD_B, 0}, {XPAD_Y, XPAD_RT},
-        {XPAD_START, 0}, {XPAD_BACK, 0}, {XPAD_RTHUMB, 0}, {XPAD_LB, XPAD_RB},
+        {XPAD_START, 0}, {XPAD_BACK, 0}, {XPAD_RTHUMB, 0}, {XPAD_LB, 0}, {XPAD_RB, 0},
     };
     memcpy(g_settings.key, kKeys, sizeof(kKeys));
     memcpy(g_settings.pad, kPad, sizeof(kPad));
@@ -168,6 +168,7 @@ void settings_save(void) {
 
 void settings_load(void) {
     char line[256], section[32] = "";
+    int sawShake2 = 0, i; /* the second shake key's lines: 1 keyboard, 2 controller */
     FILE* f;
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
@@ -212,6 +213,7 @@ void settings_load(void) {
         } else if (!strcmp(section, "keyboard") || !strcmp(section, "controller")) {
             for (i = 0; i < ACT_COUNT; i++) {
                 if (strcmp(name, kActionIni[i])) continue;
+                if (i == ACT_SHAKE2) sawShake2 |= section[0] == 'k' ? 1 : 2;
                 a = strtoul(p, &end, 0);
                 b = strtoul(end, NULL, 0);
                 if (section[0] == 'k') {
@@ -225,6 +227,24 @@ void settings_load(void) {
         }
     }
     fclose(f);
+    /* Files from before the second shake key gave its default (RB) to
+     * shake: it moves over. */
+    if (!(sawShake2 & 2)) {
+        for (i = 0; i < ACT_COUNT; i++) {
+            int k;
+            for (k = 0; k < BIND_SLOTS; k++) {
+                if (i != ACT_SHAKE2 && g_settings.pad[i][k] == g_settings.pad[ACT_SHAKE2][0]) g_settings.pad[i][k] = 0;
+            }
+        }
+    }
+    if (!(sawShake2 & 1)) {
+        for (i = 0; i < ACT_COUNT; i++) {
+            int k;
+            for (k = 0; k < BIND_SLOTS; k++) {
+                if (i != ACT_SHAKE2 && g_settings.key[i][k] == g_settings.key[ACT_SHAKE2][0]) g_settings.key[i][k] = 0;
+            }
+        }
+    }
     apply_frame_rate();
     hle_set_fov(g_settings.fov);
 }
@@ -471,7 +491,7 @@ const uint32_t* menu_draw(int w, int h) {
     if (w != sW || h != sH) setup(w, h);
     memset(sPixels, 0, (size_t)w * h * 4);
     pw = sLine * 30 < w - 2 * sLine ? sLine * 30 : w - 2 * sLine;
-    ph = sLine * 29;
+    ph = sLine * 30;
     x0 = (w - pw) / 2;
     y0 = (h - ph) / 2 < 0 ? 0 : (h - ph) / 2;
     fill(x0, y0, pw, ph, kPanel);

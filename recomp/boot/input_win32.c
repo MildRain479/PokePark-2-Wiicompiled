@@ -11,7 +11,9 @@
  *   +                P                          Start
  *   -                M                          Back
  *   HOME             Home / H                   right stick click
- *   shake            Q / Left Shift             LB / RB
+ *   shake (held)     Q / Left Shift             LB
+ *   shake 2          E                          RB
+ *   (in minigames a shake is shake and shake 2 pressed by turns, hle_wpad.c)
  *
  * The keyboard counts only while the game's window has focus. While it
  * has focus the mouse is captured: hidden, held in the window, and its
@@ -122,7 +124,7 @@ static int is_mouse_button(int vk) {
 /* The pad bit of each action (ACT_*). */
 static const uint32_t kActionBit[ACT_COUNT] = {
     HOST_PAD_SCREEN_UP, HOST_PAD_SCREEN_DOWN, HOST_PAD_SCREEN_LEFT, HOST_PAD_SCREEN_RIGHT,
-    HOST_PAD_2, HOST_PAD_1, HOST_PAD_A, HOST_PAD_B, HOST_PAD_PLUS, HOST_PAD_MINUS, HOST_PAD_HOME, HOST_PAD_SHAKE,
+    HOST_PAD_2, HOST_PAD_1, HOST_PAD_A, HOST_PAD_B, HOST_PAD_PLUS, HOST_PAD_MINUS, HOST_PAD_HOME, HOST_PAD_SHAKE, HOST_PAD_SHAKE2,
 };
 
 static uint32_t keyboard(void) {

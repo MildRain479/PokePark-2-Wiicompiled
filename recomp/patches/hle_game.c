@@ -27,11 +27,17 @@ static int keep_boot_screens(void) {
     return e && *e && *e != '0';
 }
 
+static int sScene = -1;
+
 /* BOOL fn_801741F0(s32 scene): picks the next scene, by index. */
 void f_801741F0(ppc_t* c) {
     HLE_LOG("next scene: %d", (int)c->r[3]);
+    sScene = (int)c->r[3];
     f_801741F0_orig(c);
 }
+
+/* Whether the scene is a minigame (an attraction). */
+int hle_in_minigame(void) { return sScene == SCENE_ATTRACTION; }
 
 /* void SceneSpecializerStrap::RunSystem(void): runs every frame. Once the
  * park has loaded, does what the Strap scene's script does when its time

@@ -9,7 +9,7 @@
 /* What can be bound: the Wii Remote's buttons, held sideways. */
 enum {
     ACT_UP, ACT_DOWN, ACT_LEFT, ACT_RIGHT,
-    ACT_2, ACT_1, ACT_A, ACT_B, ACT_PLUS, ACT_MINUS, ACT_HOME, ACT_SHAKE,
+    ACT_2, ACT_1, ACT_A, ACT_B, ACT_PLUS, ACT_MINUS, ACT_HOME, ACT_SHAKE, ACT_SHAKE2,
     ACT_COUNT
 };
 #define BIND_SLOTS 2

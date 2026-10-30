@@ -21,6 +21,9 @@ enum {
     HOST_PAD_MINUS = 1 << 9,
     HOST_PAD_HOME = 1 << 10,
     HOST_PAD_SHAKE = 1 << 11,
+    /* The second shake key: in minigames, a shake is a press of one
+     * shake key after the other (hle_wpad.c). */
+    HOST_PAD_SHAKE2 = 1 << 12,
 };
 
 /* Fills the HOST_PAD_* bits held on remote chan (0-3); returns 0 if that
