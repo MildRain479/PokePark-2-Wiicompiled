@@ -13,6 +13,7 @@ Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 
 import argparse
 import glob
+import shutil
 import os
 import subprocess
 import sys
@@ -33,7 +34,7 @@ TARGETS = {
     "boot": sorted(glob.glob(os.path.join(ROOT, "recomp", "boot", "*.c")) +
                    glob.glob(os.path.join(ROOT, "recomp", "gpu", "*.c"))),
 }
-LIBS = {"boot": ["opengl32.lib", "user32.lib", "gdi32.lib"]}
+LIBS = {"boot": ["opengl32.lib", "user32.lib", "gdi32.lib", "ole32.lib", "windowscodecs.lib"]}
 DEFINES = ["RECOMP_TRACE"]
 
 
@@ -132,6 +133,8 @@ def main():
         build_msvc(common, TARGETS, args.opt or "/O2")
     else:
         build_cc(common, TARGETS, args.opt or "-O2")
+    # The button prompt icons, beside the program (prompts_win32.c).
+    shutil.copytree(os.path.join(ROOT, "recomp", "assets", "prompts"), os.path.join(OUT, "prompts"), dirs_exist_ok=True)
     if args.run:
         exe = os.path.join(OUT, args.run + (".exe" if os.name == "nt" else ""))
         sys.exit(subprocess.call([exe, DOL] + args.args))

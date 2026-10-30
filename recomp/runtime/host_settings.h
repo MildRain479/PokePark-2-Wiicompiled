@@ -43,6 +43,14 @@ void settings_load(void);
 void settings_save(void);
 void settings_default_controls(void);
 
+/* How many times the settings have been saved (so changed). */
+uint32_t settings_generation(void);
+/* Whether the controller was used more recently than the keyboard and
+ * mouse (input_win32.c). */
+int input_controller_last(void);
+/* Sets up the button prompt icons (prompts_win32.c). */
+void prompts_init(void);
+
 /* The settings menu (menu_win32.c). */
 int menu_is_open(void);
 /* Takes the window's keyboard and mouse messages while open; returns 1 if

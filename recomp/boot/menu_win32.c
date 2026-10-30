@@ -135,7 +135,12 @@ static const char* settings_path(void) {
     return sPath;
 }
 
+static uint32_t sSaves;
+
+uint32_t settings_generation(void) { return sSaves; }
+
 void settings_save(void) {
+    sSaves++;
     FILE* f = fopen(settings_path(), "w");
     int i;
     if (!f) return;

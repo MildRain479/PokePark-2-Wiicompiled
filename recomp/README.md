@@ -156,6 +156,17 @@ game reads them; `RECOMP_TILT_FLIP=lr`, `fb` or `lrfb` and
 expect them the other way. The pointer is calibrated against the game's
 own (KPAD's) pointer position.
 
+**Button prompts** (`hle_prompts.c`, `boot/prompts_win32.c`): the game's
+text shows Wii Remote buttons as glyphs of its font (U+E040 + n: the
+d-pad, A, B, HOME, +, -, 1, 2). Those glyphs are redrawn in the font as
+icons of what is bound to each button, on the keyboard and mouse or the
+controller, whichever was used last, and again whenever the bindings or
+the device change. The icons are PNGs in `recomp/assets/prompts`, copied
+beside the program (Icons8's; see the README there); a key with none
+keeps the game's glyph, as does the d-pad on the keyboard. Prompts drawn
+as pictures in a screen's layout (the save screen's footer, the title's
+"Please Press") are not text and stay as they are.
+
 The keyboard counts only while the game window has focus. While it has
 focus the mouse is captured for the camera: Esc lets it go, and a click
 in the window captures it again (that click isn't a dash). The mouse

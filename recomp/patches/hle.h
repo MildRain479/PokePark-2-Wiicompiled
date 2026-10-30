@@ -45,6 +45,8 @@ int hle_minigame(void);
  * a minigame; otherwise sets acc (accelerometer x, y, z) and returns 1,
  * or 3 with dots (two sensor-bar dots in the IR camera's view) set too. */
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]);
+/* hle_prompts.c: redraws the button prompt glyphs if they should change. */
+void hle_prompts_update(void);
 
 /* Runs queued calls if any; preserves all guest registers. */
 void hle_deliver(ppc_t* c);

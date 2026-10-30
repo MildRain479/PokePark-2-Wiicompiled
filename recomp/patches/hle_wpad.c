@@ -215,6 +215,7 @@ void f_802488A0(ppc_t* c) {
     int16_t ax = 0, ay = 0, az = ACC_ONE_G;
     int on = chan >= 0 && chan < WPAD_MAX_CHANS && connected(chan), motion = 0, i;
     int16_t acc[3], dots[4][2];
+    hle_prompts_update();
     if (on && g_host_pad_read && !g_host_pad_read(chan, &held)) held = 0;
     if (on && chan == 0) held |= script_held();
     if (on && chan == 0 && (motion = hle_motion(held, sReports, acc, dots)) != 0) {

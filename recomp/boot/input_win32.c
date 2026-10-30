@@ -205,14 +205,22 @@ static uint32_t controller(uint32_t b, uint32_t stick) {
 
 /* While the menu is open, and after it closes until everything held is
  * let go, nothing reaches the game: not the press that closed it. */
+static int sControllerLast;
+
+int input_controller_last(void) { return sControllerLast; }
+
 static int read_pad(int chan, uint32_t* held) {
     static int menuHeld;
-    uint32_t buttons, stick;
+    uint32_t buttons, stick, keys, pad;
     if (chan != 0) return 0;
     mouse();
     controller_state(&buttons, &stick);
     menu_controller(buttons, buttons | stick);
-    *held = keyboard() | controller(buttons, stick);
+    keys = keyboard();
+    pad = controller(buttons, stick);
+    if (pad) sControllerLast = 1;
+    else if (keys) sControllerLast = 0;
+    *held = keys | pad;
     if (menu_is_open()) menuHeld = 1;
     else if (menuHeld && !*held) menuHeld = 0;
     if (menuHeld) *held = 0;
@@ -236,6 +244,7 @@ void input_init(void) {
     g_host_pad_read = read_pad;
     g_host_pad_rumble = rumble;
     g_host_mouse_read = read_mouse;
+    prompts_init();
     g_host_pointer_read = read_pointer;
     g_host_sticks_read = read_sticks;
 }
