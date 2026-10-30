@@ -11,7 +11,8 @@
  *     key's, so the faster they go by turns, the faster the shaking;
  *   swinging on a vine or rope (Venusaur, Tangrowth): held upright; the
  *     shake keys by turns swing it back and forth, in time with the vine;
- *     2 (Space) pushes it forward to jump;
+ *     B pushes it forward to jump, as the game asks ("Push [B] as shown"),
+ *     and so does 2 (Space);
  *   bashing boulders (Blaziken): held upright; 1 or 2 (left click, Space)
  *     swings it like a bat; the shake keys by turns shake it to recover;
  *   steering (Gyarados, Empoleon): held sideways, tilted left and right
@@ -168,7 +169,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     }
     if (use & USE_PUSH) {
         /* A push toward the screen: a thrust, then the stop. */
-        int t = gesture(&push, held, HOST_PAD_2, report, 10);
+        int t = gesture(&push, held, HOST_PAD_B | HOST_PAD_2, report, 10);
         if (t >= 0) z += t < 5 ? -3 * G : 3 * G / 2;
     }
     if (use & USE_BAT) {

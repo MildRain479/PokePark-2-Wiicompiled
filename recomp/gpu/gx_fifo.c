@@ -511,6 +511,27 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int
     sStateDirty = 1; /* draws sampling addr now get the copy */
 }
 
+/* Saves w x h RGBA pixels as a 32-bit BMP, top row first. */
+static void save_bmp(const char* path, const uint8_t* rgba, int width, int height) {
+    uint8_t hdr[54] = {'B', 'M'};
+    int i;
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    *(uint32_t*)(hdr + 2) = 54 + (uint32_t)(width * height * 4);
+    hdr[10] = 54;
+    hdr[14] = 40;
+    *(int32_t*)(hdr + 18) = width;
+    *(int32_t*)(hdr + 22) = -height;
+    hdr[26] = 1;
+    hdr[28] = 32;
+    fwrite(hdr, 1, 54, f);
+    for (i = 0; i < width * height; i++) {
+        uint8_t bgra[4] = {rgba[4 * i + 2], rgba[4 * i + 1], rgba[4 * i], rgba[4 * i + 3]};
+        fwrite(bgra, 1, 4, f);
+    }
+    fclose(f);
+}
+
 static uint32_t texture_for_map(int map) {
     int r = map < 4 ? map : map - 4 + 0x20;
     uint32_t mode0 = bp[0x80 + r], img0 = bp[0x88 + r], img3 = bp[0x94 + r], tlut = bp[0x98 + r];
@@ -567,35 +588,25 @@ static uint32_t texture_for_map(int map) {
         gx_decode_texture(rgba, MA(addr), fmt, width, height, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
         {
             /* RECOMP_GX_DUMP_TEX=<address>: save that texture, as decoded,
-             * to tex_<address>.bmp (once). */
+             * to tex_<address>.bmp (once). RECOMP_GX_DUMP_TEXTURES=<dir>:
+             * save every texture, as decoded, to <dir>/<hash>_<width>x
+             * <height>_<format>.bmp, once each: the hash is the one a
+             * replacement would be found by. */
             const char* want = getenv("RECOMP_GX_DUMP_TEX");
+            const char* dir = getenv("RECOMP_GX_DUMP_TEXTURES");
             static int dumped;
+            char path[512];
             if (want && !dumped && (strtoul(want, NULL, 16) & 0x3FFFFFFF) == (addr & 0x3FFFFFFF)) {
-                char path[64];
-                FILE* f;
                 snprintf(path, sizeof(path), "tex_%08X.bmp", addr);
-                if ((f = fopen(path, "wb")) != NULL) {
-                    uint8_t hdr[54] = {'B', 'M'};
-                    int y, x;
-                    *(uint32_t*)(hdr + 2) = 54 + (uint32_t)(width * height * 4);
-                    hdr[10] = 54;
-                    hdr[14] = 40;
-                    *(int32_t*)(hdr + 18) = width;
-                    *(int32_t*)(hdr + 22) = -height;
-                    hdr[26] = 1;
-                    hdr[28] = 32;
-                    fwrite(hdr, 1, 54, f);
-                    for (y = 0; y < height; y++) {
-                        for (x = 0; x < width; x++) {
-                            const uint8_t* px = rgba + (y * width + x) * 4;
-                            uint8_t bgra[4] = {px[2], px[1], px[0], px[3]};
-                            fwrite(bgra, 1, 4, f);
-                        }
-                    }
-                    fclose(f);
-                    fprintf(stderr, "gx: saved %s (fmt %d %dx%d)\n", path, fmt, width, height);
-                }
+                save_bmp(path, rgba, width, height);
+                fprintf(stderr, "gx: saved %s (fmt %d %dx%d)\n", path, fmt, width, height);
                 dumped = 1;
+            }
+            if (dir && *dir) {
+                FILE* f;
+                snprintf(path, sizeof(path), "%s/%08x_%dx%d_%d.bmp", dir, h, width, height, fmt);
+                if ((f = fopen(path, "rb")) != NULL) fclose(f);
+                else save_bmp(path, rgba, width, height);
             }
         }
         if (e->handle && e->key == key) {
