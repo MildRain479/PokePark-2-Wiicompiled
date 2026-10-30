@@ -19,6 +19,8 @@ uint8_t* g_mem;
 static void wgpipe_discard(uint32_t value, int size) { (void)value; (void)size; }
 void (*g_wgpipe_write)(uint32_t value, int size) = wgpipe_discard;
 void (*g_gx_flush)(void);
+uint64_t (*g_host_frame_due)(void);
+void (*g_host_frame_render)(void);
 
 #define GUEST_SPACE 0x40000000u
 

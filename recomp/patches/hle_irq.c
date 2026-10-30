@@ -299,6 +299,15 @@ int hle_wait_for_event(ppc_t* c) {
             }
         }
         if (!have) return 0;
+        /* Frames shown between the game's (above 60 fps) are drawn while
+         * it waits. */
+        if (g_host_frame_due) {
+            uint64_t due;
+            while ((due = g_host_frame_due()) != 0 && (int64_t)(due - deadline) < 0) {
+                sleep_until(due, 1);
+                g_host_frame_render();
+            }
+        }
         sleep_until(deadline, precise);
     }
     hle_deliver(c);

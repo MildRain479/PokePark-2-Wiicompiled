@@ -3,7 +3,7 @@
  * The EFB (the GPU's embedded framebuffer, 640x528) is an offscreen
  * framebuffer rendered at a multiple of the native resolution (the
  * settings' internal resolution, by default whatever fits the window),
- * and 4/3 as wide again in 16:9, with multisample anti-aliasing if the
+ * wider again in 16:9, with multisample anti-aliasing if the
  * settings ask for it. TEV, the GPU's programmable color combiner, runs
  * in one "uber" fragment shader driven by uniforms, so any stage setup
  * draws without compiling a new shader. Copies of the EFB to the XFB are
@@ -24,6 +24,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <GL/gl.h>
+
 
 #include "gx.h"
 #include "host_settings.h"
@@ -106,13 +107,23 @@ typedef ptrdiff_t GLintptr;
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(void, glActiveTexture, (GLenum)) \
     X(void, glBlendEquation, (GLenum)) \
-    X(void, glClipControl, (GLenum, GLenum))
+    X(void, glClipControl, (GLenum, GLenum)) \
+    X(void, glDrawElementsBaseVertex, (GLenum, GLsizei, GLenum, const void*, GLint))
 
 #define DECLARE(ret, name, args) typedef ret(APIENTRY* PFN_##name) args; static PFN_##name p_##name;
 GL_FUNCS(DECLARE)
 #undef DECLARE
 
 static void gl_forget(void);
+static uint64_t frame_due(void);
+/* wglSwapIntervalEXT. Set to 0: presenting never waits for the display.
+ * The game paces itself by its emulated retrace (and the frames between
+ * by frame_render), and in a window or borderless window the compositor
+ * shows only whole frames anyway. Waiting held up the game thread: with
+ * a display whose refresh stalls (a virtual display with nobody
+ * watching), every present took 110 ms and the game ran at 7 fps. */
+static BOOL(WINAPI* pSwapInterval)(int);
+static void frame_render(void);
 
 static void load_gl(void) {
 #define LOAD(ret, name, args) \
@@ -575,8 +586,11 @@ static void build_overlay_program(void) {
 static HWND sWnd;
 static HDC sDC;
 /* EFB pixels to GL pixels. In 16:9 the game squeezes a wide picture into
- * the EFB's 640 columns for the TV to stretch out, so the EFB gets 4/3 as
- * many pixels across: the stretched picture is then at full resolution. */
+ * the EFB's 640 columns for the TV to stretch out: its cameras project a
+ * 16:9 picture onto the 640x456 it shows. So the EFB gets as many more
+ * pixels across, and is shown at 16:9: the stretched picture is then at
+ * full resolution and fills a 16:9 screen. (Shown 4/3 as wide, 1.87:1,
+ * it was 5% too wide, with bars above and below.) */
 static double sScaleX = 2, sScaleY = 2;
 static double sPixelAspect = 1; /* width of an EFB pixel on screen, over its height */
 #define GLX(x) ((GLint)floor((x) * sScaleX + 0.5))
@@ -689,13 +703,13 @@ static void resolve(void) {
 void gxb_init(void) {
     WNDCLASSA wc;
     PIXELFORMATDESCRIPTOR pfd;
-    RECT r = {0, 0, 640 * 2, 480 * 2};
+    RECT r = {0, 0, 640 * 2, 456 * 2}; /* the 456 lines the game shows, so the picture fills it */
     HGLRC rc;
     const char* v;
     uint32_t white = 0xFFFFFFFF;
     extern int hle_widescreen(void);
     if (hle_widescreen()) {
-        sPixelAspect = 4.0 / 3.0;
+        sPixelAspect = 16.0 / 9.0 * 456.0 / 640.0;
         r.right = (LONG)(r.right * sPixelAspect + 0.5);
     }
     sDumpDir = getenv("RECOMP_GX_DUMP");
@@ -730,6 +744,10 @@ void gxb_init(void) {
     build_program();
     build_copy_program();
     build_overlay_program();
+    g_host_frame_due = frame_due;
+    g_host_frame_render = frame_render;
+    pSwapInterval = (BOOL(WINAPI*)(int))(void*)wglGetProcAddress("wglSwapIntervalEXT");
+    if (pSwapInterval) pSwapInterval(0);
 
     glGenTextures(1, &sEfbColor);
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
@@ -832,7 +850,8 @@ static void gl_forget(void) { sGl.valid = 0; }
 /* Mirrored for the reversed depth. */
 static const GLenum kDepthFunc[8] = {GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL, GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
 
-static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count) {
+/* Sets everything a draw needs but its XF state and vertices. */
+static void apply_draw_state(const GXDrawState* st) {
     static GLint lcin[64], lain[64], lcop[64], laop[64], lmap[64], lsel[64], lswap[16], lalpha[4];
     static GLfloat lreg[16], lkonst[16], laref[4];
     static int sUniformsSet, lstages;
@@ -1012,14 +1031,30 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
         if (!cull && all) sGl.cull_face = 0;
     }
     sGl.valid = 1;
+}
 
-    if (st->xf && st->xf_dirty_lo < st->xf_dirty_hi) {
+/* The XF uniform buffer holds what the decoder's draws last left in it,
+ * unless frames were drawn again from a recording since: then its next
+ * draw sends all of it (sXfStale), and the recording's draws go by their
+ * own copy of what it holds (sXfShadow). */
+static int sXfStale;
+static uint32_t sXfShadow[GX_XF_WORDS];
+static int sXfShadowValid;
+
+static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices,
+                                  const uint32_t* index, int first_index, int count) {
+    apply_draw_state(st);
+    if (st->xf && sXfStale) {
+        p_glBufferSubData(GL_UNIFORM_BUFFER, 0, GX_XF_WORDS * 4, st->xf);
+        sXfStale = 0;
+    } else if (st->xf && st->xf_dirty_lo < st->xf_dirty_hi) {
         /* Only the XF words written since the last draw. */
         p_glBufferSubData(GL_UNIFORM_BUFFER, (GLintptr)st->xf_dirty_lo * 4,
                           (GLsizeiptr)(st->xf_dirty_hi - st->xf_dirty_lo) * 4, st->xf + st->xf_dirty_lo);
     }
-    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices * sizeof(GXVertex), v, GL_STREAM_DRAW);
-    p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(uint32_t), index, GL_STREAM_DRAW);
+    sXfShadowValid = 0;
+    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices * sizeof(GXVertex), v + first_vertex, GL_STREAM_DRAW);
+    p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(uint32_t), index + first_index, GL_STREAM_DRAW);
     glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, NULL);
 }
 
@@ -1051,18 +1086,17 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
-static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+/* The texture that copies of a w x h rectangle to addr go to, made the
+ * first time. */
+static CopyTarget* copy_target(uint32_t addr, int w, int h) {
     CopyTarget* t = NULL;
     int i;
-    GLint mode[4];
-    GLfloat src[4];
     gl_forget();
     for (i = 0; i < sTargetCount; i++) {
         if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) t = &sTargets[i];
     }
-    resolve();
     if (!t) {
-        if (sTargetCount == 64) return;
+        if (sTargetCount == 64) return NULL;
         t = &sTargets[sTargetCount++];
         t->addr = addr;
         t->w = w;
@@ -1077,7 +1111,17 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
         p_glGenFramebuffers(1, &t->fbo);
         p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->tex, 0);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
     }
+    return t;
+}
+
+/* Draws the EFB rectangle into the copy's texture. */
+static void copy_draw(CopyTarget* t, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+    GLint mode[4];
+    GLfloat src[4];
+    gl_forget();
+    resolve();
     /* Row 0 of the texture is the top row of the rectangle. */
     p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
     glDisable(GL_SCISSOR_TEST);
@@ -1104,6 +1148,12 @@ static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, in
     p_glUseProgram(sProgram);
     p_glBindVertexArray(sVao);
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+}
+
+static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+    CopyTarget* t = copy_target(addr, w, h);
+    if (!t) return;
+    copy_draw(t, x, y, w, h, fmt, intensity, efb_alpha);
     gx_register_copy(addr, t->tex, w, h, fmt);
 }
 
@@ -1179,7 +1229,10 @@ static void dump_bmp(const char* path, int w, int h) {
     free(px);
 }
 
-static void gxb_present_gl(int x, int y, int cw, int ch) {
+static void present_output(int x, int y, int cw, int ch);
+static void gxb_present_gl(int x, int y, int cw, int ch) { present_output(x, y, cw, ch); }
+
+static void present_output(int x, int y, int cw, int ch) {
     RECT r;
     MSG msg;
     int w, h, dw, dh;
@@ -1189,8 +1242,8 @@ static void gxb_present_gl(int x, int y, int cw, int ch) {
     w = r.right - r.left;
     h = r.bottom - r.top;
     /* The copied rectangle of the EFB, as large as fits in the window at
-     * the shape it has on a TV (an EFB pixel is square in 4:3, 4/3 as wide
-     * in 16:9), with black bars on the sides left over. */
+     * the shape it has on a TV (an EFB pixel is square in 4:3, wider in
+     * 16:9), with black bars on the sides left over. */
     aspect = ch > 0 ? cw * sPixelAspect / ch : 1;
     dw = w;
     dh = (int)(w / aspect + 0.5);
@@ -1240,10 +1293,6 @@ static void gxb_present_gl(int x, int y, int cw, int ch) {
     }
     SwapBuffers(sDC);
     sPresented++;
-    if (sPendingFreeCount) {
-        glDeleteTextures(sPendingFreeCount, sPendingFree);
-        sPendingFreeCount = 0;
-    }
     {
         /* Frames per second and the longest frame of the last second, in
          * the window title and, with RECOMP_FPS=1, on stderr. */
@@ -1292,6 +1341,340 @@ static void gxb_present_gl(int x, int y, int cw, int ch) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Frames between the game's
+ *
+ * Above 60 fps the game still draws 60 frames a second (hle_game.c), and
+ * the frames between are drawn here: the newest of the game's frames is
+ * recorded (its draws with their state and XF state, clears, EFB copies)
+ * and drawn again, each draw's matrices blended from those of the same
+ * draw in the frame before, by how far through the frame interval the
+ * moment shown is. Shown frames run one game frame behind.
+ *
+ * A draw is recognized across frames by its key (gx_fifo.c: its display
+ * lists and their draws) and, among draws with the same key, by order.
+ * Blended are the position, normal and texture matrices, the
+ * post-transform matrices, the projection and the lights' position and
+ * direction: everything that moves with the camera or the model. A
+ * matrix whose rotation or translation changed too much to be the same
+ * object moving (draws matched wrongly, a cut) is shown as it is. Draws
+ * with no match, and everything else (vertices, textures), are the
+ * newest frame's. */
+
+enum { OP_DRAW, OP_CLEAR, OP_COPY, OP_PRESENT };
+
+typedef struct RecOp {
+    int op;
+    GXDrawState st;   /* OP_DRAW (st.xf unused) */
+    int xf;           /* OP_DRAW: its XF state, at words xf of the frame's */
+    int match;        /* OP_DRAW: the last frame's op of the same draw, or -1 */
+    int a[8];         /* the other ops' arguments; OP_DRAW: first vertex, vertices, first index, count */
+} RecOp;
+
+typedef struct Frame {
+    RecOp* ops;
+    int count, cap;
+    uint32_t* xf;
+    int xf_words, xf_cap;
+} Frame;
+
+/* Recording, the newest complete frame and the one before. */
+static Frame sFrames[3];
+static Frame *sRec = &sFrames[0], *sCur = &sFrames[1], *sPrev = &sFrames[2];
+static int sOutputRate = 60, sRecording, sHaveFrame;
+static uint64_t sCurAt, sNextOut, sFramePeriod; /* time base */
+static double sLastT = -1;
+/* Textures freed while a frame was recorded are still drawn by its
+ * replays until the next frame is complete. */
+static GLuint sFreeLater[MAX_PENDING_FREES];
+static int sFreeLaterCount;
+
+static RecOp* rec_op(int op) {
+    RecOp* r;
+    if (sRec->count == sRec->cap) {
+        sRec->cap = sRec->cap ? sRec->cap * 2 : 1024;
+        sRec->ops = (RecOp*)realloc(sRec->ops, (size_t)sRec->cap * sizeof(RecOp));
+    }
+    r = &sRec->ops[sRec->count++];
+    r->op = op;
+    r->match = -1;
+    return r;
+}
+
+static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int first_index, int count) {
+    RecOp* r = rec_op(OP_DRAW);
+    r->st = *st;
+    r->st.xf = NULL;
+    if (sRec->xf_words + GX_XF_WORDS > sRec->xf_cap) {
+        sRec->xf_cap = (sRec->xf_words + GX_XF_WORDS) * 2;
+        sRec->xf = (uint32_t*)realloc(sRec->xf, (size_t)sRec->xf_cap * 4);
+    }
+    r->xf = sRec->xf_words;
+    memcpy(sRec->xf + sRec->xf_words, st->xf, GX_XF_WORDS * 4);
+    sRec->xf_words += GX_XF_WORDS;
+    r->a[0] = first_vertex;
+    r->a[1] = vertices;
+    r->a[2] = first_index;
+    r->a[3] = count;
+}
+
+/* Pairs each draw of sCur with the same draw of sPrev: the first not yet
+ * taken with the same key. */
+static void match_draws(void) {
+    enum { SLOTS = 8192 };
+    static uint64_t keys[SLOTS];
+    static uint8_t used[SLOTS];
+    static int head[SLOTS], *next;
+    static int nextCap;
+    int i;
+    memset(used, 0, sizeof(used));
+    if (sPrev->count > nextCap) {
+        nextCap = sPrev->count * 2;
+        next = (int*)realloc(next, (size_t)nextCap * sizeof(int));
+    }
+    /* Chains in frame order: walk backwards, pushing on the front. */
+    for (i = sPrev->count - 1; i >= 0; i--) {
+        uint64_t k = sPrev->ops[i].st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        if (sPrev->ops[i].op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (!used[slot]) {
+            used[slot] = 1;
+            keys[slot] = k;
+            head[slot] = -1;
+        }
+        next[i] = head[slot];
+        head[slot] = i;
+    }
+    for (i = 0; i < sCur->count; i++) {
+        RecOp* r = &sCur->ops[i];
+        uint64_t k = r->st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        r->match = -1;
+        if (r->op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (used[slot] && head[slot] >= 0) {
+            r->match = head[slot];
+            head[slot] = next[head[slot]];
+        }
+    }
+}
+
+static float wordf(uint32_t w) {
+    float f;
+    memcpy(&f, &w, 4);
+    return f;
+}
+
+static uint32_t fword(float f) {
+    uint32_t w;
+    memcpy(&w, &f, 4);
+    return w;
+}
+
+static void lerp_words(uint32_t* out, const uint32_t* a, const uint32_t* b, int from, int to, float t) {
+    int i;
+    for (i = from; i < to; i++) {
+        if (a[i] != b[i]) out[i] = fword(wordf(a[i]) + (wordf(b[i]) - wordf(a[i])) * t);
+    }
+}
+
+/* Blends the XF state of a draw from prev (the frame before) to cur. */
+static void blend_xf(uint32_t* out, const uint32_t* prev, const uint32_t* cur, float t) {
+    int m, j;
+    memcpy(out, cur, GX_XF_WORDS * 4);
+    /* Position and texture matrices, 3x4, at multiples of 12 words. */
+    for (m = 0; m + 12 <= 0x100; m += 12) {
+        const uint32_t *a = prev + m, *b = cur + m;
+        float scale = 0, rot = 0, dt = 0, tlen = 0;
+        int same = 1;
+        for (j = 0; j < 12; j++) {
+            float x = wordf(a[j]), y = wordf(b[j]);
+            if (a[j] != b[j]) same = 0;
+            if (!(x == x) || !(y == y)) { same = -1; break; } /* not floats */
+            if ((j & 3) == 3) {
+                dt += (y - x) * (y - x);
+                tlen += y * y;
+            } else {
+                if (fabsf(y) > scale) scale = fabsf(y);
+                if (fabsf(y - x) > rot) rot = fabsf(y - x);
+            }
+        }
+        if (same) continue;
+        /* The same object moving turns and moves a little in a frame;
+         * another object (a wrong match, a cut) differs wholesale. */
+        if (rot > 0.3f * scale || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) continue;
+        lerp_words(out, prev, cur, m, m + 12, t);
+    }
+    lerp_words(out, prev, cur, 0x400, 0x460, t); /* normal matrices */
+    lerp_words(out, prev, cur, 0x500, 0x600, t); /* post-transform matrices */
+    for (j = 0; j < 8; j++) lerp_words(out, prev, cur, 0x600 + 16 * j + 10, 0x600 + 16 * j + 16, t); /* lights */
+    if (prev[GX_XF_MEM_WORDS + 0x26] == cur[GX_XF_MEM_WORDS + 0x26]) {
+        lerp_words(out, prev, cur, GX_XF_MEM_WORDS + 0x20, GX_XF_MEM_WORDS + 0x26, t); /* projection */
+    }
+}
+
+/* Sends the words of xf that differ from what the buffer holds. */
+static void upload_xf(const uint32_t* xf) {
+    int lo = 0, hi = GX_XF_WORDS;
+    if (sXfShadowValid) {
+        while (lo < GX_XF_WORDS && xf[lo] == sXfShadow[lo]) lo++;
+        if (lo == GX_XF_WORDS) return;
+        while (hi > lo && xf[hi - 1] == sXfShadow[hi - 1]) hi--;
+    }
+    p_glBufferSubData(GL_UNIFORM_BUFFER, (GLintptr)lo * 4, (GLsizeiptr)(hi - lo) * 4, xf + lo);
+    memcpy(sXfShadow + lo, xf + lo, (size_t)(hi - lo) * 4);
+    sXfShadowValid = 1;
+    sXfStale = 1;
+}
+
+static void present_output(int x, int y, int cw, int ch);
+
+/* Draws sCur, its matrices t of the way from sPrev's. */
+static void render_frame(float t) {
+    static uint32_t xf[GX_XF_WORDS];
+    int i;
+    for (i = 0; i < sCur->count; i++) {
+        const RecOp* r = &sCur->ops[i];
+        switch (r->op) {
+        case OP_DRAW: {
+            const uint32_t* cur = sCur->xf + r->xf;
+            if (r->match >= 0 && t < 1.0f) {
+                blend_xf(xf, sPrev->xf + sPrev->ops[r->match].xf, cur, t);
+                cur = xf;
+            }
+            apply_draw_state(&r->st);
+            upload_xf(cur);
+            p_glDrawElementsBaseVertex(GL_TRIANGLES, r->a[3], GL_UNSIGNED_INT, (void*)((size_t)r->a[2] * 4), r->a[0]);
+            break;
+        }
+        case OP_CLEAR: gxb_clear_gl(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
+        case OP_COPY:
+            copy_draw(&sTargets[r->a[0]], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]);
+            break;
+        default: present_output(r->a[0], r->a[1], r->a[2], r->a[3]); break;
+        }
+    }
+}
+
+static void free_textures(GLuint* list, int* count) {
+    if (*count) {
+        glDeleteTextures(*count, list);
+        *count = 0;
+    }
+}
+
+/* The game finished a frame: it becomes the one shown. */
+static void frame_end(void) {
+    Frame* f = sPrev;
+    uint64_t now = ppc_timebase();
+    sPrev = sCur;
+    sCur = sRec;
+    sRec = f;
+    sRec->count = sRec->xf_words = 0;
+    match_draws();
+    if (sHaveFrame) {
+        /* The game's frame interval, smoothed, within reason. */
+        uint64_t d = now - sCurAt, lo = PPC_TB_HZ / 120, hi = PPC_TB_HZ / 20;
+        if (d < lo) d = lo;
+        if (d > hi) d = hi;
+        sFramePeriod = sFramePeriod ? (sFramePeriod * 7 + d) / 8 : d;
+    } else {
+        sFramePeriod = PPC_TB_HZ / 60;
+        sNextOut = now;
+    }
+    sCurAt = now;
+    sHaveFrame = 1;
+    sLastT = -1;
+    free_textures(sFreeLater, &sFreeLaterCount);
+    memcpy(sFreeLater, sPendingFree, (size_t)sPendingFreeCount * sizeof(GLuint));
+    sFreeLaterCount = sPendingFreeCount;
+    sPendingFreeCount = 0;
+}
+
+static uint64_t frame_due(void) { return sRecording && sHaveFrame ? sNextOut : 0; }
+
+/* The refresh rate of the monitor the window is on (the compositor's own
+ * rate is another monitor's when there are several); 0 if unknown. Whole
+ * numbers just under a multiple of 10 are the NTSC-style rates (119 is
+ * 119.88 Hz). Asked again every few seconds, as the window can move. */
+static double display_hz(void) {
+    static double hz;
+    static DWORD checked;
+    DWORD now = GetTickCount();
+    MONITORINFOEXA mi;
+    DEVMODEA dm;
+    if (checked && now - checked < 3000) return hz;
+    checked = now ? now : 1;
+    hz = 0;
+    mi.cbSize = sizeof(mi);
+    memset(&dm, 0, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    if (GetMonitorInfoA(MonitorFromWindow(sWnd, MONITOR_DEFAULTTOPRIMARY), (MONITORINFO*)&mi) &&
+        EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) {
+        hz = dm.dmDisplayFrequency;
+        if (dm.dmDisplayFrequency % 10 == 9) hz = (hz + 1) * 1000.0 / 1001.0;
+    }
+    return hz;
+}
+
+/* Frames shown per second: the setting, or the display's refresh rate if
+ * lower (more would never be seen). */
+static double output_rate(void) {
+    static int ignore = -1;
+    double hz;
+    if (ignore < 0) ignore = getenv("RECOMP_IGNORE_REFRESH") != NULL; /* for measuring */
+    hz = ignore ? 0 : display_hz();
+    return hz >= 30 && hz < sOutputRate ? hz : (double)sOutputRate;
+}
+
+int gxb_display_hz(void) { return (int)(display_hz() + 0.5); }
+
+static void frame_render(void) {
+    uint64_t now = ppc_timebase(), step = (uint64_t)(PPC_TB_HZ / output_rate());
+    float t = (float)((double)(int64_t)(now - sCurAt) / (double)sFramePeriod);
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    sNextOut += step;
+    if ((int64_t)(now - sNextOut) > (int64_t)step) sNextOut = now + step; /* fell behind: start again from now */
+    if (t == 1.0f && sLastT == 1.0f) return; /* the game is late: nothing new to show */
+    sLastT = t;
+    GL_ENTER();
+    render_frame(t);
+    GL_LEAVE(GLK_PRESENT);
+}
+
+int gxb_recording(void) {
+    int want = sOutputRate > 60;
+    if (sRecording && !want && sHaveFrame) {
+        /* Stopping: show the newest frame as it is. */
+        GL_ENTER();
+        render_frame(1.0f);
+        GL_LEAVE(GLK_PRESENT);
+    }
+    if (want != sRecording) {
+        sRecording = want;
+        sHaveFrame = 0;
+        sRec->count = sRec->xf_words = 0;
+        sCur->count = sCur->xf_words = 0;
+        sPrev->count = sPrev->xf_words = 0;
+        sXfShadowValid = 0;
+        sXfStale = 1;
+    }
+    return sRecording;
+}
+
+void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 360 : fps; }
+
+void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+    GL_ENTER();
+    p_glBindVertexArray(sVao);
+    p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
+    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices * sizeof(GXVertex), v, GL_STREAM_DRAW);
+    p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(uint32_t), index, GL_STREAM_DRAW);
+    GL_LEAVE(GLK_DRAW);
+}
+
+/* ------------------------------------------------------------------------ */
 /* Entry points. Each marks the thread as inside OpenGL, so the sampling
  * profiler (boot.c) doesn't hold it suspended inside the driver. */
 
@@ -1311,26 +1694,73 @@ void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* r
     GL_LEAVE(GLK_TEXTURE_UPDATE);
 }
 
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count) {
+void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+                        int first_index, int count) {
+    if (sRecording) {
+        rec_draw(st, first_vertex, vertices, first_index, count);
+        return;
+    }
     GL_ENTER();
-    gxb_draw_triangles_gl(st, v, vertices, index, count);
+    gxb_draw_triangles_gl(st, v, first_vertex, vertices, index, first_index, count);
     GL_LEAVE(GLK_DRAW);
 }
 
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
+    if (sRecording) {
+        RecOp* r = rec_op(OP_CLEAR);
+        r->a[0] = color;
+        r->a[1] = alpha;
+        r->a[2] = depth;
+        r->a[3] = (int)rgba;
+        r->a[4] = (int)z;
+        return;
+    }
     GL_ENTER();
     gxb_clear_gl(color, alpha, depth, rgba, z);
     GL_LEAVE(GLK_CLEAR);
 }
 
 void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+    if (sRecording) {
+        /* The texture is made now, for the draws that follow to name;
+         * the copy into it is drawn with the frame. */
+        CopyTarget* t;
+        RecOp* r;
+        GL_ENTER();
+        t = copy_target(addr, w, h);
+        GL_LEAVE(GLK_COPY);
+        if (!t) return;
+        r = rec_op(OP_COPY);
+        r->a[0] = (int)(t - sTargets);
+        r->a[1] = x;
+        r->a[2] = y;
+        r->a[3] = w;
+        r->a[4] = h;
+        r->a[5] = fmt;
+        r->a[6] = intensity;
+        r->a[7] = efb_alpha;
+        gx_register_copy(addr, t->tex, w, h, fmt);
+        return;
+    }
     GL_ENTER();
     gxb_copy_to_texture_gl(addr, x, y, w, h, fmt, intensity, efb_alpha);
     GL_LEAVE(GLK_COPY);
 }
 
 void gxb_present(int x, int y, int cw, int ch) {
+    if (sRecording) {
+        RecOp* r = rec_op(OP_PRESENT);
+        r->a[0] = x;
+        r->a[1] = y;
+        r->a[2] = cw;
+        r->a[3] = ch;
+        GL_ENTER();
+        frame_end();
+        GL_LEAVE(GLK_PRESENT);
+        return;
+    }
     GL_ENTER();
     gxb_present_gl(x, y, cw, ch);
+    free_textures(sPendingFree, &sPendingFreeCount);
     GL_LEAVE(GLK_PRESENT);
 }

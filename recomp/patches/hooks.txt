@@ -58,3 +58,5 @@
 0x800284C0 EaseAngle  # hle_camera.c: mouse tilt (pitch easing)
 0x8023E860 SCGetAspectRatio  # hle_nand.c: 16:9 unless RECOMP_WIDESCREEN=0
 0x8000BE20 set_frame_limit  # hle_game.c: the frame rate setting
+0x800197F0 nsDelhi::nsCamera::Camera::ApplyToG3dCamera  # hle_camera.c: field of view and aspect
+0x80019AF0 FrustumForCamera  # hle_camera.c: the same for culling

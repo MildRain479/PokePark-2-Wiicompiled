@@ -115,3 +115,45 @@ void f_80025280(ppc_t* c) {
     f_80025280_orig(c);
     tilt(cam);
 }
+
+/* Field of view. A camera (nsDelhi::nsCamera::Camera) keeps its
+ * projection: perspective or not, vertical field of view in degrees,
+ * aspect, near and far. The park's cameras use 45 degrees (37.8 in some
+ * places), 16:9, far plane 9999; close-ups and models in the 2D screens
+ * use 20.9 degrees and far plane 1000. The setting widens (or narrows)
+ * the world's cameras: while the camera is applied to the scene
+ * (ApplyToG3dCamera) and while its frustum is worked out for culling
+ * (FrustumForCamera), so both agree; anything else in the game still
+ * reads its own value. */
+enum { CAM_PROJECTION = 0x38, CAM_FOVY = 0x3C, CAM_FAR = 0x48 };
+#define WORLD_FAR 5000.0f
+
+static float sFovScale = 1.0f; /* tan(fovy / 2) times this */
+
+void hle_set_fov(int percent) { sFovScale = percent / 100.0f; }
+
+/* Widens camera cam's field of view, returning its own value to put back
+ * (0 if left alone). */
+static uint32_t widen(uint32_t cam) {
+    uint32_t own = LD32(cam + CAM_FOVY);
+    float fovy = (float)ld_f32(cam + CAM_FOVY), half;
+    if (sFovScale == 1.0f || LD32(cam + CAM_PROJECTION) != 0 || (float)ld_f32(cam + CAM_FAR) < WORLD_FAR) return 0;
+    if (!(fovy > 1.0f && fovy < 170.0f)) return 0;
+    half = atanf(tanf(fovy * 3.14159265f / 360.0f) * sFovScale);
+    st_f32(cam + CAM_FOVY, half * 360.0f / 3.14159265f);
+    return own;
+}
+
+/* void Camera::ApplyToG3dCamera(nw4r::g3d::Camera*, const VEC3* offset) */
+void f_800197F0(ppc_t* c) {
+    uint32_t cam = c->r[3], own = widen(cam);
+    f_800197F0_orig(c);
+    if (own) ST32(cam + CAM_FOVY, own);
+}
+
+/* void FrustumForCamera(const Camera*, Frustum*, float far) */
+void f_80019AF0(ppc_t* c) {
+    uint32_t cam = c->r[3], own = widen(cam);
+    f_80019AF0_orig(c);
+    if (own) ST32(cam + CAM_FOVY, own);
+}

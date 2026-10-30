@@ -64,6 +64,11 @@ static inline uint32_t LD32BR(uint32_t a) { uint32_t v; memcpy(&v, MA(a), 4); re
 extern void (*g_wgpipe_write)(uint32_t value, int size);
 /* Decodes pending GPU commands; set by the GPU module when present. */
 extern void (*g_gx_flush)(void);
+/* Frames shown between the game's (interpolated, gl_backend.c): when the
+ * next is due on the time base (0: none), and draws it. The idle wait
+ * (hle_irq.c) draws them while the game has nothing to do. */
+extern uint64_t (*g_host_frame_due)(void);
+extern void (*g_host_frame_render)(void);
 
 static inline void ST8(uint32_t a, uint32_t v) {
     if (IS_WGPIPE(a)) { g_wgpipe_write(v & 0xFF, 1); return; }

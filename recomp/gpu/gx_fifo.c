@@ -795,11 +795,24 @@ static GXDrawState sState, sBatchState;
 static GXVertex* sBatch;
 static uint32_t* sIndex;
 static int sBatchVerts, sBatchCap, sIndexCount, sIndexCap;
+/* Where the pending batch starts. While the backend records frames
+ * (gxb_recording), batches follow each other through the whole frame;
+ * otherwise each starts at 0. */
+static int sBatchFirst, sIndexFirst, sKeepFrame;
+/* The display list being run (0 outside one) and the draws made in it
+ * so far: a draw's identity from frame to frame. */
+static uint32_t sDisplayList, sListDraws;
 
 static void flush_batch(void) {
-    if (!sIndexCount) return;
-    gxb_draw_triangles(&sBatchState, sBatch, sBatchVerts, sIndex, sIndexCount);
-    sBatchVerts = sIndexCount = 0;
+    if (sIndexCount == sIndexFirst) return;
+    gxb_draw_triangles(&sBatchState, sBatch, sBatchFirst, sBatchVerts - sBatchFirst, sIndex, sIndexFirst,
+                       sIndexCount - sIndexFirst);
+    if (sKeepFrame) {
+        sBatchFirst = sBatchVerts;
+        sIndexFirst = sIndexCount;
+    } else {
+        sBatchVerts = sIndexCount = 0;
+    }
 }
 
 /* Makes the batch one drawn with the current state, drawing the pending
@@ -812,19 +825,20 @@ static void use_current_state(void) {
     }
     /* Everything but the XF fields, which build_state leaves zero. A
      * pending batch already has the current state unless it was rebuilt. */
-    if (!sIndexCount || (rebuilt && memcmp(&sState, &sBatchState, offsetof(GXDrawState, xf)) != 0)) {
+    if (sIndexCount == sIndexFirst || (rebuilt && memcmp(&sState, &sBatchState, offsetof(GXDrawState, xf)) != 0)) {
         flush_batch();
         sBatchState = sState;
         sBatchState.xf = sXfPacked;
         sBatchState.xf_dirty_lo = sXfDirtyLo;
         sBatchState.xf_dirty_hi = sXfDirtyHi;
+        sBatchState.key = 0;
         sXfDirtyLo = GX_XF_WORDS;
         sXfDirtyHi = 0;
     }
 }
 
 /* Draws count vertices of format f from p as primitive prim. */
-static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count) {
+static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int vat) {
     static int skipLo = -2, skipHi = -1;
     GXVertex tpl, *v;
     uint32_t* ix;
@@ -864,8 +878,16 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count) {
         sIndexCap = (sIndexCount + 3 * tris) * 2;
         sIndex = (uint32_t*)realloc(sIndex, (size_t)sIndexCap * sizeof(uint32_t));
     }
-    base = (uint32_t)sBatchVerts;
-    v = sBatch + base;
+    {
+        /* In a display list, which one and which draw in it; otherwise
+         * (particles, 2D) what is drawn: format, size and texture. */
+        uint64_t k = sDisplayList ? ((uint64_t)sDisplayList << 24) ^ sListDraws++
+                                  : 0x5A5A000000000000ull ^ ((uint64_t)bp[0x94] << 24) ^ ((uint64_t)prim << 16) ^
+                                        ((uint64_t)vat << 20) ^ (uint64_t)count;
+        sBatchState.key = mix64(sBatchState.key ^ k);
+    }
+    v = sBatch + sBatchVerts;
+    base = (uint32_t)(sBatchVerts - sBatchFirst);
     vertex_template(&tpl);
     for (i = 0; i < count; i++) v[i] = tpl;
     read_vertices(p, f, v, count);
@@ -962,7 +984,10 @@ static void efb_copy(uint32_t exec) {
     if (to_xfb) {
         LOG("frame %llu: copy to XFB %dx%d at (%d,%d), %u draws, %u vertices", (unsigned long long)sFrame, w, h, x, y,
             sDrawCount, sVertexCount);
+        if (sKeepFrame) gxb_frame_data(sBatch, sBatchVerts, sIndex, sIndexCount);
         gxb_present(x, y, w, h);
+        sBatchVerts = sIndexCount = sBatchFirst = sIndexFirst = 0;
+        sKeepFrame = gxb_recording();
         sFrame++;
         sDrawCount = sVertexCount = 0;
         sStateDirty = 1; /* textures are checked again each frame */
@@ -1038,7 +1063,12 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
             size = rd32(c + 5);
             if (depth == 0 && size < (16u << 20)) {
                 size_t dl_need;
+                uint32_t list = sDisplayList, draws = sListDraws;
+                sDisplayList = addr;
+                sListDraws = 0;
                 run(MA(addr), size, 1, &dl_need);
+                sDisplayList = list;
+                sListDraws = draws;
             }
             pos += 9;
         } else if (op == 0x61) {
@@ -1053,7 +1083,7 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
             count = rd16(c + 1);
             if (left < 3 + (size_t)count * f->size) { *need = 3 + (size_t)count * f->size; break; }
             sVertexCount += (unsigned)count;
-            draw(op & 0xF8, c + 3, f, count);
+            draw(op & 0xF8, c + 3, f, count, op & 7);
             pos += 3 + (size_t)count * f->size;
         } else {
             if (sErrors++ < 20) {

@@ -144,13 +144,20 @@ cutscene and dialogue cameras are the game's. Rumble goes to the controller.
 controller, opens a settings menu over the game, which keeps running but
 gets no input. It has:
 - fullscreen (borderless, on the window's monitor; Alt+Enter also
-  toggles it);
+  toggles it). In 16:9 the picture is shown at 16:9, as the game's
+  cameras project it, so it fills a 16:9 screen;
 - the internal resolution: fit the window (the multiple of the 456-line
   picture nearest the window's height), or 1x to 6x;
 - anti-aliasing: off, or 2x, 4x or 8x MSAA;
-- frame rate: 30 fps (the game's own in the park) or 60 fps, which has
-  the game draw after every update; the updates (movement, physics,
-  animation) run at 60 a second either way, so nothing speeds up;
+- frame rate: 30 fps (the game's own in the park), 60 fps, which has
+  the game draw after every update, or 120, 144, 165 or 240 fps, which
+  add interpolated frames between the game's (see Graphics). The updates
+  (movement, physics, animation) run at 60 a second whatever the
+  setting, so nothing speeds up. No more frames are drawn than the
+  window's monitor refreshes (`RECOMP_IGNORE_REFRESH=1` draws them
+  anyway, for measuring);
+- field of view: 80% to 150% of the game's, for the park's cameras
+  (close-ups and the 2D screens' models keep theirs); culling follows it;
 - camera sensitivity and inverted tilt for the mouse;
 - the bindings above, two keys or mouse buttons and two controller
   buttons for each Wii Remote button (Enter, then press the new one; a
@@ -291,8 +298,20 @@ runs unchanged.
     every input, bias, scale, clamp and compare mode, konst colors, swap
     tables and alpha test.
   - EFB-to-texture copies become textures.
-  - Copies to the XFB are presented in the window.
+  - Copies to the XFB are presented in the window, without waiting for
+    the display (the game paces itself; a display whose refresh stalled
+    held the game at 7 fps).
   - Each draw changes only the GL state that differs from the last.
+  - Above 60 fps, the newest frame is recorded (its draws with their
+    state and XF state, clears, EFB copies) and drawn again while the
+    game waits, each draw's matrices (position, normal, texture,
+    post-transform, projection, lights) blended from those of the same
+    draw in the frame before. Draws are matched by their display lists
+    and their place in them; a matrix that changed too much to be the
+    same object moving is shown as it is. Shown frames run one game frame
+    (16.7 ms) behind. The in-between frames are drawn only while the game
+    waits, so at 240 fps their spacing varies (4-12 ms); a render thread
+    would even it out.
 
 Not implemented yet:
 - lighting (lit channels use the material color);

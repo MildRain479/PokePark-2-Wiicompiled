@@ -57,6 +57,9 @@ typedef struct GXDrawState {
     int efb_alpha;         /* the EFB pixel format has an alpha channel (RGBA6_Z24) */
     const uint32_t* xf;    /* GX_XF_WORDS words, laid out as above */
     int xf_dirty_lo, xf_dirty_hi; /* words changed since the last draw (lo >= hi: none) */
+    /* What the batch draws, the same from frame to frame (its display
+     * lists and their draws), for matching it with the last frame's. */
+    uint64_t key;
 } GXDrawState;
 
 /* Backend interface. */
@@ -65,9 +68,16 @@ uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, i
 /* Replaces a texture's contents (same size). */
 void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba);
 void gxb_texture_free(uint32_t handle);
-/* Draws triangles: count indices into the vertices v, three to a
- * triangle. */
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int count);
+/* Draws triangles: count indices from index + first_index, three to a
+ * triangle, into the vertices from v + first_vertex. */
+void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+                        int first_index, int count);
+/* Whether the backend records frames to draw them again (interpolation):
+ * then the decoder keeps a whole frame's vertices and indices, draws give
+ * their place in them, and gxb_frame_data hands them over before the
+ * frame is presented. Asked at the start of each frame. */
+int gxb_recording(void);
+void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count);
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
 /* Copies an EFB rectangle to a texture, converted to copy format `fmt`
  * (exec bits 3-6) and stored as the game reads it back: an I8 copy as

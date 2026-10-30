@@ -126,7 +126,8 @@ void f_8000BE20(ppc_t* c) {
     f_8000BE20_orig(c);
 }
 
-/* Sets the frame rate (30 or 60), from the settings. Takes effect on the
+/* Sets the frame rate, from the settings: 30, or 60 and up (the game
+ * draws 60; gl_backend.c draws the frames between). Takes effect on the
  * main loop's next tick. */
 void hle_set_frame_rate(int fps) {
     uint64_t p;
