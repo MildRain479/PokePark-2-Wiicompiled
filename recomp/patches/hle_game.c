@@ -29,19 +29,37 @@ static int keep_boot_screens(void) {
 }
 
 static int sScene = -1;
-static int sTesting; /* in a minigame started for testing (f_80171630) */
+static int sSwallowChange;
 
 /* BOOL fn_801741F0(s32 scene): picks the next scene, by index. */
 void f_801741F0(ppc_t* c) {
-    /* Leaving a minigame started for testing (Quit, or Pick a Pokemon):
-     * back to the park, not to its lobby (see f_80171630). */
-    if (sTesting && sScene == SCENE_ATTRACTION && c->r[3] != SCENE_ATTRACTION) {
-        sTesting = 0;
-        c->r[3] = SCENE_PARK;
+    /* The Strap scene's script, still running after f_80173E10 has left
+     * it, picks Hold again when its time is up: see f_8016C950. */
+    if (sLeftStrap == 1 && sScene == SCENE_HOLD && c->r[3] == SCENE_HOLD) {
+        sLeftStrap = 2;
+        sSwallowChange = 1;
+        c->r[3] = 1;
+        return;
     }
     HLE_LOG("next scene: %d", (int)c->r[3]);
     sScene = (int)c->r[3];
     f_801741F0_orig(c);
+}
+
+/* void SceneManager::fn_8016C950(void): sets fChangeScene (+0x2C), which
+ * switches to the scene picked. Not for the Strap script's late switch to
+ * Hold (above): coming after the one f_80173E10 made, it would start Hold
+ * over, reinitializing the heaps under what the boot screens had loaded.
+ * PrepareSceneDat, with every minigame's records, was among it, and the
+ * resource manager went on finding the records there: a minigame's lobby
+ * then read garbage for them and never got as far as showing the friends
+ * to pick from. */
+void f_8016C950(ppc_t* c) {
+    if (sSwallowChange) {
+        sSwallowChange = 0;
+        return;
+    }
+    f_8016C950_orig(c);
 }
 
 /* Whether the scene is a minigame (an attraction). */
@@ -60,16 +78,17 @@ void f_80136B20(ppc_t* c) {
 int hle_minigame(void) { return sScene == SCENE_ATTRACTION ? sAttraction : 0; }
 
 /* Testing a minigame (the settings menu's Debug section, or
- * RECOMP_ATTRACTION=<n> once in the park): it starts from the park, as
- * Pikachu, whether or not the story has reached it. The minigame scene
- * takes its scene parameters: AttractionId (the index, one less than the
- * At number), PokemonId (the one playing; 0, Pikachu) and Challenge (0).
- * Its lobby is skipped: entered this way it never shows the friends to
- * pick from (it finds them among the park's objects near its gate). */
+ * RECOMP_ATTRACTION=<n> once in the park): its lobby is entered from the
+ * park the way its gate does it, whether or not the story has reached it.
+ * The gate's script leaves the minigame's index (one less than the At
+ * number) in the next scene's parameters as AttractionId and ends the
+ * park scene. The park's sequencer then takes the index from there, keeps
+ * it, and switches to the lobby, passing it on to the minigame and back
+ * each time. */
 #define ADD_SCENE_PARAMETER 0x8016CCC0 /* void AddSceneParameter(Params*, const char* name, s32 value) */
 #define ATTRACTION_ID_NAME 0x80336C68  /* "AttractionId" */
-#define POKEMON_ID_NAME 0x803322F4     /* "PokemonId" */
-#define CHALLENGE_NAME 0x803323A4      /* "Challenge" */
+#define SCENE_NEXT_PARAMS 0x98         /* SceneManager: the next scene's parameters */
+#define END_SCENE 0x8016CC30           /* BOOL SceneManager::fn_8016CC30(void): ends the scene */
 static int sMinigameRequest;
 
 void hle_request_minigame(int at) { sMinigameRequest = at; }
@@ -79,7 +98,6 @@ void hle_request_minigame(int at) { sMinigameRequest = at; }
 void f_80171630(ppc_t* c) {
     static int envDone;
     const char* e = getenv("RECOMP_ATTRACTION");
-    uint32_t params;
     int at;
     f_80171630_orig(c);
     if (!envDone && e && *e) {
@@ -96,40 +114,10 @@ void f_80171630(ppc_t* c) {
     if (at < 1 || at > 16) return;
     sMinigameRequest = 0;
     f_80019620(c); /* SceneManager::Get */
-    params = c->r[3] + 0x38;
     c->r[5] = (uint32_t)(at - 1);
-    hle_call(c, ADD_SCENE_PARAMETER, params, ATTRACTION_ID_NAME);
-    c->r[5] = 0;
-    hle_call(c, ADD_SCENE_PARAMETER, params, POKEMON_ID_NAME);
-    c->r[5] = 0;
-    hle_call(c, ADD_SCENE_PARAMETER, params, CHALLENGE_NAME);
-    c->r[3] = SCENE_ATTRACTION;
-    sTesting = 1;
-    f_801741F0(c);
+    hle_call(c, ADD_SCENE_PARAMETER, c->r[3] + SCENE_NEXT_PARAMS, ATTRACTION_ID_NAME);
     f_80019620(c);
-    f_8016C950(c); /* sets fChangeScene (+0x2C) */
-}
-
-/* void load_attraction_ranking(AttractionData*): reads the minigames'
- * records from AttractionRanking01.rlb, which the game loads on the way to
- * a gate. Entered from the park, it has none; this takes the function's own
- * way for a file with no records (instead of parsing a null file). */
-void f_8017C0D0(ppc_t* c) {
-    uint32_t table = c->r[3], mgr, data;
-    mgr = hle_call(c, 0x80012400, 0, 0); /* ResourceManager::Get */
-    c->r[5] = LD32(table + 0x18);
-    c->r[6] = LD32(table + 0x1C);
-    c->r[7] = 0;
-    data = hle_call(c, 0x80017550, mgr, 0); /* ResourceManager::GetFileData */
-    /* Not loaded: no pointer into MEM1 (24 MB) or MEM2 (64 MB), the
-     * handle being stale. */
-    if (!((data >= 0x80000000u && data < 0x81800000u) || (data >= 0x90000000u && data < 0x94000000u))) {
-        HLE_LOG("minigame records: none loaded");
-        ST32(table + 0x20, 0);
-        ST32(table + 0x10, 0xFFFFFFFFu);
-        return;
-    }
-    f_8017C0D0_orig(c);
+    hle_call(c, END_SCENE, c->r[3], 0);
 }
 
 /* void SceneSpecializerStrap::RunSystem(void): runs every frame. Once the
@@ -264,4 +252,3 @@ void f_801776E0(ppc_t* c) {
     if (sub == THP_SYS_STATE && skip && !sMovieLoops && c->r[3] == THP_PLAYING && ++sMoviePolls > SKIP_AFTER_POLLS)
         c->r[3] = THP_FINISHED;
 }
-
