@@ -223,10 +223,26 @@ void f_80209080(ppc_t* c) {
 
 /* Runs fn(r3, r4) the way the CPU takes an interrupt: on the current
  * thread, with the current context marked as saved by an exception
- * (OS_CONTEXT_STATE_EXC), so a reschedule inside the handler switches
- * threads without saving the handler's own state. The handler returns
- * either normally or by OSLoadContext on the interrupted context. If it
- * switches threads, this thread later continues the interrupted code. */
+ * (OS_CONTEXT_STATE_EXC), so a reschedule switches threads without saving
+ * the handler's own state. The handler returns either normally or by
+ * OSLoadContext on the interrupted context. If it switches threads, this
+ * thread later continues the interrupted code.
+ *
+ * A device's handler (or callback) runs as __OSDispatchInterrupt runs it:
+ * with the scheduler off, then a reschedule once it has returned. Threads
+ * it wakes start after it, not in the middle of it: the rest of a handler
+ * cut off by a switch never runs. (nw4r's streams update in the audio
+ * callback; cut off after queueing a block's load but before counting it,
+ * a stream loaded the same block again and fell behind its voice, which
+ * then played its buffer's old contents: the music repeated bits.) The
+ * decrementer's handler does that itself (DecrementerExceptionCallback
+ * sets up its own context). */
+static const uint32_t kOSDisableScheduler = 0x80210180;
+static const uint32_t kOSEnableScheduler = 0x802101C0;
+static const uint32_t kOSReschedule = 0x802106E0;            /* __OSReschedule */
+static const uint32_t kDecrementerHandler = 0x80207B30;      /* DecrementerExceptionHandler */
+static int sSchedulerOff[MAX_NESTED_INTERRUPTS]; /* by depth: still to turn back on */
+
 void hle_interrupt(ppc_t* c, uint32_t fn, uint32_t r3, uint32_t r4) {
     Resume frame;
     Fiber* self;
@@ -249,17 +265,37 @@ void hle_interrupt(ppc_t* c, uint32_t fn, uint32_t r3, uint32_t r4) {
     self->resume = &frame;
     if (ctx) ST16(ctx + 0x1A2, LD16(ctx + 0x1A2) | 2);
     if (!SETJMP(frame.jb)) {
+        int depth = self->irq_depth - 1, dispatch = fn != kDecrementerHandler;
         c->r[1] = (c->r[1] - 0x200) & ~7u;
+        if (dispatch) {
+            c->lr = 0;
+            ppc_icall(c, kOSDisableScheduler);
+            sSchedulerOff[depth] = 1;
+        }
         c->r[3] = r3;
         c->r[4] = r4;
         c->lr = 0;
         ppc_icall(c, fn);
+        if (dispatch) {
+            c->lr = 0;
+            ppc_icall(c, kOSEnableScheduler);
+            sSchedulerOff[depth] = 0;
+            ppc_icall(c, kOSReschedule);
+        }
     }
     self = sCurrent;
     self->irq_depth--;
     self->resume = saved_resume;
     self->select = saved_select;
     memcpy(c, &frame.regs, sizeof(*c));
+    if (sSchedulerOff[self->irq_depth]) {
+        /* The handler left by OSLoadContext: the scheduler back on. */
+        sSchedulerOff[self->irq_depth] = 0;
+        c->r[1] = (c->r[1] - 0x200) & ~7u;
+        c->lr = 0;
+        ppc_icall(c, kOSEnableScheduler);
+        memcpy(c, &frame.regs, sizeof(*c));
+    }
     if (ctx) ST16(ctx + 0x1A2, LD16(ctx + 0x1A2) & ~2u);
 }
 
