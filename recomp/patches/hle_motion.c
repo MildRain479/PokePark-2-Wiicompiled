@@ -23,7 +23,8 @@
  *     tilted forward and back, by up/down or the stick: up tilts it back
  *     (climb), down forward (dive);
  *   pointing (Rotom, Rayquaza's last part): the mouse or the right stick
- *     moves the pointer, as two sensor-bar dots in the IR camera.
+ *     moves the pointer, as two sensor-bar dots in the IR camera; past
+ *     the screen's sides it turns Rotom's view.
  *
  * The d-pad still goes to the game as well. RECOMP_TILT_FLIP=lr, fb or
  * lrfb turns tilting the other way, and RECOMP_POINTER_FLIP=y moves the
@@ -77,6 +78,12 @@ static const struct {
 #define POINTER_PER_PIXEL (1.0f / 600.0f)
 #define POINTER_PER_STICK_SECOND 1.5f
 #define DOT_SPREAD 100 /* each dot from the middle */
+
+/* How far the pointer goes across, past the screen's edges: Rotom's game
+ * turns to look around while it points past them (from about 1.4; the
+ * cursor stays at the edge). Much past 1.6 the game loses the pointer
+ * (1.8 hid it and stopped the turning). */
+#define POINTER_X_LIMIT 1.6f
 
 static int flip(const char* env, const char* what) {
     const char* e = getenv(env);
@@ -200,7 +207,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
         if (g_host_pointer_read) g_host_pointer_read(&dx, &dy);
         px += dx * POINTER_PER_PIXEL + rx * POINTER_PER_STICK_SECOND / 200.0f;
         py += -dy * POINTER_PER_PIXEL + ry * POINTER_PER_STICK_SECOND / 200.0f;
-        px = px > 1 ? 1 : px < -1 ? -1 : px;
+        px = px > POINTER_X_LIMIT ? POINTER_X_LIMIT : px < -POINTER_X_LIMIT ? -POINTER_X_LIMIT : px;
         py = py > 1 ? 1 : py < -1 ? -1 : py;
     }
     {
