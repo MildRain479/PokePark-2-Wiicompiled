@@ -476,9 +476,10 @@ int main(int argc, char** argv) {
         if (slash) strcpy(slash + 1, "disc");
         else strcpy(root, "disc");
         if (hle_dvd_init(root) == 0) hle_dvd_boot_setup();
-        /* Saves live in "nand" beside "disc". */
+        /* Saves live in "nand" beside "disc", or RECOMP_NAND (test runs,
+         * which keep their own). */
         strcpy(root + strlen(root) - 4, "nand");
-        hle_nand_set_root(root);
+        hle_nand_set_root(getenv("RECOMP_NAND") ? getenv("RECOMP_NAND") : root);
     }
     {
         /* RECOMP_WATCH=<guest address>[,<length>]: stop on the first write
