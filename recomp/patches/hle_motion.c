@@ -7,8 +7,9 @@
  * played; here each gets the remote held as they ask, moved by:
  *
  *   running (Absol, Bulbasaur, Dusknoir): shake = the two shake keys by
- *     turns (Q and E, LB and RB): a swing for each press after the other
- *     key's, so the faster they go by turns, the faster the shaking;
+ *     turns (Q and E, LB and RB): a swing up or down for each press after
+ *     the other key's, so the faster they go by turns, the faster the
+ *     shaking (about 8 presses a second wins Bulbasaur's dash in 9 s);
  *   swinging on a vine or rope (Venusaur, Tangrowth): held upright; the
  *     shake keys by turns swing it back and forth, in time with the vine;
  *     B pushes it forward to jump, as the game asks ("Push [B] as shown"),
@@ -119,7 +120,7 @@ static int gesture(Gesture* g, uint32_t held, uint32_t mask, uint32_t report, in
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]) {
     static float steer, pitch, px, py;
     static Gesture push, bat;
-    int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing, g;
+    int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing;
     float lx = 0, ly = 0, rx = 0, ry = 0, x, y, z, wantSteer = 0, wantPitch = 0;
     if (!at) return 0;
     for (i = 0; i < (int)(sizeof(kMinigames) / sizeof(kMinigames[0])); i++) {
@@ -163,9 +164,10 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     /* Bursts of acceleration on top. */
     swing = (use & (USE_SHAKE | USE_SWING | USE_BAT)) ? shake_swing(held, report) : 0;
     if (swing) {
-        g = swing * G * 5 / 2;
-        if (hold == HOLD_UPRIGHT) z += g; /* back and forth, toward the screen and away */
-        else y += g;                      /* along its length: left and right */
+        /* Up and down, out of its face, whichever way it is held: running
+         * reads only that (in Bulbasaur's dash, a shake along its length
+         * did nothing); upright, that is toward the screen and away. */
+        z += swing * G * 5 / 2;
     }
     if (use & USE_PUSH) {
         /* A push toward the screen: a thrust, then the stop. */

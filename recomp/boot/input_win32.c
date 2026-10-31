@@ -11,6 +11,7 @@
  *   +                P                          Start
  *   -                M                          Back
  *   HOME             Home / H                   right stick click
+ *   camera           mouse                      right stick
  *   shake (held)     Q / Left Shift             LB
  *   shake 2          E                          RB
  *   (in minigames a shake is shake and shake 2 pressed by turns, hle_wpad.c)
@@ -138,9 +139,26 @@ static void read_sticks(float* lx, float* ly, float* rx, float* ry) {
     *ry = stick_axis(s.Gamepad.sThumbRY);
 }
 
+/* The right stick turns the camera as the mouse does: full over turns it
+ * as this many pixels a second would (180 degrees a second), up looking
+ * up. */
+#define LOOK_STICK_PIXELS_PER_SECOND 600.0f
+
+/* The camera's turn since the last call (hle_camera.c), in mouse pixels:
+ * the mouse's movement and the right stick's push over the time. */
 static void read_mouse(float* dx, float* dy) {
-    *dx = sMouseX * g_settings.mouse_sensitivity;
-    *dy = sMouseY * g_settings.mouse_sensitivity * (g_settings.invert_tilt ? -1 : 1);
+    static LARGE_INTEGER last;
+    LARGE_INTEGER now, freq;
+    float lx, ly, rx, ry, dt = 0;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (last.QuadPart) dt = (float)(now.QuadPart - last.QuadPart) / (float)freq.QuadPart;
+    if (dt > 0.1f) dt = 0.1f; /* not a jump after a stall */
+    last = now;
+    read_sticks(&lx, &ly, &rx, &ry);
+    if (!has_focus()) rx = ry = 0;
+    *dx = sMouseX * g_settings.mouse_sensitivity + rx * LOOK_STICK_PIXELS_PER_SECOND * dt;
+    *dy = (sMouseY * g_settings.mouse_sensitivity - ry * LOOK_STICK_PIXELS_PER_SECOND * dt) * (g_settings.invert_tilt ? -1 : 1);
     sMouseX = sMouseY = 0;
 }
 
