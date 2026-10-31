@@ -135,7 +135,9 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
 
     /* Tilt, toward where the keys or the stick put it. */
     if (use & USE_STEER) {
-        wantSteer = lx != 0 ? lx : (held & HOST_PAD_SCREEN_RIGHT ? 1.0f : 0) - (held & HOST_PAD_SCREEN_LEFT ? 1.0f : 0);
+        /* Right lowers the pointer end (to the left, held sideways), as
+         * the minigames turn right: lifting it turned them left. */
+        wantSteer = lx != 0 ? -lx : (held & HOST_PAD_SCREEN_LEFT ? 1.0f : 0) - (held & HOST_PAD_SCREEN_RIGHT ? 1.0f : 0);
         if (flip("RECOMP_TILT_FLIP", "lr")) wantSteer = -wantSteer;
     }
     if (use & USE_PITCH) {
@@ -149,8 +151,8 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     /* Gravity, as the accelerometer reads it (up along an axis reads +g on
      * it), in the remote's axes: x across its face, y along it (toward the
      * pointer end), z out of its face. Sideways, the pointer end is to the
-     * left: steering right lifts it, and tilting forward lifts the edge
-     * nearest the player (+x). Upright, the pointer end is up and the face
+     * left: a positive steer lifts it (turning left), and tilting forward
+     * lifts the edge nearest the player (+x). Upright, the pointer end is up and the face
      * toward the player. */
     if (hold == HOLD_UPRIGHT) {
         x = 0;
