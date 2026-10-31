@@ -15,7 +15,8 @@
  *     B pushes it forward to jump, as the game asks ("Push [B] as shown"),
  *     and so does 2 (Space);
  *   bashing boulders (Blaziken): held upright; 1 or 2 (left click, Space)
- *     swings it like a bat; the shake keys by turns shake it to recover;
+ *     swings it like a bat, toward the screen; the shake keys by turns
+ *     shake it from side to side to recover;
  *   steering (Gyarados, Empoleon): held sideways, tilted left and right
  *     by left/right (A/D, arrows) or the left stick, in proportion;
  *   flying and rolling (Pelipper, Salamence, Rhyperior, Rayquaza): also
@@ -166,8 +167,11 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     if (swing) {
         /* Up and down, out of its face, whichever way it is held: running
          * reads only that (in Bulbasaur's dash, a shake along its length
-         * did nothing); upright, that is toward the screen and away. */
-        z += swing * G * 5 / 2;
+         * did nothing); upright, that is toward the screen and away. With
+         * a bat that would swing it, so there the shake (to recover from
+         * a boulder) goes from side to side. */
+        if (use & USE_BAT) x += swing * G * 5 / 2;
+        else z += swing * G * 5 / 2;
     }
     if (use & USE_PUSH) {
         /* A push toward the screen: a thrust, then the stop. */
@@ -175,9 +179,11 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
         if (t >= 0) z += t < 5 ? -3 * G : 3 * G / 2;
     }
     if (use & USE_BAT) {
-        /* A bat's swing across the body: a sweep, then the follow-through. */
+        /* A bat's swing toward the screen, then the follow-through: the
+         * one way Blaziken's game counts (scored 400 one run; swung across
+         * the body or along its length, 0). */
         int t = gesture(&bat, held, HOST_PAD_1 | HOST_PAD_2, report, 14);
-        if (t >= 0) x += t < 8 ? 3 * G : -2 * G;
+        if (t >= 0) z += t < 8 ? 3 * G : -2 * G;
     }
     acc[0] = clamp16(x);
     acc[1] = clamp16(y);
