@@ -57,7 +57,7 @@ static const struct {
     {37, "Once you are swinging well,", "Once you are swinging well,\nit's time to jump!\nPress [B]."},
     /* Tangrowth's Swing-Along */
     {41, "Hold the Wii Remote vertically", "When the time starts, press [shake]\nby turns to swing on the rope!"},
-    {42, "Swing in time with the rope", "Swing in time with the rope\nand jump when ready.\nPress [B] or [2] to jump."},
+    {42, "Swing in time with the rope", "Swing in time with the rope\nand jump when ready.\nPress [B] to jump."},
     /* Dusknoir's Speed Slam */
     {46, "Shake the Wii Remote", "Press [shake] by turns\nto start running. The faster you\npress them, the faster you'll go!"},
     {48, "You'll slow down when you",
