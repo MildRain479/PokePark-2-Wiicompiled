@@ -37,6 +37,9 @@ typedef struct {
     int text_speed;          /* dialogue: 1 (the game's), 2, 3, or 0 (a page at once) */
     int berries;             /* berries collected, percent of the game's */
     int prices;              /* berries spent, percent of the game's */
+    int damage_dealt;        /* damage Pikachu deals in battles, percent of the game's */
+    int damage_taken;        /* damage Pikachu takes in battles, percent of the game's */
+    int chase_speed;         /* the speed of the Pokémon Pikachu chases, percent of the game's */
     float mouse_sensitivity; /* camera turn per pixel, times the default */
     int invert_tilt;         /* mouse up looks down */
     int key[ACT_COUNT][BIND_SLOTS];      /* Windows virtual-key codes (mouse buttons too); 0 = none */
@@ -64,7 +67,8 @@ void prompts_init(void);
 
 /* What settings_step changes. */
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
-       SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES };
+       SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
+       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);

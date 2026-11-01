@@ -71,3 +71,8 @@
 0x80109630 fn_80109630  # hle_modifiers.c: dialogue speed
 0x801279B0 nsDelhi::nsGlobal::OtherDataSingleMode::virt0x58  # hle_modifiers.c: berry modifiers
 0x800821B0 nsDelhi::nsObject::ControlModuleImpl::virt0x8_0x20  # hle_stick.c: 360-degree movement with the stick
+0x80095EE0 nsDelhi::nsObject::LifeModuleImpl::virt0x4_0x38  # hle_modifiers.c: battle damage
+0x801441C0 nsDelhi::nsObject::FieldAIActionChallengeChase::virt0x14  # hle_modifiers.c: chase speed
+0x80147590 nsDelhi::nsObject::FieldAIActionChallengeChaseFly::virt0x14  # hle_modifiers.c: chase speed
+0x80149240 nsDelhi::nsObject::FieldAIActionChallengeChaseFlyVertical::virt0x14  # hle_modifiers.c: chase speed
+0x8008FFA0 nsDelhi::nsObject::KineticEnergyControl::virt0x4_0xC  # hle_modifiers.c: chase speed

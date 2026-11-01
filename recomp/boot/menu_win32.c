@@ -40,11 +40,16 @@ void hle_request_minigame(int at); /* hle_game.c */
 void hle_set_text_speed(int steps);  /* hle_modifiers.c */
 void hle_set_berry_rate(int percent);
 void hle_set_prices(int percent);
+void hle_set_damage(int dealt, int taken);
+void hle_set_chase_speed(int percent);
 
 /* The gameplay settings' choices, in order. */
 static const int kTextSpeeds[] = {1, 2, 3, 0};
 static const int kBerries[] = {100, 150, 200, 300, 50};
 static const int kPrices[] = {100, 50, 0, 200};
+static const int kDamageDealt[] = {100, 150, 200, 300, 50};
+static const int kDamageTaken[] = {100, 50, 0, 200, 300};
+static const int kChaseSpeeds[] = {100, 75, 50, 125, 150};
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 static int choice(const int* list, int n, int v) {
@@ -57,6 +62,8 @@ static void apply_gameplay(void) {
     hle_set_text_speed(g_settings.text_speed);
     hle_set_berry_rate(g_settings.berries);
     hle_set_prices(g_settings.prices);
+    hle_set_damage(g_settings.damage_dealt, g_settings.damage_taken);
+    hle_set_chase_speed(g_settings.chase_speed);
 }
 
 /* The minigames, by At number, for the Debug section. */
@@ -212,7 +219,13 @@ void settings_save(void) {
     fprintf(f, "text_speed = %d ; dialogue: 1 (the game's), 2, 3 times as fast, or 0: a page at once\n",
             g_settings.text_speed);
     fprintf(f, "berries = %d ; berries collected, percent of the game's: 50, 100, 150, 200 or 300\n", g_settings.berries);
-    fprintf(f, "prices = %d ; berries spent, percent of the game's: 0 (free), 50, 100 or 200\n\n", g_settings.prices);
+    fprintf(f, "prices = %d ; berries spent, percent of the game's: 0 (free), 50, 100 or 200\n", g_settings.prices);
+    fprintf(f, "damage_dealt = %d ; damage Pikachu deals in battles, percent of the game's: 50, 100, 150, 200 or 300\n",
+            g_settings.damage_dealt);
+    fprintf(f, "damage_taken = %d ; damage Pikachu takes in battles, percent of the game's: 0 (none), 50, 100, 200 or 300\n",
+            g_settings.damage_taken);
+    fprintf(f, "chase_speed = %d ; the speed of the Pokemon Pikachu chases, percent of the game's: 50, 75, 100, 125 or 150\n\n",
+            g_settings.chase_speed);
     fprintf(f, "[mouse]\n");
     fprintf(f, "sensitivity = %.2f ; camera turn, times the default\n", g_settings.mouse_sensitivity);
     fprintf(f, "invert_tilt = %d\n\n", g_settings.invert_tilt);
@@ -243,6 +256,9 @@ void settings_load(void) {
     g_settings.text_speed = 1;
     g_settings.berries = 100;
     g_settings.prices = 100;
+    g_settings.damage_dealt = 100;
+    g_settings.damage_taken = 100;
+    g_settings.chase_speed = 100;
     g_settings.frame_rate = 30;
     g_settings.fov = 100;
     g_settings.mouse_sensitivity = 1.0f;
@@ -280,6 +296,12 @@ void settings_load(void) {
             if (!strcmp(name, "text_speed")) g_settings.text_speed = kTextSpeeds[choice(kTextSpeeds, COUNT(kTextSpeeds), atoi(p))];
             if (!strcmp(name, "berries")) g_settings.berries = kBerries[choice(kBerries, COUNT(kBerries), atoi(p))];
             if (!strcmp(name, "prices")) g_settings.prices = kPrices[choice(kPrices, COUNT(kPrices), atoi(p))];
+            if (!strcmp(name, "damage_dealt"))
+                g_settings.damage_dealt = kDamageDealt[choice(kDamageDealt, COUNT(kDamageDealt), atoi(p))];
+            if (!strcmp(name, "damage_taken"))
+                g_settings.damage_taken = kDamageTaken[choice(kDamageTaken, COUNT(kDamageTaken), atoi(p))];
+            if (!strcmp(name, "chase_speed"))
+                g_settings.chase_speed = kChaseSpeeds[choice(kChaseSpeeds, COUNT(kChaseSpeeds), atoi(p))];
         } else if (!strcmp(section, "mouse")) {
             if (!strcmp(name, "sensitivity")) {
                 float s = (float)atof(p);
@@ -395,6 +417,21 @@ void settings_step(int which, int d) {
     case SET_PRICES:
         g_settings.prices =
             kPrices[(choice(kPrices, COUNT(kPrices), g_settings.prices) + d + COUNT(kPrices)) % COUNT(kPrices)];
+        apply_gameplay();
+        break;
+    case SET_DAMAGE_DEALT:
+        g_settings.damage_dealt = kDamageDealt[(choice(kDamageDealt, COUNT(kDamageDealt), g_settings.damage_dealt) + d +
+                                                COUNT(kDamageDealt)) % COUNT(kDamageDealt)];
+        apply_gameplay();
+        break;
+    case SET_DAMAGE_TAKEN:
+        g_settings.damage_taken = kDamageTaken[(choice(kDamageTaken, COUNT(kDamageTaken), g_settings.damage_taken) + d +
+                                                COUNT(kDamageTaken)) % COUNT(kDamageTaken)];
+        apply_gameplay();
+        break;
+    case SET_CHASE_SPEED:
+        g_settings.chase_speed = kChaseSpeeds[(choice(kChaseSpeeds, COUNT(kChaseSpeeds), g_settings.chase_speed) + d +
+                                               COUNT(kChaseSpeeds)) % COUNT(kChaseSpeeds)];
         apply_gameplay();
         break;
     default: return;

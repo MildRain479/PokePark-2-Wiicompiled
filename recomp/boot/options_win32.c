@@ -57,6 +57,9 @@ static const Row kGameplay[] = {
     {ROW_SETTING, SET_TEXT_SPEED, "Text speed"},
     {ROW_SETTING, SET_BERRIES, "Berries"},
     {ROW_SETTING, SET_PRICES, "Prices"},
+    {ROW_SETTING, SET_DAMAGE_DEALT, "Damage dealt"},
+    {ROW_SETTING, SET_DAMAGE_TAKEN, "Damage taken"},
+    {ROW_SETTING, SET_CHASE_SPEED, "Chase speed"},
 };
 static const char* const kAction[ACT_COUNT] = {
     "Up", "Down", "Left", "Right", "2: Jump", "1: Dash", "A: Thunderbolt", "B: Camera", "+: Pad", "-: Map", "HOME",
@@ -125,6 +128,16 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_PRICES:
         if (g_settings.prices == 0) snprintf(out, n, "Free");
         else snprintf(out, n, g_settings.prices == 100 ? "Original" : "%d%%", g_settings.prices);
+        break;
+    case SET_DAMAGE_DEALT:
+        snprintf(out, n, g_settings.damage_dealt == 100 ? "Original" : "%d%%", g_settings.damage_dealt);
+        break;
+    case SET_DAMAGE_TAKEN:
+        if (g_settings.damage_taken == 0) snprintf(out, n, "None");
+        else snprintf(out, n, g_settings.damage_taken == 100 ? "Original" : "%d%%", g_settings.damage_taken);
+        break;
+    case SET_CHASE_SPEED:
+        snprintf(out, n, g_settings.chase_speed == 100 ? "Original" : "%d%%", g_settings.chase_speed);
         break;
     default: *out = 0;
     }
