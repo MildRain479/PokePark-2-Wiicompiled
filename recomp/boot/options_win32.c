@@ -26,6 +26,7 @@
 #include "host_settings.h"
 
 int hle_pause_main_page(void); /* hle_pause.c */
+int hle_file_select_shown(void);
 const uint32_t* hle_pause_image(const char* name, const char* alpha, int* w, int* h);
 int hle_font_metrics(int* cellW, int* cellH, int* baseline); /* hle_prompts.c */
 int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance);
@@ -110,12 +111,25 @@ enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
 #define VISIBLE_ROWS 8
 
 static volatile int sOpen;
+/* What it was opened from: the Pad, or the save file screen. */
+enum { FROM_PAD, FROM_FILES };
+static int sFrom;
 static int sSection, sOnRows, sRow, sSlot, sTop, sCapture;
 static volatile unsigned sChanges; /* what's drawn is redrawn when this changes */
 
 int options_is_open(void) { return sOpen; }
 
 static void changed(void) { sChanges++; }
+
+/* Whether what it opens from is showing. */
+static int shown(int from) { return from == FROM_PAD ? hle_pause_main_page() : hle_file_select_shown(); }
+
+static void set_open(int open);
+
+static void open_from(int from) {
+    sFrom = from;
+    set_open(1);
+}
 
 static void set_open(int open) {
     sOpen = open;
@@ -355,6 +369,38 @@ static float text_width(const char* s, float size) {
     return w * size / sCellH;
 }
 
+/* Paints a coverage mask (bw x bh, 0-1) at window pixel (bx0, by0): the
+ * edge, then the fill, each the coverage grown by a disc. */
+static void paint_mask(const float* mask, int bw, int bh, int bx0, int by0, uint32_t fill, uint32_t edge,
+                       float outline, int bold) {
+    int j;
+    for (j = 0; j < 2; j++) {
+        float r = j == 0 ? outline * sScale + (bold ? 0.6f * sScale : 0) : (bold ? 0.6f * sScale : 0);
+        uint32_t c = j == 0 ? edge : fill;
+        int ri = (int)ceilf(r), a, b;
+        if (j == 0 && outline <= 0) continue;
+        for (b = 0; b < bh; b++) {
+            int py = by0 + b;
+            if (py < 0 || py >= sH) continue;
+            for (a = 0; a < bw; a++) {
+                int px = bx0 + a, dx, dy;
+                float m = 0;
+                if (px < 0 || px >= sW) continue;
+                for (dy = -ri; dy <= ri; dy++) {
+                    for (dx = -ri; dx <= ri; dx++) {
+                        float d = sqrtf((float)(dx * dx + dy * dy)), w, v;
+                        if (d > r + 1 || a + dx < 0 || b + dy < 0 || a + dx >= bw || b + dy >= bh) continue;
+                        w = d <= r ? 1.0f : r + 1 - d;
+                        v = mask[(b + dy) * bw + a + dx] * w;
+                        if (v > m) m = v;
+                    }
+                }
+                if (m > 0) blend(&sPx[py * sW + px], c, m > 1 ? 1 : m);
+            }
+        }
+    }
+}
+
 enum { ALIGN_LEFT, ALIGN_CENTRE, ALIGN_RIGHT };
 
 /* Draws s with its middle at y, filled with fill, edged outline wide (in
@@ -413,32 +459,7 @@ static void draw_text(const char* s, float x, float y, float size, int align, ui
         }
         pen += advance * k;
     }
-    /* The edge, then the letters, each the coverage grown by a disc. */
-    for (j = 0; j < 2; j++) {
-        float r = j == 0 ? outline * sScale + (bold ? 0.6f * sScale : 0) : (bold ? 0.6f * sScale : 0);
-        uint32_t c = j == 0 ? edge : fill;
-        int ri = (int)ceilf(r), a, b;
-        if (j == 0 && outline <= 0) continue;
-        for (b = 0; b < bh; b++) {
-            int py = by0 + b;
-            if (py < 0 || py >= sH) continue;
-            for (a = 0; a < bw; a++) {
-                int px = bx0 + a, dx, dy;
-                float m = 0;
-                if (px < 0 || px >= sW) continue;
-                for (dy = -ri; dy <= ri; dy++) {
-                    for (dx = -ri; dx <= ri; dx++) {
-                        float d = sqrtf((float)(dx * dx + dy * dy)), w, v;
-                        if (d > r + 1 || a + dx < 0 || b + dy < 0 || a + dx >= bw || b + dy >= bh) continue;
-                        w = d <= r ? 1.0f : r + 1 - d;
-                        v = mask[(b + dy) * bw + a + dx] * w;
-                        if (v > m) m = v;
-                    }
-                }
-                if (m > 0) blend(&sPx[py * sW + px], c, m > 1 ? 1 : m);
-            }
-        }
-    }
+    paint_mask(mask, bw, bh, bx0, by0, fill, edge, outline, bold);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -452,6 +473,52 @@ static void draw_text(const char* s, float x, float y, float size, int align, ui
 #define WAIT 0xFFE05A00u
 
 static const Rect kWhole = {0, 0, 0, 0};
+
+/* The icon of what's bound to a remote button (HOST_PAD_*), white with
+ * an edge, in dst; 0 if there's none. */
+static int draw_button_icon(uint32_t button, Rect dst, uint32_t edge) {
+    static uint8_t cov[96 * 96];
+    static float mask[160 * 160];
+    int n = 96, bw, bh, bx0, by0, i, j, pad = (int)ceilf(4 * sScale) + 1;
+    float dw = X(dst.x1) - X(dst.x0), dh = Y(dst.y1) - Y(dst.y0);
+    if (!g_host_prompt_icon || !g_host_prompt_icon(button, cov, n, n)) return 0;
+    bw = (int)dw + 2 * pad;
+    bh = (int)dh + 2 * pad;
+    if (bw * bh > (int)(sizeof(mask) / sizeof(mask[0]))) return 0;
+    bx0 = (int)X(dst.x0) - pad;
+    by0 = (int)Y(dst.y0) - pad;
+    memset(mask, 0, sizeof(mask));
+    for (j = pad; j < bh - pad; j++) {
+        for (i = pad; i < bw - pad; i++) {
+            int u = (int)((i - pad + 0.5f) / dw * n), v = (int)((j - pad + 0.5f) / dh * n);
+            if (u < n && v < n) mask[j * bw + i] = cov[v * n + u] / 255.0f;
+        }
+    }
+    paint_mask(mask, bw, bh, bx0, by0, 0xFFFFFFFFu, edge, 3.0f, 0);
+    return 1;
+}
+
+/* Beside the save file screen's Arcade plank, a plank like it: Options,
+ * with the icon of what opens it (the - button's key). */
+static const Rect kFileButton = {1332, 655, 1602, 748}; /* as tall as Arcade's */
+
+static void draw_file_button(void) {
+    /* The plank in three: its ends, and a piece of its middle stretched,
+     * past the Pikachu at its right. */
+    static const Rect kLeft = {2, 5, 70, 58}, kMiddle = {100, 5, 140, 58}, kRight = {200, 5, 256, 58};
+    float k = (kFileButton.y1 - kFileButton.y0) / (kLeft.y1 - kLeft.y0);
+    float lx = kFileButton.x0 + (kLeft.x1 - kLeft.x0) * k, rx = kFileButton.x1 - (kRight.x1 - kRight.x0) * k;
+    Rect l = {kFileButton.x0, kFileButton.y0, lx, kFileButton.y1}, m = {lx, kFileButton.y0, rx, kFileButton.y1};
+    Rect r = {rx, kFileButton.y0, kFileButton.x1, kFileButton.y1};
+    Rect icon = {kFileButton.x0 + 18, 676, kFileButton.x0 + 70, 728};
+    int hasIcon;
+    draw_picture("MaAtMenu", NULL, kLeft, l, 0xFFFFFF);
+    draw_picture("MaAtMenu", NULL, kMiddle, m, 0xFFFFFF);
+    draw_picture("MaAtMenu", NULL, kRight, r, 0xFFFFFF);
+    hasIcon = draw_button_icon(HOST_PAD_MINUS, icon, 0xFF7A2020u);
+    draw_text("Options", hasIcon ? (icon.x1 + kFileButton.x1) / 2 : (kFileButton.x0 + kFileButton.x1) / 2, 703, 56,
+              ALIGN_CENTRE, 0xFFFFFFFFu, 0xFF7A2020u, 4.0f, 1, hasIcon ? 175 : 220);
+}
 
 /* The other tab: a piece of the title strip, a little darker, with an
  * arrowhead pointing the way to it. */
@@ -470,13 +537,15 @@ static void draw_tab(const char* name, int right) {
 }
 
 /* What doesn't change: the pages, the title and the other tab. */
-static const Rect kRightPage = {774, 7, 1499, 893}, kLeftPage = {193, 9, 812, 897};
+/* The left page reaches under the right one: from the save file screen
+ * there's no Pad beneath to fill the spine between them. */
+static const Rect kRightPage = {774, 7, 1499, 893}, kLeftPage = {205, 9, 840, 897};
 static const Rect kLeaves = {1, 4, 63, 232}, kLeavesAt = {1342, 46, 1466, 504};
 
 static void draw_pages(void) {
     draw_picture("PmPocketbookR", "PmPocketbookRA", kWhole, kRightPage, 0xFFFFFF);
     draw_picture("PmReaf01", "PmReaf01A", kLeaves, kLeavesAt, 0xFFFFFF);
-    draw_tab("Pok\xE9Park Pad", 0); /* the font's Latin-1 */
+    if (sFrom == FROM_PAD) draw_tab("Pok\xE9Park Pad", 0); /* the font's Latin-1 */
     draw_picture("PmPocketbookL01", "PmPocketbookL01A", kWhole, kLeftPage, 0xFFFFFF);
     draw_text("Options", 450, 104, 54, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
 }
@@ -567,8 +636,8 @@ static void draw_book(void) {
 const uint32_t* options_draw(int w, int h) {
     static unsigned drawn = ~0u;
     static int drawnW, drawnH, drawnWhat, cw;
-    int what = sOpen ? 2 : hle_pause_main_page() ? 1 : 0, y;
-    if (sOpen && !hle_pause_main_page()) { /* the Pad closed (or the scene changed) under it */
+    int what = sOpen ? 2 : hle_pause_main_page() ? 1 : hle_file_select_shown() ? 3 : 0, y;
+    if (sOpen && !shown(sFrom)) { /* what it was opened from went (the scene changed) */
         set_open(0);
         what = 0;
     }
@@ -595,11 +664,16 @@ const uint32_t* options_draw(int w, int h) {
         draw_tab("Options", 1);
         return sPx;
     }
+    if (what == 3) {
+        draw_file_button();
+        return sPx;
+    }
     {
         /* The pages, drawn once for this size. */
         static uint32_t* pages;
-        static int pagesW, pagesH;
-        if (!pages || pagesW != w || pagesH != h) {
+        static int pagesW, pagesH, pagesFrom;
+        if (!pages || pagesW != w || pagesH != h || pagesFrom != sFrom) {
+            pagesFrom = sFrom;
             free(pages);
             draw_pages();
             pages = (uint32_t*)malloc((size_t)w * h * 4);
@@ -646,7 +720,7 @@ static int click(int mx, int my) {
     if (sScale <= 0) return 0;
     x = (mx - sOffX) / sScale;
     y = (my - sOffY) / sScale;
-    if (in(kTab, x, y)) {
+    if (sFrom == FROM_PAD && in(kTab, x, y)) {
         set_open(0);
         return 1;
     }
@@ -697,9 +771,17 @@ int options_window_message(unsigned msg, uintptr_t wp, intptr_t lp) {
     if (msg == WM_MBUTTONDOWN) vk = VK_MBUTTON;
     if (msg == WM_XBUTTONDOWN) vk = HIWORD(wp) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
     if (!sOpen) {
-        /* Right, on the Pad's main page, opens the tab. */
+        /* Right, on the Pad's main page, opens the tab; on the save file
+         * screen, its button (-) or a click on it. */
         if (down && !repeat && (vk == VK_RIGHT || key_is(vk, ACT_RIGHT)) && hle_pause_main_page()) {
-            set_open(1);
+            open_from(FROM_PAD);
+            return 1;
+        }
+        if (!hle_file_select_shown() || repeat) return 0;
+        if ((down && key_is(vk, ACT_MINUS)) ||
+            (msg == WM_LBUTTONDOWN && sScale > 0 &&
+             in(kFileButton, ((short)LOWORD(lp) - sOffX) / sScale, ((short)HIWORD(lp) - sOffY) / sScale))) {
+            open_from(FROM_FILES);
             return 1;
         }
         return 0;
@@ -734,7 +816,8 @@ void options_controller(uint32_t raw, uint32_t nav) {
     lastRaw = raw;
     lastNav = nav;
     if (!sOpen) {
-        if ((navPressed & XPAD_RIGHT) && hle_pause_main_page()) set_open(1);
+        if ((navPressed & XPAD_RIGHT) && hle_pause_main_page()) open_from(FROM_PAD);
+        else if (pad_is(pressed, ACT_MINUS) && hle_file_select_shown()) open_from(FROM_FILES);
         return;
     }
     if (sCapture == CAPTURE_PAD) {
@@ -758,7 +841,8 @@ int options_script(uint32_t held) {
     last = held;
     if (!held) swallow = 0;
     if (!sOpen) {
-        if ((p & HOST_PAD_SCREEN_RIGHT) && hle_pause_main_page()) set_open(1);
+        if ((p & HOST_PAD_SCREEN_RIGHT) && hle_pause_main_page()) open_from(FROM_PAD);
+        else if ((p & HOST_PAD_MINUS) && hle_file_select_shown()) open_from(FROM_FILES);
         if (sOpen) swallow = 1;
         return swallow;
     }

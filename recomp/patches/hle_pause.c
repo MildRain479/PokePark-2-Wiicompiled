@@ -1,15 +1,20 @@
-/* The PokéPark Pad (the pause menu in the park), for the Options tab
- * drawn beside it (menu_win32.c): whether it's open on its main page, and
- * its pictures, to draw the tab in.
+/* The PokéPark Pad (the pause menu in the park) and the save file screen,
+ * for the Options tab drawn over them (options_win32.c): whether the Pad
+ * is open on its main page or the save file screen is up, and their
+ * pictures, to draw the tab in.
  *
  * The Pad is a menu script (MenuScriptPauseMenu); its object's state is 5
  * while it's open, and the script sets a flag while its buttons can be
  * chosen, which it clears on going into one of them (Pikachu's Stats, the
  * Friend List, saving). Left and right do nothing there.
  *
- * Its pictures are textures of Pause.brres, which stays loaded: found as
- * the file is set up (ResTex::Init, hle_prompts.c), and decoded when the
- * menu first asks for them. */
+ * The save file screen (Game 1, Game 2, Arcade) is a menu script too, and
+ * where its cursor is couldn't be found; it is up while its Arcade plank is
+ * drawn (its texture, MaAtMenu, loaded for drawing: GXLoadTexObj).
+ *
+ * The pictures are textures of Pause.brres, which stays loaded, and of the
+ * start menu's Main.brres: found as each file is set up (ResTex::Init,
+ * hle_prompts.c), and decoded when the menu first asks for them. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,12 +33,26 @@ int hle_pause_main_page(void) {
     return sPause && LD32(sPause + 0x328) == 5 && (LD32(sPause + 0x32C) & 1);
 }
 
+static uint32_t sArcadeImage;
+static uint64_t sArcadeDrawn; /* when, on the time base */
+
+/* void GXLoadTexObjPreLoaded(GXTexObj* obj, GXTexRegion* region, GXTexMapID id):
+ * each time a texture is drawn. The object (often a copy) holds the
+ * image's physical address over 32 in its fourth word. */
+void f_80222E00(ppc_t* c) {
+    if (sArcadeImage && (LD32(c->r[3] + 0xC) & 0xFFFFFFu) == (sArcadeImage & 0x3FFFFFFFu) >> 5)
+        sArcadeDrawn = ppc_timebase();
+    f_80222E00_orig(c);
+}
+
+int hle_file_select_shown(void) { return sArcadeDrawn && ppc_timebase() - sArcadeDrawn < PPC_TB_HZ / 8; }
+
 /* ------------------------------------------------------------------------ */
 /* Pictures */
 
 static const char* const kWanted[] = {
     "PmPocketbookL01", "PmPocketbookL01A", "PmPocketbookR", "PmPocketbookRA", "PmMenuButton", "PmButtonPocket",
-    "PmReaf01",        "PmReaf01A",        "PmArrowheadMat", "PmArrowheadMatAlp",
+    "PmReaf01",        "PmReaf01A",        "PmArrowheadMat", "PmArrowheadMatAlp", "MaAtMenu",
 };
 #define WANTED ((int)(sizeof(kWanted) / sizeof(kWanted[0])))
 
@@ -60,6 +79,7 @@ void hle_pause_texture(uint32_t tex) {
             sTex[i].argb = NULL;
             sTex[i].tex = tex;
         }
+        if (!strcmp(kWanted[i], "MaAtMenu")) sArcadeImage = tex + LD32(tex + 0x10);
         return;
     }
 }
@@ -160,10 +180,40 @@ static uint32_t* decode(uint32_t tex, int* pw, int* ph) {
     return out;
 }
 
+/* The Pad's model is set up only as the park starts, but its file is
+ * loaded from the start (PrepareResidentRes): before that, its textures
+ * are found in memory, in a file (bres) of their own. */
+static void find_loaded(void) {
+    static const uint32_t kRange[2][2] = {{0x80000000u, 0x81800000u}, {0x90000000u, 0x94000000u}};
+    static uint64_t last;
+    int r, i;
+    if (last && ppc_timebase() - last < 2 * PPC_TB_HZ) return;
+    last = ppc_timebase();
+    for (r = 0; r < 2; r++) {
+        uint32_t a;
+        for (a = kRange[r][0]; a + 0x40 < kRange[r][1]; a += 4) {
+            uint32_t file, name;
+            if (LD32(a) != 0x54455830) continue; /* TEX0 */
+            file = a + LD32(a + 0xC);
+            name = a + LD32(a + 0x14);
+            if (file < kRange[r][0] || file >= a || name <= a || name >= kRange[r][1] - 32 || LD32(file) != 0x62726573)
+                continue;
+            for (i = 0; i < WANTED; i++) {
+                if (!sTex[i].tex && name_is(name, kWanted[i])) {
+                    sTex[i].tex = a;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 static const uint32_t* image(const char* name, int* w, int* h) {
     int i;
     for (i = 0; i < WANTED && strcmp(kWanted[i], name); i++) {}
-    if (i == WANTED || !sTex[i].tex || LD32(sTex[i].tex) != 0x54455830) return NULL;
+    if (i == WANTED) return NULL;
+    if (!sTex[i].tex) find_loaded();
+    if (!sTex[i].tex || LD32(sTex[i].tex) != 0x54455830) return NULL;
     if (!sTex[i].argb) sTex[i].argb = decode(sTex[i].tex, &sTex[i].w, &sTex[i].h);
     *w = sTex[i].w;
     *h = sTex[i].h;
