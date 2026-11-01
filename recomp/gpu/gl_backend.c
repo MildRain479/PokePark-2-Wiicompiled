@@ -2071,12 +2071,25 @@ int gxb_recording(void) {
 
 void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 360 : fps; }
 
+/* The frame's vertices and indices go to buffers made again each frame at
+ * a size that only grows. Made at the frame's own size, a little
+ * different every frame (24 MB of vertices in the park), the driver kept
+ * the old ones' memory: RAM and GPU memory grew by 24 MB at a time, to
+ * gigabytes. */
+static GLsizeiptr sFrameVbSize, sFrameIbSize;
+
+static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, const void* data) {
+    if (bytes > *size) *size = (bytes + bytes / 4 + 0xFFFFF) & ~(GLsizeiptr)0xFFFFF;
+    p_glBufferData(target, *size, NULL, GL_STREAM_DRAW);
+    p_glBufferSubData(target, 0, bytes, data);
+}
+
 void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
     GL_ENTER();
     p_glBindVertexArray(sVao);
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices * sizeof(GXVertex), v, GL_STREAM_DRAW);
-    p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)count * sizeof(uint32_t), index, GL_STREAM_DRAW);
+    frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize, (GLsizeiptr)vertices * sizeof(GXVertex), v);
+    frame_buffer(GL_ELEMENT_ARRAY_BUFFER, &sFrameIbSize, (GLsizeiptr)count * sizeof(uint32_t), index);
     GL_LEAVE(GLK_DRAW);
 }
 
