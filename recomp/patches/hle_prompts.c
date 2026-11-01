@@ -171,57 +171,87 @@ int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance) {
 }
 
 /* ------------------------------------------------------------------------ */
-/* The menus' button bar ("+ Skip", "1 Back", "2 Next"): its buttons are
- * pictures, in a texture named KeyButton (256x256, 8-bit colour indices
- * into 192 RGB5A3 colours) in each menu's model (lobbies, start menu,
- * pause, photos). Each button there, a silver disc in a coloured ring, is
- * redrawn as the icon for what is bound to it: a white key in the ring's
- * colour with a white edge, as the bar's words are drawn, in the colours
- * the texture has. */
+/* Buttons in pictures. The menus' button bar ("+ Skip", "1 Back", "2
+ * Next") draws its buttons from a texture named KeyButton (256x256, 8-bit
+ * colour indices into RGB5A3 colours) in each menu's model (lobbies, start
+ * menu, pause, photos); the bubble over Pikachu's head ("2 Talk", "2 Pick
+ * Up", "2 Check") from FukidashiMini (256x128) in the field menu's. Each
+ * button there is redrawn as the icon for what is bound to it, in the
+ * colours the texture has: a white key, outlined in the button's own
+ * colour (the bar's, a coloured ring) or dark grey (the bubble's, all
+ * greys), with a white edge, as the words beside it are drawn. */
 
-#define BAR_SIZE 256
-#define BAR_COLOURS 192
-#define MAX_BARS 8
-#define BAR_EDGE 2 /* the white edge around an icon */
+#define MAX_COLOURS 256
+#define MAX_PICTURES 8
+#define EDGE 2 /* the white edge around an icon */
 
-static const struct {
+typedef struct {
     int x0, y0, x1, y1; /* inclusive */
     uint32_t button;
-} kBarButton[] = {
+} Spot;
+
+static const Spot kBarSpots[] = {
     {2, 2, 38, 37, HOST_PAD_1},       {2, 42, 38, 77, HOST_PAD_2},      {1, 82, 37, 117, HOST_PAD_PLUS},
     {1, 122, 37, 157, HOST_PAD_MINUS}, {3, 164, 36, 195, HOST_PAD_B},   {2, 202, 37, 237, HOST_PAD_A},
     {42, 202, 77, 237, HOST_PAD_SCREEN_UP}, /* the d-pad */
 };
-#define BAR_BUTTONS ((int)(sizeof(kBarButton) / sizeof(kBarButton[0])))
+static const Spot kBubbleSpots[] = {
+    {10, 39, 36, 67, HOST_PAD_2}, {18, 69, 44, 97, HOST_PAD_2}, {9, 99, 35, 127, HOST_PAD_2}, /* with their glow */
+};
+
+static const struct Kind {
+    const char* name;
+    int w, h;
+    const Spot* spots;
+    int spotCount;
+    uint32_t line; /* the key's outline, 0xRRGGBB, or ~0u for the button's colour */
+} kKinds[] = {
+    {"KeyButton", 256, 256, kBarSpots, (int)(sizeof(kBarSpots) / sizeof(kBarSpots[0])), ~0u},
+    {"FukidashiMini", 256, 128, kBubbleSpots, (int)(sizeof(kBubbleSpots) / sizeof(kBubbleSpots[0])), 0x414141},
+};
+#define KINDS ((int)(sizeof(kKinds) / sizeof(kKinds[0])))
 
 typedef struct {
+    const struct Kind* kind;
     uint32_t tex, image;
-    uint8_t rgba[BAR_COLOURS][4];
-    uint8_t* original; /* the game's indices, BAR_SIZE x BAR_SIZE */
-} Bar;
+    int colours;
+    uint8_t rgba[MAX_COLOURS][4];
+    uint8_t* original; /* the game's indices, w x h */
+} Picture;
 
-static Bar sBars[MAX_BARS];
-static int sBarCount;
+static Picture sPictures[MAX_PICTURES];
+static int sPictureCount;
 
-/* A texel of an 8-bit (CI8) texture: 8x4 tiles of 32 bytes, row by row. */
-static uint32_t ci8_byte(uint32_t image, int x, int y) {
-    return image + (uint32_t)(((y / 4) * (BAR_SIZE / 8) + x / 8) * 32 + (y % 4) * 8 + x % 8);
+/* A texel of an 8-bit (CI8) texture w wide: 8x4 tiles of 32 bytes, row by row. */
+static uint32_t ci8_byte(uint32_t image, int w, int x, int y) {
+    return image + (uint32_t)(((y / 4) * (w / 8) + x / 8) * 32 + (y % 4) * 8 + x % 8);
 }
 
-/* Whether the TEX0 at tex is still a bar texture (its memory may have
- * been freed and reused). */
-static int is_bar(uint32_t tex) {
-    uint32_t name = tex + LD32(tex + 0x14);
-    return LD32(tex) == 0x54455830 && LD32(name) == 0x4B657942 && LD32(name + 4) == 0x7574746F && /* KeyButto */
-           LD8(name + 8) == 'n' && LD8(name + 9) == 0 && LD16(tex + 0x1C) == BAR_SIZE && LD16(tex + 0x1E) == BAR_SIZE &&
-           LD32(tex + 0x20) == 9; /* CI8 */
+static int name_is(uint32_t at, const char* s) {
+    for (; *s; s++, at++) {
+        if (LD8(at) != (uint8_t)*s) return 0;
+    }
+    return LD8(at) == 0;
+}
+
+/* Which kind of picture the TEX0 at tex is, if any (its memory may have
+ * been freed and reused since). */
+static const struct Kind* kind_of(uint32_t tex) {
+    int i;
+    if (LD32(tex) != 0x54455830 || LD32(tex + 0x20) != 9) return NULL; /* TEX0, CI8 */
+    for (i = 0; i < KINDS; i++) {
+        if (name_is(tex + LD32(tex + 0x14), kKinds[i].name) && LD16(tex + 0x1C) == kKinds[i].w &&
+            LD16(tex + 0x1E) == kKinds[i].h)
+            return &kKinds[i];
+    }
+    return NULL;
 }
 
 /* The colour nearest r g b a, weighing its colour by how opaque it is. */
-static int nearest(const Bar* b, int r, int g, int bl, int a) {
+static int nearest(const Picture* b, int r, int g, int bl, int a) {
     int i, best = 0;
     long bestD = -1;
-    for (i = 0; i < BAR_COLOURS; i++) {
+    for (i = 0; i < b->colours; i++) {
         const uint8_t* p = b->rgba[i];
         long da = (long)(p[3] - a) * 2, dr = p[0] - r, dg = p[1] - g, db = p[2] - bl;
         long d = da * da + (dr * dr + dg * dg + db * db) * (a + p[3]) / 510;
@@ -233,36 +263,45 @@ static int nearest(const Bar* b, int r, int g, int bl, int a) {
     return best;
 }
 
-static void draw_bar_button(Bar* b, int k) {
+static void draw_spot(Picture* b, const Spot* spot) {
     enum { MAX_BOX = 40 };
     static uint8_t cov[MAX_BOX * MAX_BOX], inside[MAX_BOX * MAX_BOX];
     static int stack[MAX_BOX * MAX_BOX];
-    int x0 = kBarButton[k].x0, y0 = kBarButton[k].y0;
-    int w = kBarButton[k].x1 - x0 + 1, h = kBarButton[k].y1 - y0 + 1;
-    int s = (w < h ? w : h) - 2 * BAR_EDGE, ox = (w - s) / 2, oy = (h - s) / 2;
-    int x, y, i, n = 0, ring = -1, count[BAR_COLOURS] = {0}, transparent;
+    int W = b->kind->w, x0 = spot->x0, y0 = spot->y0;
+    int w = spot->x1 - x0 + 1, h = spot->y1 - y0 + 1;
+    int s = (w < h ? w : h) - 2 * EDGE, ox = (w - s) / 2, oy = (h - s) / 2;
+    int x, y, i, n = 0, transparent, count[MAX_COLOURS] = {0};
+    uint8_t line[3];
     if (s <= 0 || w > MAX_BOX || h > MAX_BOX) return;
     /* On the keyboard the d-pad would be four keys too small to read here:
      * the game's cross, which says "directions" as well, stays. (The
      * generation's low bit: the controller was used last.) */
-    if (!g_host_prompt_icon || (kBarButton[k].button == HOST_PAD_SCREEN_UP && !(sGeneration & 1)) ||
-        !g_host_prompt_icon(kBarButton[k].button, cov, s, s)) {
+    if (!g_host_prompt_icon || (spot->button == HOST_PAD_SCREEN_UP && !(sGeneration & 1)) ||
+        !g_host_prompt_icon(spot->button, cov, s, s)) {
         for (y = 0; y < h; y++) {
-            for (x = 0; x < w; x++) ST8(ci8_byte(b->image, x0 + x, y0 + y), b->original[(y0 + y) * BAR_SIZE + x0 + x]);
+            for (x = 0; x < w; x++) ST8(ci8_byte(b->image, W, x0 + x, y0 + y), b->original[(y0 + y) * W + x0 + x]);
         }
         return;
     }
-    /* The ring's colour: the commonest strong one, opaque, in the game's button. */
-    for (y = 0; y < h; y++) {
-        for (x = 0; x < w; x++) count[b->original[(y0 + y) * BAR_SIZE + x0 + x]]++;
+    if (b->kind->line != ~0u) {
+        line[0] = (uint8_t)(b->kind->line >> 16);
+        line[1] = (uint8_t)(b->kind->line >> 8);
+        line[2] = (uint8_t)b->kind->line;
+    } else {
+        /* The ring's colour: the commonest strong one, opaque, in the game's button. */
+        int ring = -1;
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) count[b->original[(y0 + y) * W + x0 + x]]++;
+        }
+        for (i = 0; i < b->colours; i++) {
+            const uint8_t* p = b->rgba[i];
+            int hi = p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]);
+            int lo = p[0] < p[1] ? (p[0] < p[2] ? p[0] : p[2]) : (p[1] < p[2] ? p[1] : p[2]);
+            if (p[3] == 255 && hi - lo > 100 && (ring < 0 || count[i] > count[ring])) ring = i;
+        }
+        if (ring < 0) return;
+        memcpy(line, b->rgba[ring], 3);
     }
-    for (i = 0; i < BAR_COLOURS; i++) {
-        const uint8_t* p = b->rgba[i];
-        int hi = p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]);
-        int lo = p[0] < p[1] ? (p[0] < p[2] ? p[0] : p[2]) : (p[1] < p[2] ? p[1] : p[2]);
-        if (p[3] == 255 && hi - lo > 100 && (ring < 0 || count[i] > count[ring])) ring = i;
-    }
-    if (ring < 0) return;
     transparent = nearest(b, 0, 0, 0, 0);
     /* Inside the key: what can't be reached from the box's edge without
      * crossing its outline. */
@@ -287,41 +326,42 @@ static void draw_bar_button(Bar* b, int k) {
     }
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
-            int ix = x - ox, iy = y - oy, line = 0, white = 0, dx, dy, r, g, bl, a;
+            int ix = x - ox, iy = y - oy, ink = 0, white = 0, dx, dy, r, g, bl, a;
             if (ix >= 0 && iy >= 0 && ix < s && iy < s) {
-                line = cov[iy * s + ix];
+                ink = cov[iy * s + ix];
                 if (inside[iy * s + ix]) white = 255;
             }
-            /* The edge: the key, grown by BAR_EDGE. */
-            for (dy = -BAR_EDGE; dy <= BAR_EDGE; dy++) {
-                for (dx = -BAR_EDGE; dx <= BAR_EDGE; dx++) {
+            /* The edge: the key, grown by EDGE. */
+            for (dy = -EDGE; dy <= EDGE; dy++) {
+                for (dx = -EDGE; dx <= EDGE; dx++) {
                     int jx = ix + dx, jy = iy + dy, v;
-                    if (dx * dx + dy * dy > BAR_EDGE * BAR_EDGE + 1 || jx < 0 || jy < 0 || jx >= s || jy >= s) continue;
+                    if (dx * dx + dy * dy > EDGE * EDGE + 1 || jx < 0 || jy < 0 || jx >= s || jy >= s) continue;
                     v = inside[jy * s + jx] ? 255 : cov[jy * s + jx];
                     if (v > white) white = v;
                 }
             }
-            /* Solid or clear: the texture's part-clear colours are the ring's,
+            /* Solid or clear: the bar's part-clear colours are the ring's,
              * which would fringe the white edge. */
-            a = line > white ? line : white;
+            a = ink > white ? ink : white;
             a = a >= 96 ? 255 : 0;
-            r = (255 * (255 - line) + b->rgba[ring][0] * line) / 255;
-            g = (255 * (255 - line) + b->rgba[ring][1] * line) / 255;
-            bl = (255 * (255 - line) + b->rgba[ring][2] * line) / 255;
-            ST8(ci8_byte(b->image, x0 + x, y0 + y), (uint8_t)(a ? nearest(b, r, g, bl, a) : transparent));
+            r = (255 * (255 - ink) + line[0] * ink) / 255;
+            g = (255 * (255 - ink) + line[1] * ink) / 255;
+            bl = (255 * (255 - ink) + line[2] * ink) / 255;
+            ST8(ci8_byte(b->image, W, x0 + x, y0 + y), (uint8_t)(a ? nearest(b, r, g, bl, a) : transparent));
         }
     }
 }
 
-static void draw_bars(void) {
+static void draw_pictures(void) {
     int i, k;
-    for (i = 0; i < sBarCount; i++) {
-        if (!is_bar(sBars[i].tex)) { /* gone */
-            free(sBars[i].original);
-            sBars[i--] = sBars[--sBarCount];
+    for (i = 0; i < sPictureCount; i++) {
+        Picture* b = &sPictures[i];
+        if (kind_of(b->tex) != b->kind) { /* gone */
+            free(b->original);
+            sPictures[i--] = sPictures[--sPictureCount];
             continue;
         }
-        for (k = 0; k < BAR_BUTTONS; k++) draw_bar_button(&sBars[i], k);
+        for (k = 0; k < b->kind->spotCount; k++) draw_spot(b, &b->kind->spots[k]);
     }
 }
 
@@ -329,36 +369,36 @@ static void draw_bars(void) {
  * set up after loading. */
 void f_801B3090(ppc_t* c) {
     uint32_t tex = c->r[3] ? LD32(c->r[3]) : 0, file, size, pos, plt = 0, pal;
-    Bar* b;
+    const struct Kind* kind;
+    Picture* b;
     int i, x, y;
     f_801B3090_orig(c);
     if (tex) hle_pause_texture(tex);
-    if (!tex || !is_bar(tex)) return;
-    for (i = 0; i < sBarCount; i++) {
-        if (sBars[i].tex == tex) break;
+    if (!tex || !(kind = kind_of(tex))) return;
+    for (i = 0; i < sPictureCount; i++) {
+        if (sPictures[i].tex == tex) break;
     }
-    if (i == sBarCount) {
+    if (i == sPictureCount) {
         /* Its colours: the PLT0 of the same name, in the same file. */
         file = tex + LD32(tex + 0xC);
         if (LD32(file) != 0x62726573) return; /* bres */
         size = LD32(file + 8);
         for (pos = file; pos + 0x20 <= file + size; pos += 4) {
-            if (LD32(pos) == 0x504C5430) { /* PLT0 */
-                uint32_t name = pos + LD32(pos + 0x14);
-                if (LD32(name) == 0x4B657942 && LD32(name + 4) == 0x7574746F && LD8(name + 8) == 'n' && !LD8(name + 9)) {
-                    plt = pos;
-                    break;
-                }
+            if (LD32(pos) == 0x504C5430 && name_is(pos + LD32(pos + 0x14), kind->name)) { /* PLT0 */
+                plt = pos;
+                break;
             }
         }
-        if (!plt || LD32(plt + 0x18) != 2 || LD16(plt + 0x1C) < BAR_COLOURS || sBarCount == MAX_BARS) return;
-        b = &sBars[sBarCount];
-        b->original = (uint8_t*)malloc(BAR_SIZE * BAR_SIZE);
+        if (!plt || LD32(plt + 0x18) != 2 || sPictureCount == MAX_PICTURES) return;
+        b = &sPictures[sPictureCount];
+        b->original = (uint8_t*)malloc((size_t)kind->w * kind->h);
         if (!b->original) return;
+        b->kind = kind;
         b->tex = tex;
         b->image = tex + LD32(tex + 0x10);
+        b->colours = LD16(plt + 0x1C) < MAX_COLOURS ? LD16(plt + 0x1C) : MAX_COLOURS;
         pal = plt + LD32(plt + 0x10);
-        for (x = 0; x < BAR_COLOURS; x++) {
+        for (x = 0; x < b->colours; x++) {
             uint16_t v = LD16(pal + 2 * x);
             uint8_t* p = b->rgba[x];
             if (v & 0x8000) {
@@ -373,28 +413,28 @@ void f_801B3090(ppc_t* c) {
                 p[3] = (uint8_t)((v >> 12 & 7) * 255 / 7);
             }
         }
-        sBarCount++;
-        HLE_LOG("prompts: button bar texture %08X", tex);
+        sPictureCount++;
+        HLE_LOG("prompts: %s texture %08X", kind->name, tex);
     }
     /* Loaded again (or for the first time): as the game has it. */
-    b = &sBars[i];
-    for (y = 0; y < BAR_SIZE; y++) {
-        for (x = 0; x < BAR_SIZE; x++) b->original[y * BAR_SIZE + x] = LD8(ci8_byte(b->image, x, y));
+    b = &sPictures[i];
+    for (y = 0; y < kind->h; y++) {
+        for (x = 0; x < kind->w; x++) b->original[y * kind->w + x] = LD8(ci8_byte(b->image, kind->w, x, y));
     }
     sGeneration = 0xFFFFFFFFu; /* draw it */
 }
 
-/* Redraws the glyphs and the bars if what they should show has changed.
+/* Redraws the glyphs and the pictures if what they should show has changed.
  * Called on each report of the remote (hle_wpad.c). */
 void hle_prompts_update(void) {
     uint32_t gen;
     int i;
-    if ((!sFontCount && !sBarCount) || !g_host_prompt_generation) return;
+    if ((!sFontCount && !sPictureCount) || !g_host_prompt_generation) return;
     gen = g_host_prompt_generation();
     if (gen == sGeneration) return;
     sGeneration = gen;
     for (i = 0; i < sFontCount; i++) draw_icons(&sFonts[i]);
-    draw_bars();
+    draw_pictures();
 }
 
 /* void ResFontBase::SetResourceBuffer(void* font, FontInformation*): a
