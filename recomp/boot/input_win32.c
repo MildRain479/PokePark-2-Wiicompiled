@@ -25,6 +25,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "host_input.h"
 #include "host_settings.h"
 
@@ -225,7 +228,16 @@ static uint32_t controller(uint32_t b, uint32_t stick) {
  * let go, nothing reaches the game: not the press that closed it. */
 static int sControllerLast;
 
-int input_controller_last(void) { return sControllerLast; }
+/* RECOMP_PROMPTS=controller: as if the controller had been used last (for
+ * test runs, whose scripted input is no device's). */
+int input_controller_last(void) {
+    static int forced = -1;
+    if (forced < 0) {
+        const char* e = getenv("RECOMP_PROMPTS");
+        forced = e && !strcmp(e, "controller");
+    }
+    return forced || sControllerLast;
+}
 
 static int read_pad(int chan, uint32_t* held) {
     static int menuHeld;
