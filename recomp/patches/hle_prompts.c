@@ -32,6 +32,7 @@ typedef struct {
     uint32_t font, sheets;
     int cw, ch, baseline, sheetSize, perRow, perSheet, sheetWidth, fmt;
     int glyph[ICONS];          /* glyph index, or -1 */
+    int width[ICONS];          /* how much of its cell is drawn, from the left */
     uint8_t* original[ICONS];  /* the game's pixels, 0-15 per pixel, cw x ch */
 } Font;
 
@@ -101,10 +102,13 @@ static void draw_icons(Font* f) {
                 for (x = 0; x < f->cw; x++) f->original[i][y * f->cw + x] = (uint8_t)get_px(f, sheet, x0 + x, y0 + y);
             }
         }
-        /* Square, up to the baseline, as the Wii's glyphs sit. */
-        s = f->baseline < f->cw ? f->baseline : f->cw;
+        /* Square, up to the baseline, as the Wii's glyphs sit, and within
+         * the part of the cell that's drawn (its glyph width, 35 of 40
+         * columns in the game's font): wide icons, like the space bar's,
+         * would lose their right edge past it. */
+        s = f->baseline < f->width[i] ? f->baseline : f->width[i];
         s -= 2;
-        ox = (f->cw - s) / 2;
+        ox = (f->width[i] - s) / 2;
         oy = f->baseline - s - 1;
         if (oy < 0) oy = 0;
         if (s > 0 && s * s <= MAX_CELL && g_host_prompt_icon) drew = g_host_prompt_icon(kButton[i], cov, s, s);
@@ -125,9 +129,9 @@ static void draw_icons(Font* f) {
 /* The game's text font, for menus drawn over the picture (menu_win32.c):
  * the first font loaded with the button glyphs, the one messages use. */
 
-/* A glyph's widths (CWDH): where its pixels start and how far the pen
- * moves; 0 if it has none. */
-static int glyph_widths(const Font* f, int glyph, int* left, int* advance) {
+/* A glyph's widths (CWDH): where its pixels start, how many columns of its
+ * cell are drawn, and how far the pen moves; 0 if it has none. */
+static int glyph_widths(const Font* f, int glyph, int* left, int* width, int* advance) {
     uint32_t size = LD32(f->font + 8), pos;
     for (pos = f->font + LD16(f->font + 0xC); pos + 8 <= f->font + size; pos += LD32(pos + 4)) {
         if (LD32(pos + 4) < 8) break;
@@ -136,6 +140,7 @@ static int glyph_widths(const Font* f, int glyph, int* left, int* advance) {
             if (glyph >= first && glyph <= last) {
                 uint32_t e = pos + 0x10 + 3 * (uint32_t)(glyph - first);
                 *left = (int8_t)LD8(e);
+                *width = LD8(e + 1);
                 *advance = LD8(e + 2);
                 return 1;
             }
@@ -154,9 +159,9 @@ int hle_font_metrics(int* cellW, int* cellH, int* baseline) {
 
 int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance) {
     const Font* f = &sFonts[0];
-    int glyph, sheet, x0, y0, x, y;
+    int glyph, sheet, x0, y0, x, y, width;
     if (!sFontCount || (glyph = glyph_of(f->font, LD32(f->font + 8), code)) < 0 ||
-        !glyph_widths(f, glyph, left, advance))
+        !glyph_widths(f, glyph, left, &width, advance))
         return 0;
     cell_of(f, glyph, &sheet, &x0, &y0);
     for (y = 0; y < f->ch; y++) {
@@ -425,8 +430,14 @@ void f_801FA730(ppc_t* c) {
     f->sheets = image >= 0x80000000u ? image : base + image;
     if (f->fmt != 0 || f->cw * f->ch > MAX_CELL || !f->perSheet) return; /* I4 only */
     for (i = 0; i < ICONS; i++) {
+        int left, width, advance;
         f->glyph[i] = glyph_of(base, size, (uint16_t)(FIRST_ICON + i));
-        if (f->glyph[i] >= 0) have = 1;
+        f->width[i] = f->cw;
+        if (f->glyph[i] >= 0) {
+            have = 1;
+            if (glyph_widths(f, f->glyph[i], &left, &width, &advance) && width > 0 && width < f->cw)
+                f->width[i] = width;
+        }
     }
     if (!have) return;
     sFontCount++;
