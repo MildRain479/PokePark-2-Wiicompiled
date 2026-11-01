@@ -117,7 +117,7 @@ def build_msvc(common, targets, opt):
             exe = os.path.join(OUT, name + ".exe")
             libs = " ".join(LIBS.get(name, []))
             ltcg = "/LTCG" if "/GL" in opt else ""
-            f.write(f'link /nologo /DEBUG /MANIFEST:EMBED {ltcg} /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
+            f.write(f'link /nologo /DEBUG /PDBALTPATH:%%_PDB%% /MANIFEST:EMBED {ltcg} /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
     subprocess.check_call(["cmd", "/c", bat])
 
 
@@ -146,7 +146,7 @@ def pgo(train):
     def link(mode, exe):
         with open(bat, "w") as f:
             f.write(f'@call "{vcvars()}" >nul 2>nul\n')
-            f.write(f'link /nologo /DEBUG /MANIFEST:EMBED /LTCG:{mode} /PGD:"{pgd}" /OUT:"{exe}" {objs} {libs} '
+            f.write(f'link /nologo /DEBUG /PDBALTPATH:%%_PDB%% /MANIFEST:EMBED /LTCG:{mode} /PGD:"{pgd}" /OUT:"{exe}" {objs} {libs} '
                     "|| exit /b 1\n")
         subprocess.check_call(["cmd", "/c", bat])
 
