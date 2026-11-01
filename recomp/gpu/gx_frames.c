@@ -14,6 +14,7 @@
  *
  * A draw is recognized across frames by its key (gx_fifo.c: its display
  * lists and their draws) and, among draws with the same key, by position
+ * once the camera's motion is taken out
  * (match_draws). Blended are the position, normal and texture matrices,
  * the post-transform matrices, the projection and the lights' position
  * and direction: everything that moves with the camera or the model. A
@@ -232,18 +233,147 @@ static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) 
     return d;
 }
 
+/* A draw's position matrix (MATINDEX_A's), 3x4, in its XF state. */
+static const uint32_t* pos_matrix(const uint32_t* xf) {
+    return xf + 4 * (xf[GX_XF_MEM_WORDS + 0x18] & 0x3F) % 0x100;
+}
+
+static int perspective(const uint32_t* xf) { return xf[GX_XF_MEM_WORDS + 0x26] == 0; }
+
+/* 3x4 matrices (rows of rotation and scale, then translation), as floats. */
+typedef struct { float m[3][4]; } Mtx34;
+
+static int load_mtx(Mtx34* out, const uint32_t* w) {
+    int i;
+    for (i = 0; i < 12; i++) {
+        float f;
+        memcpy(&f, &w[i], 4);
+        if (!(f == f) || fabsf(f) > 1e7f) return 0;
+        out->m[i / 4][i % 4] = f;
+    }
+    return 1;
+}
+
+/* out = a * b, as affine transforms. */
+static void mtx_mul(Mtx34* out, const Mtx34* a, const Mtx34* b) {
+    Mtx34 r;
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 4; j++) {
+            r.m[i][j] = a->m[i][0] * b->m[0][j] + a->m[i][1] * b->m[1][j] + a->m[i][2] * b->m[2][j] + (j == 3 ? a->m[i][3] : 0);
+        }
+    }
+    *out = r;
+}
+
+static int mtx_inverse(Mtx34* out, const Mtx34* a) {
+    const float(*m)[4] = a->m;
+    float c[3][3], det;
+    int i, j;
+    c[0][0] = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+    c[0][1] = m[0][2] * m[2][1] - m[0][1] * m[2][2];
+    c[0][2] = m[0][1] * m[1][2] - m[0][2] * m[1][1];
+    c[1][0] = m[1][2] * m[2][0] - m[1][0] * m[2][2];
+    c[1][1] = m[0][0] * m[2][2] - m[0][2] * m[2][0];
+    c[1][2] = m[0][2] * m[1][0] - m[0][0] * m[1][2];
+    c[2][0] = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    c[2][1] = m[0][1] * m[2][0] - m[0][0] * m[2][1];
+    c[2][2] = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    det = m[0][0] * c[0][0] + m[0][1] * c[1][0] + m[0][2] * c[2][0];
+    if (fabsf(det) < 1e-12f) return 0;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++) out->m[i][j] = c[i][j] / det;
+        out->m[i][3] = -(out->m[i][0] * m[0][3] + out->m[i][1] * m[1][3] + out->m[i][2] * m[2][3]);
+    }
+    return 1;
+}
+
+static int mtx_close(const Mtx34* a, const Mtx34* b) {
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++) {
+            if (fabsf(a->m[i][j] - b->m[i][j]) > 0.02f) return 0;
+        }
+        if (fabsf(a->m[i][3] - b->m[i][3]) > 2.0f + 0.02f * fabsf(b->m[i][3])) return 0;
+    }
+    return 1;
+}
+
+/* How the camera moved from sPrev to sCur: what takes a still object's
+ * position matrix in the one to its matrix in the other (the view matrix
+ * of sCur times the inverse of sPrev's). Found from draws of the 3D scene
+ * with a key only one draw has, the transform most of them agree on (the
+ * ground, trees and the like stand still; Pokémon don't). Identity if no
+ * clear answer. */
+static Mtx34 sCamera;
+static int sCameraValid;
+
+static void camera_motion(const int* uniqueMatch) {
+    enum { SAMPLES = 48 };
+    Mtx34 d[SAMPLES];
+    int n = 0, i, k, best = -1, bestVotes = 0, step;
+    int total = 0;
+    for (i = 0; i < sCur->count; i++) total += uniqueMatch[i] >= 0;
+    step = total / SAMPLES + 1;
+    for (i = 0, k = 0; i < sCur->count && n < SAMPLES; i++) {
+        const uint32_t *cur, *prev;
+        Mtx34 c, p, pi;
+        if (uniqueMatch[i] < 0 || k++ % step) continue;
+        cur = sCur->xf + sCur->ops[i].xf;
+        prev = sPrev->xf + sPrev->ops[uniqueMatch[i]].xf;
+        if (!perspective(cur) || !perspective(prev)) continue;
+        if (!load_mtx(&c, pos_matrix(cur)) || !load_mtx(&p, pos_matrix(prev)) || !mtx_inverse(&pi, &p)) continue;
+        mtx_mul(&d[n++], &c, &pi);
+    }
+    for (i = 0; i < n; i++) {
+        int votes = 0;
+        for (k = 0; k < n; k++) votes += mtx_close(&d[i], &d[k]);
+        if (votes > bestVotes) {
+            bestVotes = votes;
+            best = i;
+        }
+    }
+    sCameraValid = best >= 0 && bestVotes >= 3 && bestVotes * 3 >= n;
+    if (sCameraValid) sCamera = d[best];
+}
+
+static float wordf(uint32_t w);
+
+/* How far apart a draw of sPrev, moved as the camera moved, and one of
+ * sCur are: their position matrices' translations. */
+static float camera_distance(const uint32_t* prev, const uint32_t* cur) {
+    const uint32_t *p = pos_matrix(prev), *c = pos_matrix(cur);
+    float t[3], d = 0;
+    int i;
+    t[0] = wordf(p[3]);
+    t[1] = wordf(p[7]);
+    t[2] = wordf(p[11]);
+    for (i = 0; i < 3; i++) {
+        const float* r = sCamera.m[i];
+        d += fabsf(r[0] * t[0] + r[1] * t[1] + r[2] * t[2] + r[3] - wordf(c[4 * i + 3]));
+    }
+    return d == d ? d : 1e30f;
+}
+
+static float draw_distance(const uint32_t* prev, const uint32_t* cur, float limit) {
+    if (sCameraValid && perspective(prev) && perspective(cur)) return camera_distance(prev, cur);
+    return matrix_distance(prev, cur, limit);
+}
+
 /* Pairs each draw of sCur with the same draw of sPrev: of the first few
- * not yet taken with the same key, the one nearest. (Draws of one key can
- * change order between frames: the save files screen's panels and the
- * prism piece slots on them do, 28 of those, and taken in order they
- * swapped places.) */
+ * not yet taken with the same key, the one nearest, once moved as the
+ * camera moved. (Draws of one key can change order between frames: the
+ * save files screen's panels and the prism piece slots on them do, 28 of
+ * those, and taken in order they swapped places. Nearest without the
+ * camera's motion, a row of crates matched each crate with its neighbour
+ * whenever the camera moved further in a frame than they stand apart.) */
 static void match_draws(void) {
     enum { CANDIDATES = 48 };
     enum { SLOTS = 8192 };
     static uint64_t keys[SLOTS];
     static uint8_t used[SLOTS];
-    static int head[SLOTS], *next;
-    static int nextCap;
+    static int head[SLOTS], *next, *unique;
+    static int nextCap, uniqueCap;
     int i;
     memset(used, 0, sizeof(used));
     if (sPrev->count > nextCap) {
@@ -264,6 +394,20 @@ static void match_draws(void) {
         next[i] = head[slot];
         head[slot] = i;
     }
+    /* Draws whose key only one draw of sPrev has, for the camera's motion. */
+    if (sCur->count > uniqueCap) {
+        uniqueCap = sCur->count * 2;
+        unique = (int*)realloc(unique, (size_t)uniqueCap * sizeof(int));
+    }
+    for (i = 0; i < sCur->count; i++) {
+        uint64_t k = sCur->ops[i].st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        unique[i] = -1;
+        if (sCur->ops[i].op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (used[slot] && head[slot] >= 0 && next[head[slot]] < 0) unique[i] = head[slot];
+    }
+    camera_motion(unique);
     for (i = 0; i < sCur->count; i++) {
         RecOp* r = &sCur->ops[i];
         uint64_t k = r->st.key;
@@ -275,10 +419,10 @@ static void match_draws(void) {
             const uint32_t* xf = sCur->xf + r->xf;
             int* link = &head[slot];
             int* best = link;
-            float bestD = next[*link] < 0 ? 0 : matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, 1e30f);
+            float bestD = next[*link] < 0 ? 0 : draw_distance(sPrev->xf + sPrev->ops[*link].xf, xf, 1e30f);
             int n;
             for (n = 1, link = &next[*link]; n < CANDIDATES && *link >= 0 && bestD > 0; n++, link = &next[*link]) {
-                float d = matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, bestD);
+                float d = draw_distance(sPrev->xf + sPrev->ops[*link].xf, xf, bestD);
                 if (d < bestD) {
                     bestD = d;
                     best = link;

@@ -366,9 +366,11 @@ runs unchanged.
     game waits, each draw's matrices (position, normal, texture,
     post-transform, projection, lights) blended from those of the same
     draw in the frame before. Draws are matched by their display lists
-    and their place in them; a matrix that changed too much to be the
-    same object moving is shown as it is. Shown frames run one game frame
-    (16.7 ms) behind. The in-between frames are drawn only while the game
+    and their place in them, and draws alike (a row of crates) by where
+    they stand once the camera's motion is taken out; a matrix that
+    changed too much to be the same object moving is shown as it is.
+    Shown frames run one game frame (16.7 ms) behind. The
+    in-between frames are drawn only while the game
     waits, so at 240 fps their spacing varies (4-12 ms); a render thread
     would even it out.
 
