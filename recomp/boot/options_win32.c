@@ -40,9 +40,10 @@ int gxb_display_hz(void);
 enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS };
 static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller", "Gameplay"};
 
-/* A row: a setting (settings_step), a binding (an action), or resetting the
- * controls. */
-enum { ROW_SETTING, ROW_BINDING, ROW_RESET };
+/* A row: a setting (settings_step), a binding (an action), resetting the
+ * controls, or closing the game (selected twice, as unsaved progress is
+ * lost). */
+enum { ROW_SETTING, ROW_BINDING, ROW_RESET, ROW_CLOSE };
 typedef struct {
     int kind, which;
     const char* label;
@@ -52,6 +53,7 @@ static const Row kDisplay[] = {
     {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"}, {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
     {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
+    {ROW_CLOSE, 0, "Close game"},
 };
 static const Row kGameplay[] = {
     {ROW_SETTING, SET_TEXT_SPEED, "Text speed"},
@@ -160,6 +162,10 @@ int options_is_open(void) { return sOpen; }
 
 static void changed(void) { sChanges++; }
 
+/* "Close game" was selected once, and nothing has changed since. */
+static unsigned sCloseArmed = ~0u;
+static int close_armed(void) { return sCloseArmed == sChanges; }
+
 /* Whether what it opens from is showing. */
 static int shown(int from) { return from == FROM_PAD ? hle_pause_main_page() : hle_file_select_shown(); }
 
@@ -236,6 +242,11 @@ static void select_(void) {
         settings_step(r.which, 1);
     } else if (r.kind == ROW_BINDING) {
         sCapture = sSection == SEC_CONTROLLER ? CAPTURE_PAD : CAPTURE_KEY;
+    } else if (r.kind == ROW_CLOSE) {
+        if (close_armed()) exit(0); /* as closing the window does */
+        changed();
+        sCloseArmed = sChanges;
+        return;
     } else {
         settings_default_controls();
         settings_save();
@@ -639,6 +650,8 @@ static void draw_book(void) {
                 draw_image(arrow, aw, ah, kArrow, l, 0xFFFFFF, 0);
                 draw_image(arrow, aw, ah, kArrow, rr, 0xFFFFFF, 1);
             }
+        } else if (r.kind == ROW_CLOSE) {
+            if (close_armed()) draw_text("Again to close", 1190, my + 2, 34, ALIGN_CENTRE, WAIT, 0, 0, 1, 230);
         } else if (r.kind == ROW_BINDING) {
             int k;
             for (k = 0; k < BIND_SLOTS; k++) {
