@@ -16,6 +16,7 @@
  *   RECOMP_GX_HIDDEN=1         do not show the window
  *   RECOMP_GX_DUMP=<dir>       write presented frames as BMP files
  *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30)
+ *   RECOMP_GX_DUMP_FROM=n      ...from the nth on (default 0)
  *   RECOMP_GL_PRESENT=swapbuffers  present with SwapBuffers, not DXGI (see "Presenting")
  *   RECOMP_GL_DEBUG=1          debug context, printing the driver's error messages */
 #include <math.h>
@@ -622,6 +623,7 @@ static int sMsDirty;
 static GLuint sWhite;
 static const char* sDumpDir;
 static int sDumpEvery = 30;
+static unsigned sDumpFrom;
 static unsigned sPresented;
 /* The settings as applied. */
 static int sScale, sMsaa = 1, sMaxSamples = 1, sFullscreen, sHidden;
@@ -1029,6 +1031,7 @@ void gxb_init(void) {
     }
     sDumpDir = getenv("RECOMP_GX_DUMP");
     if ((v = getenv("RECOMP_GX_DUMP_EVERY")) && atoi(v) > 0) sDumpEvery = atoi(v);
+    if ((v = getenv("RECOMP_GX_DUMP_FROM")) && atoi(v) > 0) sDumpFrom = (unsigned)atoi(v);
 
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = wnd_proc;
@@ -1646,14 +1649,14 @@ static void present_output(int x, int y, int cw, int ch) {
             p_glBindVertexArray(sVao);
         }
     }
-    if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0 && !sChain) {
+    if (sDumpDir && sPresented >= sDumpFrom && sPresented % (unsigned)sDumpEvery == 0 && !sChain) {
         char path[512];
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
         dump_bmp(path, w, h);
     }
     window_present(w, h);
-    if (sDumpDir && sPresented % (unsigned)sDumpEvery == 0 && sChain) {
+    if (sDumpDir && sPresented >= sDumpFrom && sPresented % (unsigned)sDumpEvery == 0 && sChain) {
         char path[512];
         snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
         dump_shared(path);
@@ -1788,12 +1791,13 @@ static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int 
     r->a[3] = count;
 }
 
-/* How far apart two draws' position matrices are (the first 10 of XF
- * memory): the sum of their words' differences, or at least limit. */
+/* How far apart two draws are: the sum of the differences of their
+ * position matrices' translations (the first 10 matrices of XF memory),
+ * or at least limit. */
 static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) {
     float d = 0;
     int i;
-    for (i = 0; i < 120 && d < limit; i++) {
+    for (i = 3; i < 120 && d < limit; i += 4) {
         float x, y;
         if (a[i] == b[i]) continue;
         memcpy(&x, &a[i], 4);
@@ -1804,11 +1808,12 @@ static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) 
 }
 
 /* Pairs each draw of sCur with the same draw of sPrev: of the first few
- * not yet taken with the same key, the one whose matrices are nearest.
- * (Draws of one key can change order between frames: the save files
- * screen's panels do, and taken in order they swapped places.) */
+ * not yet taken with the same key, the one nearest. (Draws of one key can
+ * change order between frames: the save files screen's panels and the
+ * prism piece slots on them do, 28 of those, and taken in order they
+ * swapped places.) */
 static void match_draws(void) {
-    enum { CANDIDATES = 8 };
+    enum { CANDIDATES = 48 };
     enum { SLOTS = 8192 };
     static uint64_t keys[SLOTS];
     static uint8_t used[SLOTS];
