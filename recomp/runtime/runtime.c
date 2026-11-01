@@ -38,7 +38,9 @@ static const struct {
 int ppc_mem_init(void) {
     size_t i;
 #ifdef _WIN32
-    g_mem = (uint8_t*)VirtualAlloc(NULL, GUEST_SPACE, MEM_RESERVE, PAGE_NOACCESS);
+    /* Written pages are tracked (write watch) so the GPU code can tell
+     * which textures may have changed (gx_fifo.c). */
+    g_mem = (uint8_t*)VirtualAlloc(NULL, GUEST_SPACE, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
     if (!g_mem) return -1;
     for (i = 0; i < sizeof(kRegions) / sizeof(kRegions[0]); i++) {
         if (!VirtualAlloc(g_mem + kRegions[i].base, kRegions[i].size, MEM_COMMIT, PAGE_READWRITE)) return -1;

@@ -20,6 +20,11 @@
 
 #include "gx.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #define LOG(...) do { if (sLog) { fprintf(stderr, "gx: " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
 /* Pixel-engine interrupts, raised when the commands that request them are
@@ -102,10 +107,17 @@ static void fifo_append(uint32_t value, int size) {
     if (sFifoLen >= sNeed) gx_flush();
 }
 
+/* Big-endian reads, as one load and a byte swap (ppc.h). */
 static uint32_t rd32(const uint8_t* p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return BSWAP32(v);
 }
-static uint16_t rd16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static uint16_t rd16(const uint8_t* p) {
+    uint16_t v;
+    memcpy(&v, p, 2);
+    return BSWAP16(v);
+}
 
 /* ------------------------------------------------------------------------ */
 /* Vertex formats */
@@ -323,11 +335,21 @@ static void read_floats(GXVertex* v, int count, const uint8_t* p, int vsize, int
                         float scale, int n, size_t field) {
     uint32_t base = cp[0xA0 + array] & 0x3FFFFFFF, stride = cp[0xB0 + array] & 0xFF;
     int i, k;
+    /* The kind of source (in the vertex, or indexed) chosen once for all
+     * the vertices, not for each. */
 #define EACH(expr)                                                                                          \
-    for (i = 0; i < count; i++) {                                                                           \
-        const uint8_t* src = ATTR_SRC(i);                                                                   \
-        float* d = (float*)((uint8_t*)&v[i] + field);                                                       \
-        for (k = 0; k < n; k++) d[k] = (expr);                                                              \
+    if (type == ATTR_DIRECT) {                                                                              \
+        const uint8_t* src = p + off;                                                                       \
+        for (i = 0; i < count; i++, src += vsize) {                                                         \
+            float* d = (float*)((uint8_t*)&v[i] + field);                                                   \
+            for (k = 0; k < n; k++) d[k] = (expr);                                                          \
+        }                                                                                                   \
+    } else {                                                                                                \
+        for (i = 0; i < count; i++) {                                                                       \
+            const uint8_t* src = ATTR_SRC(i);                                                               \
+            float* d = (float*)((uint8_t*)&v[i] + field);                                                   \
+            for (k = 0; k < n; k++) d[k] = (expr);                                                          \
+        }                                                                                                   \
     }
     switch (fmt) {
     case 0: EACH(src[k] * scale) break;
@@ -347,7 +369,12 @@ static void read_colors(GXVertex* v, int count, const uint8_t* p, int vsize, int
                         int which) {
     uint32_t base = cp[0xA0 + array] & 0x3FFFFFFF, stride = cp[0xB0 + array] & 0xFF;
     int i;
-    for (i = 0; i < count; i++) read_color(ATTR_SRC(i), fmt, v[i].color[which]);
+    if (type == ATTR_DIRECT) {
+        const uint8_t* src = p + off;
+        for (i = 0; i < count; i++, src += vsize) read_color(src, fmt, v[i].color[which]);
+    } else {
+        for (i = 0; i < count; i++) read_color(ATTR_SRC(i), fmt, v[i].color[which]);
+    }
 }
 
 /* Reads count vertices of format f from p into v, which hold the defaults
@@ -400,8 +427,66 @@ static long sDebugFrame; /* defined with its value below */
 typedef struct TexEntry {
     uint64_t key;
     uint32_t handle, hash;
-    uint64_t checked;
+    uint32_t image_hash; /* of the texture's memory alone, without its palette */
+    uint64_t checked, hashed; /* the frames it was last looked at, and hashed */
 } TexEntry;
+
+/* Which pages (4 KB) of MEM1 and MEM2 have been written, and when: the
+ * frame after the write, as Windows' write watch reports them at each
+ * frame's start. A texture is hashed again only when its memory has been
+ * written since it last was; most never are, and hashing every texture
+ * every frame took 4% of the time in the park. */
+#define MEM1_PAGES (0x01800000u >> 12)
+#define MEM2_PAGES (0x04000000u >> 12)
+static uint32_t sPageWritten[MEM1_PAGES + MEM2_PAGES];
+static int sWriteWatch = -1; /* whether it works: 1, 0, or -1 not yet known */
+
+static int page_of(uint32_t phys) {
+    if (phys < 0x01800000u) return (int)(phys >> 12);
+    if (phys - 0x10000000u < 0x04000000u) return (int)(MEM1_PAGES + ((phys - 0x10000000u) >> 12));
+    return -1;
+}
+
+/* At each frame's start: the pages written since the last. */
+static void note_writes(uint32_t frame) {
+#ifdef _WIN32
+    static void* pages[4096];
+    static const uint32_t kRange[2][2] = {{0x00000000u, 0x01800000u}, {0x10000000u, 0x04000000u}};
+    int r;
+    if (sWriteWatch == 0) return;
+    for (r = 0; r < 2; r++) {
+        uint8_t* base = g_mem + kRange[r][0];
+        for (;;) {
+            ULONG_PTR count = sizeof(pages) / sizeof(pages[0]), i;
+            ULONG granularity;
+            if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, base, kRange[r][1], pages, &count, &granularity) != 0) {
+                sWriteWatch = 0; /* memory without write watch: hash every frame */
+                return;
+            }
+            sWriteWatch = 1;
+            for (i = 0; i < count; i++) {
+                int pg = page_of(kRange[r][0] + (uint32_t)((uint8_t*)pages[i] - base));
+                if (pg >= 0) sPageWritten[pg] = frame;
+            }
+            if (count < sizeof(pages) / sizeof(pages[0])) break;
+        }
+    }
+#else
+    (void)frame;
+    sWriteWatch = 0;
+#endif
+}
+
+/* Whether guest memory [addr, addr + size) may have been written since frame. */
+static int written_since(uint32_t addr, int size, uint64_t frame) {
+    uint32_t phys = addr & 0x3FFFFFFFu, end = phys + (uint32_t)size - 1;
+    int a = page_of(phys), b = page_of(end), i;
+    if (sWriteWatch != 1 || a < 0 || b < 0 || b - a != (int)((end >> 12) - (phys >> 12))) return 1;
+    for (i = a; i <= b; i++) {
+        if (sPageWritten[i] > (uint32_t)frame) return 1;
+    }
+    return 0;
+}
 #define TEX_CACHE 4096
 #define TEX_WAYS 4
 static TexEntry sTexCache[TEX_CACHE];
@@ -581,7 +666,17 @@ static uint32_t texture_for_map(int map) {
         }
     }
     if (e->handle && e->key == key && e->checked == sFrame) return e->handle;
-    h = hash_bytes(MA(addr), size);
+    {
+        uint32_t image;
+        if (e->handle && e->key == key && !written_since(addr, size, e->hashed)) {
+            image = e->image_hash;
+        } else {
+            image = hash_bytes(MA(addr), size);
+            e->hashed = sFrame;
+        }
+        e->image_hash = image;
+        h = image;
+    }
     if (fmt >= 8 && fmt <= 10) h ^= hash_bytes(&tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], fmt == 8 ? 32 : 512);
     if (e->key != key || e->hash != h || !e->handle) {
         uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 4);
@@ -1000,6 +1095,7 @@ static void efb_copy(uint32_t exec) {
         sBatchVerts = sIndexCount = sBatchFirst = sIndexFirst = 0;
         sKeepFrame = gxb_recording();
         sFrame++;
+        note_writes((uint32_t)sFrame);
         sDrawCount = sVertexCount = 0;
         sStateDirty = 1; /* textures are checked again each frame */
     } else {
