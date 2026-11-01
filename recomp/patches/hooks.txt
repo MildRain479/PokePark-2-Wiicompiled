@@ -68,3 +68,5 @@
 0x80171630 SceneSpecializerPark::RunBegin  # hle_game.c: entering a minigame for testing
 0x8016C950 SceneManager::fn_8016C950  # hle_game.c: no second switch to Hold after leaving Strap early
 0x801081C0 resident_messageId_to_string  # hle_text.c: minigame instructions for the PC controls
+0x80109630 fn_80109630  # hle_modifiers.c: dialogue speed
+0x801279B0 nsDelhi::nsGlobal::OtherDataSingleMode::virt0x58  # hle_modifiers.c: berry modifiers

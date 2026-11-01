@@ -61,6 +61,10 @@ typedef ptrdiff_t GLintptr;
 #define GL_DEPTH_ATTACHMENT 0x8D00
 #define GL_DEPTH_COMPONENT24 0x81A6
 #define GL_TEXTURE0 0x84C0
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#define GL_TEXTURE_LOD_BIAS 0x8501
+#define GL_TEXTURE_MAX_ANISOTROPY 0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY 0x84FF
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_MIRRORED_REPEAT 0x8370
 #define GL_FUNC_ADD 0x8006
@@ -621,6 +625,7 @@ static int sDumpEvery = 30;
 static unsigned sPresented;
 /* The settings as applied. */
 static int sScale, sMsaa = 1, sMaxSamples = 1, sFullscreen, sHidden;
+static float sMaxAniso; /* the most anisotropic filtering this GPU does; 0 if none */
 static WINDOWPLACEMENT sWindowed;
 
 int display_scale(void) { return sScale; }
@@ -1056,6 +1061,8 @@ void gxb_init(void) {
     }
     fprintf(stderr, "gl: %s, %s\n", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     glGetIntegerv(GL_MAX_SAMPLES, &sMaxSamples);
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &sMaxAniso);
+    while (glGetError() != GL_NO_ERROR) {}
     build_program();
     build_copy_program();
     build_overlay_program();
@@ -1082,24 +1089,51 @@ void gxb_init(void) {
 
 static GLint wrap_mode(int w) { return w == 0 ? GL_CLAMP_TO_EDGE : (w == 1 ? GL_REPEAT : GL_MIRRORED_REPEAT); }
 
-static uint32_t gxb_texture_gl(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear) {
+int gxb_texture_generation(void) { return g_settings.aniso; }
+
+static void upload_levels(int fresh, int width, int height, int levels, const uint8_t* rgba) {
+    int l;
+    for (l = 0; l < levels; l++) {
+        if (fresh) glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        else glTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        rgba += (size_t)width * height * 4;
+        width = width > 1 ? width / 2 : 1;
+        height = height > 1 ? height / 2 : 1;
+    }
+}
+
+/* Sampled as the game set it: TX_SETMODE0's wrap, magnification and
+ * minification filters (mipmap: none, nearest or linear), and LOD bias.
+ * Anisotropic filtering, as the setting says, on what is filtered
+ * linearly. */
+static uint32_t gxb_texture_gl(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+    static const GLenum kMin[2][3] = {{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR},
+                                      {GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR}};
+    int mip = (mode0 >> 5) & 3, min_linear = (mode0 >> 7) & 1;
     GLuint t;
     gl_forget();
     (void)key;
+    if (mip > 2) mip = 2;
+    if (levels <= 1) mip = 0;
     glGenTextures(1, &t);
     glBindTexture(GL_TEXTURE_2D, t);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(wrap_s));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(wrap_t));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+    upload_levels(1, width, height, levels, rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(mode0 & 3));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((mode0 >> 2) & 3));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, kMin[min_linear][mip]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (mode0 >> 4) & 1 ? GL_LINEAR : GL_NEAREST);
+    if (mip) glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)(int8_t)((mode0 >> 9) & 0xFF) / 32.0f);
+    if (sMaxAniso > 1 && g_settings.aniso > 1 && min_linear)
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY,
+                        (float)g_settings.aniso < sMaxAniso ? (float)g_settings.aniso : sMaxAniso);
     return t;
 }
 
-static void gxb_texture_update_gl(uint32_t handle, int width, int height, const uint8_t* rgba) {
+static void gxb_texture_update_gl(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
     gl_forget();
     glBindTexture(GL_TEXTURE_2D, handle);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    upload_levels(0, width, height, levels, rgba);
 }
 
 /* Textures are deleted after the frame is presented: a draw earlier in the
@@ -2001,17 +2035,17 @@ void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int 
 
 volatile long g_in_gl;
 
-uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear) {
+uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
     uint32_t r;
     GL_ENTER();
-    r = gxb_texture_gl(key, width, height, rgba, wrap_s, wrap_t, linear);
+    r = gxb_texture_gl(key, width, height, levels, rgba, mode0);
     GL_LEAVE(GLK_TEXTURE);
     return r;
 }
 
-void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba) {
+void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
     GL_ENTER();
-    gxb_texture_update_gl(handle, width, height, rgba);
+    gxb_texture_update_gl(handle, width, height, levels, rgba);
     GL_LEAVE(GLK_TEXTURE_UPDATE);
 }
 

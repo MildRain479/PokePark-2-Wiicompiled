@@ -619,10 +619,11 @@ static void save_bmp(const char* path, const uint8_t* rgba, int width, int heigh
 
 static uint32_t texture_for_map(int map) {
     int r = map < 4 ? map : map - 4 + 0x20;
-    uint32_t mode0 = bp[0x80 + r], img0 = bp[0x88 + r], img3 = bp[0x94 + r], tlut = bp[0x98 + r];
+    uint32_t mode0 = bp[0x80 + r], mode1 = bp[0x84 + r], img0 = bp[0x88 + r], img3 = bp[0x94 + r],
+             tlut = bp[0x98 + r];
     int width = (img0 & 0x3FF) + 1, height = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 15;
     uint32_t addr = (img3 & 0xFFFFFF) << 5;
-    int size = gx_texture_size(fmt, width, height), i;
+    int size = gx_texture_size(fmt, width, height), levels = 1, i;
     uint64_t key;
     TexEntry* e;
     uint32_t h;
@@ -643,8 +644,21 @@ static uint32_t texture_for_map(int map) {
         break;
     }
     if (!addr || size <= 0) return 0;
+    /* With a mipmap filter, the levels down to the LOD limit follow the
+     * texture in memory, each half the last's size: all are used (as the
+     * Wii would), not just the first, which shimmers in the distance. */
+    if ((mode0 >> 5) & 3) {
+        int lw = width, lh = height, most = ((mode1 >> 8) & 0xFF) / 16 + 1;
+        while (levels < most && levels < 11 && (lw > 1 || lh > 1)) {
+            lw = lw > 1 ? lw / 2 : 1;
+            lh = lh > 1 ? lh / 2 : 1;
+            size += gx_texture_size(fmt, lw, lh);
+            levels++;
+        }
+    }
     key = ((uint64_t)addr << 32) ^ ((uint64_t)fmt << 28) ^ ((uint64_t)width << 14) ^ (uint64_t)height ^
-          ((uint64_t)(tlut & 0xFFF) << 40) ^ ((uint64_t)(mode0 & 0x1F) << 52);
+          ((uint64_t)(tlut & 0xFFF) << 40) ^ ((uint64_t)(mode0 & 0x1F) << 52) ^
+          ((uint64_t)((mode0 >> 5) & 0xFFFF) << 18) ^ ((uint64_t)levels << 59);
     {
         /* Four ways per set, so textures used together (a movie's Y, U and
          * V planes) don't evict each other; a miss takes the way used
@@ -679,8 +693,19 @@ static uint32_t texture_for_map(int map) {
     }
     if (fmt >= 8 && fmt <= 10) h ^= hash_bytes(&tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], fmt == 8 ? 32 : 512);
     if (e->key != key || e->hash != h || !e->handle) {
-        uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 4);
-        gx_decode_texture(rgba, MA(addr), fmt, width, height, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
+        uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 8); /* the levels below take a third more */
+        {
+            int lw = width, lh = height, l;
+            uint32_t from = addr;
+            uint8_t* to = rgba;
+            for (l = 0; l < levels; l++) {
+                gx_decode_texture(to, MA(from), fmt, lw, lh, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
+                from += (uint32_t)gx_texture_size(fmt, lw, lh);
+                to += (size_t)lw * lh * 4;
+                lw = lw > 1 ? lw / 2 : 1;
+                lh = lh > 1 ? lh / 2 : 1;
+            }
+        }
         {
             /* RECOMP_GX_DUMP_TEX=<address>: save that texture, as decoded,
              * to tex_<address>.bmp (once). RECOMP_GX_DUMP_TEXTURES=<dir>:
@@ -708,13 +733,13 @@ static uint32_t texture_for_map(int map) {
             /* Same texture, new contents (a movie frame, say): the key
              * covers size and sampling, so update it in place. */
             flush_batch();
-            gxb_texture_update(e->handle, width, height, rgba);
+            gxb_texture_update(e->handle, width, height, levels, rgba);
         } else {
             /* The way goes to another texture. The old one is freed (or
              * GPU memory grows without bound) once the frame is
              * presented: draws made this frame may still use it. */
             if (e->handle) gxb_texture_free(e->handle);
-            e->handle = gxb_texture(key, width, height, rgba, mode0 & 3, (mode0 >> 2) & 3, (mode0 >> 4) & 1);
+            e->handle = gxb_texture(key, width, height, levels, rgba, mode0);
         }
         free(rgba);
         e->key = key;
@@ -1096,6 +1121,18 @@ static void efb_copy(uint32_t exec) {
         sKeepFrame = gxb_recording();
         sFrame++;
         note_writes((uint32_t)sFrame);
+        {
+            /* The filtering setting changed: every texture made again. */
+            static int generation;
+            int t;
+            if (gxb_texture_generation() != generation) {
+                generation = gxb_texture_generation();
+                for (t = 0; t < TEX_CACHE; t++) {
+                    if (sTexCache[t].handle) gxb_texture_free(sTexCache[t].handle);
+                    sTexCache[t].handle = 0;
+                }
+            }
+        }
         sDrawCount = sVertexCount = 0;
         sStateDirty = 1; /* textures are checked again each frame */
     } else {

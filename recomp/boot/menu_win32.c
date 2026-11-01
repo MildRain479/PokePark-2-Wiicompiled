@@ -37,6 +37,27 @@ static int valid_frame_rate(int fps) {
 
 void hle_set_fov(int percent); /* hle_camera.c */
 void hle_request_minigame(int at); /* hle_game.c */
+void hle_set_text_speed(int steps);  /* hle_modifiers.c */
+void hle_set_berry_rate(int percent);
+void hle_set_prices(int percent);
+
+/* The gameplay settings' choices, in order. */
+static const int kTextSpeeds[] = {1, 2, 3, 0};
+static const int kBerries[] = {100, 150, 200, 300, 50};
+static const int kPrices[] = {100, 50, 0, 200};
+#define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static int choice(const int* list, int n, int v) {
+    int i;
+    for (i = 0; i < n && list[i] != v; i++) {}
+    return i < n ? i : 0;
+}
+
+static void apply_gameplay(void) {
+    hle_set_text_speed(g_settings.text_speed);
+    hle_set_berry_rate(g_settings.berries);
+    hle_set_prices(g_settings.prices);
+}
 
 /* The minigames, by At number, for the Debug section. */
 static const struct {
@@ -85,6 +106,7 @@ void settings_default_controls(void) {
 }
 
 static int valid_msaa(int n) { return n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1; }
+static int valid_aniso(int n) { return n >= 16 ? 16 : valid_msaa(n); }
 
 /* ------------------------------------------------------------------------ */
 /* Names */
@@ -183,8 +205,14 @@ void settings_save(void) {
     fprintf(f, "msaa = %d ; anti-aliasing samples: 1 (off), 2, 4 or 8\n", g_settings.msaa);
     fprintf(f, "frame_rate = %d ; 30 (the game's own), 60, or 120, 144, 165, 240 (interpolated)\n",
             g_settings.frame_rate);
-    fprintf(f, "fov = %d ; field of view in the park, percent of the game's: %d-%d\n\n", g_settings.fov, FOV_MIN,
+    fprintf(f, "fov = %d ; field of view in the park, percent of the game's: %d-%d\n", g_settings.fov, FOV_MIN,
             FOV_MAX);
+    fprintf(f, "aniso = %d ; anisotropic texture filtering: 1 (off), 2, 4, 8 or 16\n\n", g_settings.aniso);
+    fprintf(f, "[gameplay]\n");
+    fprintf(f, "text_speed = %d ; dialogue: 1 (the game's), 2, 3 times as fast, or 0: a page at once\n",
+            g_settings.text_speed);
+    fprintf(f, "berries = %d ; berries collected, percent of the game's: 50, 100, 150, 200 or 300\n", g_settings.berries);
+    fprintf(f, "prices = %d ; berries spent, percent of the game's: 0 (free), 50, 100 or 200\n\n", g_settings.prices);
     fprintf(f, "[mouse]\n");
     fprintf(f, "sensitivity = %.2f ; camera turn, times the default\n", g_settings.mouse_sensitivity);
     fprintf(f, "invert_tilt = %d\n\n", g_settings.invert_tilt);
@@ -196,6 +224,7 @@ void settings_save(void) {
         fprintf(f, "%s = 0x%02X 0x%02X ; %s, %s\n", kActionIni[i], g_settings.key[i][0], g_settings.key[i][1], a, b);
     }
     fprintf(f, "\n[controller] ; XInput buttons, two per button (0x10000: LT, 0x20000: RT)\n");
+    fprintf(f, "rumble = %d ; 0 off, 1 light, 2 normal, 3 strong\n", g_settings.rumble);
     for (i = 0; i < ACT_COUNT; i++) {
         fprintf(f, "%s = 0x%04X 0x%04X ; %s, %s\n", kActionIni[i], g_settings.pad[i][0], g_settings.pad[i][1],
                 settings_pad_name(g_settings.pad[i][0]), settings_pad_name(g_settings.pad[i][1]));
@@ -209,6 +238,11 @@ void settings_load(void) {
     FILE* f;
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
+    g_settings.aniso = 1;
+    g_settings.rumble = 2;
+    g_settings.text_speed = 1;
+    g_settings.berries = 100;
+    g_settings.prices = 100;
     g_settings.frame_rate = 30;
     g_settings.fov = 100;
     g_settings.mouse_sensitivity = 1.0f;
@@ -236,17 +270,24 @@ void settings_load(void) {
             if (!strcmp(name, "fullscreen")) g_settings.fullscreen = atoi(p) != 0;
             if (!strcmp(name, "scale")) g_settings.scale = atoi(p) < 0 ? 0 : atoi(p) > MAX_SCALE ? MAX_SCALE : atoi(p);
             if (!strcmp(name, "msaa")) g_settings.msaa = valid_msaa(atoi(p));
+            if (!strcmp(name, "aniso")) g_settings.aniso = valid_aniso(atoi(p));
             if (!strcmp(name, "frame_rate")) g_settings.frame_rate = valid_frame_rate(atoi(p));
             if (!strcmp(name, "fov")) {
                 int v = atoi(p) / 5 * 5;
                 g_settings.fov = v < FOV_MIN ? FOV_MIN : v > FOV_MAX ? FOV_MAX : v;
             }
+        } else if (!strcmp(section, "gameplay")) {
+            if (!strcmp(name, "text_speed")) g_settings.text_speed = kTextSpeeds[choice(kTextSpeeds, COUNT(kTextSpeeds), atoi(p))];
+            if (!strcmp(name, "berries")) g_settings.berries = kBerries[choice(kBerries, COUNT(kBerries), atoi(p))];
+            if (!strcmp(name, "prices")) g_settings.prices = kPrices[choice(kPrices, COUNT(kPrices), atoi(p))];
         } else if (!strcmp(section, "mouse")) {
             if (!strcmp(name, "sensitivity")) {
                 float s = (float)atof(p);
                 g_settings.mouse_sensitivity = s < 0.1f ? 0.1f : s > 3.0f ? 3.0f : s;
             }
             if (!strcmp(name, "invert_tilt")) g_settings.invert_tilt = atoi(p) != 0;
+        } else if (!strcmp(section, "controller") && !strcmp(name, "rumble")) {
+            g_settings.rumble = atoi(p) < 0 ? 0 : atoi(p) > 3 ? 3 : atoi(p);
         } else if (!strcmp(section, "keyboard") || !strcmp(section, "controller")) {
             for (i = 0; i < ACT_COUNT; i++) {
                 if (strcmp(name, kActionIni[i])) continue;
@@ -284,6 +325,7 @@ void settings_load(void) {
     }
     apply_frame_rate();
     hle_set_fov(g_settings.fov);
+    apply_gameplay();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -330,6 +372,31 @@ void settings_step(int which, int d) {
         break;
     }
     case SET_INVERT: g_settings.invert_tilt = !g_settings.invert_tilt; break;
+    case SET_ANISO: {
+        static const int kAniso[] = {1, 2, 4, 8, 16};
+        for (i = 0; i < 5 && kAniso[i] != g_settings.aniso; i++) {}
+        g_settings.aniso = kAniso[(i + d + 5) % 5];
+        break;
+    }
+    case SET_RUMBLE:
+        g_settings.rumble = (g_settings.rumble + d + 4) % 4;
+        input_rumble_preview();
+        break;
+    case SET_TEXT_SPEED:
+        g_settings.text_speed = kTextSpeeds[(choice(kTextSpeeds, COUNT(kTextSpeeds), g_settings.text_speed) + d +
+                                             COUNT(kTextSpeeds)) % COUNT(kTextSpeeds)];
+        apply_gameplay();
+        break;
+    case SET_BERRIES:
+        g_settings.berries =
+            kBerries[(choice(kBerries, COUNT(kBerries), g_settings.berries) + d + COUNT(kBerries)) % COUNT(kBerries)];
+        apply_gameplay();
+        break;
+    case SET_PRICES:
+        g_settings.prices =
+            kPrices[(choice(kPrices, COUNT(kPrices), g_settings.prices) + d + COUNT(kPrices)) % COUNT(kPrices)];
+        apply_gameplay();
+        break;
     default: return;
     }
     settings_save();

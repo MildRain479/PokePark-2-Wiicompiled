@@ -239,10 +239,13 @@ int input_controller_last(void) {
     return forced || sControllerLast;
 }
 
+static void preview_tick(void);
+
 static int read_pad(int chan, uint32_t* held) {
     static int menuHeld;
     uint32_t buttons, stick, keys, pad;
     if (chan != 0) return 0;
+    preview_tick();
     mouse();
     controller_state(&buttons, &stick);
     menu_controller(buttons, buttons | stick);
@@ -257,11 +260,38 @@ static int read_pad(int chan, uint32_t* held) {
     return 1;
 }
 
-static void rumble(int chan, int on) {
+/* The Wii Remote's motor on or off, as the controller's at the strength
+ * the setting says (normal: as before there was a setting). */
+static int sRumbling;
+
+static void set_motors(int on) {
+    static const WORD kSpeed[4] = {0, 0x3000, 0x6000, 0xC000};
     XPadVibration v;
-    if (chan != 0 || !pXInputSetState) return;
-    v.wLeftMotorSpeed = v.wRightMotorSpeed = on ? 0x6000 : 0;
+    v.wLeftMotorSpeed = v.wRightMotorSpeed = on ? kSpeed[g_settings.rumble & 3] : 0;
     pXInputSetState(0, &v);
+}
+
+static void rumble(int chan, int on) {
+    if (chan != 0 || !pXInputSetState) return;
+    sRumbling = on;
+    set_motors(on);
+}
+
+/* A short buzz at the new strength, when the setting is changed: ended
+ * at an input poll (read_pad) once it's been long enough. */
+static ULONGLONG sPreviewEnd;
+
+void input_rumble_preview(void) {
+    if (!pXInputSetState) return;
+    set_motors(1);
+    sPreviewEnd = GetTickCount64() + 200;
+}
+
+static void preview_tick(void) {
+    if (sPreviewEnd && GetTickCount64() >= sPreviewEnd) {
+        sPreviewEnd = 0;
+        set_motors(sRumbling);
+    }
 }
 
 /* Scripted input goes to the Options tab first, as the controller's does. */

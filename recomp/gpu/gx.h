@@ -64,9 +64,15 @@ typedef struct GXDrawState {
 
 /* Backend interface. */
 void gxb_init(void);
-uint32_t gxb_texture(uint64_t key, int width, int height, const uint8_t* rgba, int wrap_s, int wrap_t, int linear);
-/* Replaces a texture's contents (same size). */
-void gxb_texture_update(uint32_t handle, int width, int height, const uint8_t* rgba);
+/* A texture of levels mipmap levels, each half the last's size (at least
+ * 1), one after another in rgba; sampled as TX_SETMODE0 mode0 says (wrap,
+ * filtering, LOD bias). */
+uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
+/* Replaces a texture's contents (same size and levels). */
+void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba);
+/* Changes when textures should be made again (the filtering setting
+ * changed). */
+int gxb_texture_generation(void);
 void gxb_texture_free(uint32_t handle);
 /* Draws triangles: count indices from index + first_index, three to a
  * triangle, into the vertices from v + first_vertex. */

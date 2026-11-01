@@ -32,6 +32,11 @@ typedef struct {
     int msaa;                /* anti-aliasing samples: 1 (off), 2, 4 or 8 */
     int frame_rate;          /* 30 (the game's own), 60, or 120-240 (interpolated) */
     int fov;                 /* field of view, percent of the game's (tangent of half the angle) */
+    int aniso;               /* anisotropic filtering: 1 (off), 2, 4, 8 or 16 */
+    int rumble;              /* controller rumble: 0 off, 1 light, 2 normal, 3 strong */
+    int text_speed;          /* dialogue: 1 (the game's), 2, 3, or 0 (a page at once) */
+    int berries;             /* berries collected, percent of the game's */
+    int prices;              /* berries spent, percent of the game's */
     float mouse_sensitivity; /* camera turn per pixel, times the default */
     int invert_tilt;         /* mouse up looks down */
     int key[ACT_COUNT][BIND_SLOTS];      /* Windows virtual-key codes (mouse buttons too); 0 = none */
@@ -52,11 +57,14 @@ uint32_t settings_generation(void);
 /* Whether the controller was used more recently than the keyboard and
  * mouse (input_win32.c). */
 int input_controller_last(void);
+/* A short buzz at the rumble setting's strength (input_win32.c). */
+void input_rumble_preview(void);
 /* Sets up the button prompt icons (prompts_win32.c). */
 void prompts_init(void);
 
 /* What settings_step changes. */
-enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT };
+enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
+       SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);

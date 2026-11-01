@@ -37,8 +37,8 @@ int gxb_display_hz(void);
 /* ------------------------------------------------------------------------ */
 /* What's on it */
 
-enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SECTIONS };
-static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller"};
+enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS };
+static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller", "Gameplay"};
 
 /* A row: a setting (settings_step), a binding (an action), or resetting the
  * controls. */
@@ -51,7 +51,12 @@ typedef struct {
 static const Row kDisplay[] = {
     {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"}, {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
-    {ROW_SETTING, SET_FOV, "Field of view"},
+    {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
+};
+static const Row kGameplay[] = {
+    {ROW_SETTING, SET_TEXT_SPEED, "Text speed"},
+    {ROW_SETTING, SET_BERRIES, "Berries"},
+    {ROW_SETTING, SET_PRICES, "Prices"},
 };
 static const char* const kAction[ACT_COUNT] = {
     "Up", "Down", "Left", "Right", "2: Jump", "1: Dash", "A: Thunderbolt", "B: Camera", "+: Pad", "-: Map", "HOME",
@@ -59,14 +64,16 @@ static const char* const kAction[ACT_COUNT] = {
 };
 
 static int row_count(int sec) {
-    return sec == SEC_DISPLAY ? (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))
+    return sec == SEC_DISPLAY    ? (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))
+           : sec == SEC_GAMEPLAY ? (int)(sizeof(kGameplay) / sizeof(kGameplay[0]))
            : sec == SEC_KEYBOARD ? ACT_COUNT + 3 /* camera speed, invert, reset */
-                                 : ACT_COUNT + 1;
+                                 : ACT_COUNT + 2; /* rumble, reset */
 }
 
 static Row row_at(int sec, int i) {
     Row r = {ROW_RESET, 0, "Reset all controls"};
     if (sec == SEC_DISPLAY) return kDisplay[i];
+    if (sec == SEC_GAMEPLAY) return kGameplay[i];
     if (i < ACT_COUNT) {
         r.kind = ROW_BINDING;
         r.which = i;
@@ -75,6 +82,10 @@ static Row row_at(int sec, int i) {
         r.kind = ROW_SETTING;
         r.which = SET_SENSITIVITY;
         r.label = "Camera speed";
+    } else if (sec == SEC_CONTROLLER && i == ACT_COUNT) {
+        r.kind = ROW_SETTING;
+        r.which = SET_RUMBLE;
+        r.label = "Rumble";
     } else if (sec == SEC_KEYBOARD && i == ACT_COUNT + 1) {
         r.kind = ROW_SETTING;
         r.which = SET_INVERT;
@@ -100,6 +111,21 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_FOV: snprintf(out, n, "%d%%", g_settings.fov); break;
     case SET_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case SET_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
+    case SET_ANISO: snprintf(out, n, g_settings.aniso == 1 ? "Original" : "%dx", g_settings.aniso); break;
+    case SET_RUMBLE: {
+        static const char* const kRumble[4] = {"Off", "Light", "Normal", "Strong"};
+        snprintf(out, n, "%s", kRumble[g_settings.rumble & 3]);
+        break;
+    }
+    case SET_TEXT_SPEED:
+        if (g_settings.text_speed == 0) snprintf(out, n, "Instant");
+        else snprintf(out, n, g_settings.text_speed == 1 ? "Original" : "%dx", g_settings.text_speed);
+        break;
+    case SET_BERRIES: snprintf(out, n, g_settings.berries == 100 ? "Original" : "%d%%", g_settings.berries); break;
+    case SET_PRICES:
+        if (g_settings.prices == 0) snprintf(out, n, "Free");
+        else snprintf(out, n, g_settings.prices == 100 ? "Original" : "%d%%", g_settings.prices);
+        break;
     default: *out = 0;
     }
 }
@@ -231,7 +257,8 @@ typedef struct {
 } Rect;
 
 static const Rect kTab = {810, 46, 1046, 120};            /* the other tab, at the right page's top */
-static const Rect kButton[SECTIONS] = {{333, 177, 748, 262}, {320, 315, 737, 405}, {328, 487, 746, 562}};
+static const Rect kButton[SECTIONS] = {
+    {333, 150, 748, 230}, {320, 262, 737, 342}, {328, 374, 746, 454}, {328, 487, 746, 562}};
 static const Rect kPage = {845, 40, 1325, 765};           /* the right page's writing */
 #define ROWS_TOP 140.0f
 #define ROW_PITCH 72.0f
@@ -551,9 +578,10 @@ static void draw_pages(void) {
 }
 
 static void draw_book(void) {
-    static const Rect kPocket[SECTIONS] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {27, 223, 297, 327}};
-    static const Rect kPocketAt[SECTIONS] = {{262, 262, 778, 426}, {272, 408, 780, 600}, {290, 560, 780, 760}};
-    static const Rect kBlue[SECTIONS] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 170, 120, 229}};
+    static const Rect kPocket[SECTIONS] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {21, 113, 303, 218}, {27, 223, 297, 327}};
+    static const Rect kPocketAt[SECTIONS] = {
+        {262, 230, 778, 394}, {272, 342, 780, 534}, {272, 454, 780, 646}, {290, 560, 780, 760}};
+    static const Rect kBlue[SECTIONS] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 10, 120, 69}, {8, 170, 120, 229}};
     static const Rect kArrow = {3, 8, 28, 54};
     int i, n = row_count(sSection), aw, ah;
     const uint32_t* arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &aw, &ah);
@@ -577,7 +605,7 @@ static void draw_book(void) {
 
     /* The section's settings, a bar each as the Pad's counts are shown. */
     draw_text(kSection[sSection], 1192, 88, 52, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
-    if (sSection != SEC_DISPLAY) {
+    if (sSection != SEC_DISPLAY && sSection != SEC_GAMEPLAY) {
         draw_text("Slot 1", slot_x(0), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
         draw_text("Slot 2", slot_x(1), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
     }
@@ -588,7 +616,7 @@ static void draw_book(void) {
         int chosen = sOnRows && i == sRow;
         draw_box(bar, 10, chosen ? 0xE0FFC070u : 0xB6CCBB99u);
         draw_text(r.label, bar.x0 + 14, my + 2, r.kind == ROW_BINDING ? 40 : 42, ALIGN_LEFT, GREEN, CREAM, 2.0f, 1,
-                  r.kind == ROW_SETTING ? 250 : 210);
+                  r.kind == ROW_SETTING ? 215 : 210);
         if (r.kind == ROW_SETTING) {
             float cx = 1190;
             setting_text(r.which, buf, sizeof(buf));
