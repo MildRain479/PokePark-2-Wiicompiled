@@ -79,7 +79,7 @@ def build_msvc(common, targets, opt):
             exe = os.path.join(OUT, name + ".exe")
             libs = " ".join(LIBS.get(name, []))
             ltcg = "/LTCG" if "/GL" in opt else ""
-            f.write(f'link /nologo /DEBUG {ltcg} /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
+            f.write(f'link /nologo /DEBUG /MANIFEST:EMBED {ltcg} /OUT:"{exe}" "{objdir}\\*.obj" "{tdir}\\*.obj" {libs} || exit /b 1\n')
     subprocess.check_call(["cmd", "/c", bat])
 
 
@@ -146,6 +146,12 @@ def main():
         os.makedirs(dist, exist_ok=True)
         shutil.copy2(os.path.join(OUT, "boot.exe"), os.path.join(dist, "PokePark.exe"))
         shutil.copytree(os.path.join(OUT, "prompts"), os.path.join(dist, "prompts"), dirs_exist_ok=True)
+        # decomp-toolkit, which the game's set-up screen extracts disc images with (import_win32.c).
+        dtk = os.path.join(ROOT, "build", "tools", "dtk.exe")
+        if os.path.exists(dtk):
+            os.makedirs(os.path.join(dist, "tools"), exist_ok=True)
+            shutil.copy2(dtk, os.path.join(dist, "tools", "dtk.exe"))
+            shutil.copy2(os.path.join(ROOT, "recomp", "assets", "dtk_license.txt"), os.path.join(dist, "tools", "dtk_license.txt"))
         print("dist:", dist)
     if args.run:
         exe = os.path.join(OUT, args.run + (".exe" if os.name == "nt" else ""))

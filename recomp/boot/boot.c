@@ -396,6 +396,8 @@ static void setup_low_memory(void) {
 
 /* The game's main.dol, in an R8AE01 folder (or orig\R8AE01, as in the
  * source tree) beside the program or in a folder above it. */
+int import_game(char* mainDol, size_t n); /* import_win32.c */
+
 static int find_game(char* out, size_t n) {
 #ifdef _WIN32
     char dir[1024], *slash;
@@ -420,7 +422,12 @@ int main(int argc, char** argv) {
     uint32_t entry;
     static char found[1024];
     static char* defaultArgs[2];
-    if (argc < 2 && find_game(found, sizeof(found))) {
+#ifdef _WIN32
+    /* Not set up yet: the player's disc image, extracted beside the
+     * program (import_win32.c). */
+    if (argc < 2 && !find_game(found, sizeof(found)) && !import_game(found, sizeof(found))) return 0;
+#endif
+    if (argc < 2 && (found[0] || find_game(found, sizeof(found)))) {
         /* Started without arguments (double-clicked): the game found
          * beside the program or above it, and no time limit. */
         defaultArgs[0] = argv[0];
