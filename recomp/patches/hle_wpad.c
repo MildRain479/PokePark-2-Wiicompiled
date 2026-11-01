@@ -48,6 +48,7 @@ static struct {
 } sChan[WPAD_MAX_CHANS];
 
 static uint32_t sReports;
+int (*g_host_script_input)(uint32_t held);
 static int sConnecting, sConnected;
 
 static int connected(int32_t chan) { return chan == 0 && sConnected; }
@@ -217,7 +218,10 @@ void f_802488A0(ppc_t* c) {
     int16_t acc[3], dots[4][2];
     hle_prompts_update();
     if (on && g_host_pad_read && !g_host_pad_read(chan, &held)) held = 0;
-    if (on && chan == 0) held |= script_held();
+    if (on && chan == 0) {
+        uint32_t scripted = script_held();
+        if (!g_host_script_input || !g_host_script_input(scripted)) held |= scripted;
+    }
     if (on && chan == 0 && (motion = hle_motion(held, sReports, acc, dots)) != 0) {
         /* In minigames, the remote's motion as each asks (hle_motion.c). */
         ax = acc[0];

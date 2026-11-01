@@ -1,0 +1,774 @@
+/* The Options tab of the pause menu: the settings (menu_win32.c), in a
+ * book like the PokéPark Pad's and drawn with its pictures and the game's
+ * font, over the Pad. While the Pad is on its main page an "Options" tab
+ * shows beside its title; right opens it (left and right do nothing on
+ * the Pad), and left or Back on its first column goes back.
+ *
+ *   The left page lists the sections, the right page their settings.
+ *   Up and down choose; left and right change a setting or move between a
+ *   binding's two slots; Select rebinds (press the key, mouse button or
+ *   controller button, or Esc to cancel); Delete, or Y, clears.
+ *
+ * Its controls are the game's, as bound (Select is 2, Back is 1, as the
+ * Pad's bar says), and the arrow keys, Enter and Esc; the mouse clicks
+ * what it points at. The book is drawn into an image laid over the
+ * picture (gl_backend.c), only again when something on it changes,
+ * leaving the bar at the bottom clear: the game's, which shows the
+ * player's keys (hle_prompts.c), shows through. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "host_input.h"
+#include "host_settings.h"
+
+int hle_pause_main_page(void); /* hle_pause.c */
+const uint32_t* hle_pause_image(const char* name, const char* alpha, int* w, int* h);
+int hle_font_metrics(int* cellW, int* cellH, int* baseline); /* hle_prompts.c */
+int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance);
+int display_scale(void); /* gl_backend.c: as applied */
+int display_msaa(void);
+int gxb_display_hz(void);
+
+/* ------------------------------------------------------------------------ */
+/* What's on it */
+
+enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SECTIONS };
+static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller"};
+
+/* A row: a setting (settings_step), a binding (an action), or resetting the
+ * controls. */
+enum { ROW_SETTING, ROW_BINDING, ROW_RESET };
+typedef struct {
+    int kind, which;
+    const char* label;
+} Row;
+
+static const Row kDisplay[] = {
+    {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"}, {ROW_SETTING, SET_SCALE, "Resolution"},
+    {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
+    {ROW_SETTING, SET_FOV, "Field of view"},
+};
+static const char* const kAction[ACT_COUNT] = {
+    "Up", "Down", "Left", "Right", "2: Jump", "1: Dash", "A: Thunderbolt", "B: Camera", "+: Pad", "-: Map", "HOME",
+    "Shake", "Shake 2",
+};
+
+static int row_count(int sec) {
+    return sec == SEC_DISPLAY ? (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))
+           : sec == SEC_KEYBOARD ? ACT_COUNT + 3 /* camera speed, invert, reset */
+                                 : ACT_COUNT + 1;
+}
+
+static Row row_at(int sec, int i) {
+    Row r = {ROW_RESET, 0, "Reset all controls"};
+    if (sec == SEC_DISPLAY) return kDisplay[i];
+    if (i < ACT_COUNT) {
+        r.kind = ROW_BINDING;
+        r.which = i;
+        r.label = kAction[i];
+    } else if (sec == SEC_KEYBOARD && i == ACT_COUNT) {
+        r.kind = ROW_SETTING;
+        r.which = SET_SENSITIVITY;
+        r.label = "Camera speed";
+    } else if (sec == SEC_KEYBOARD && i == ACT_COUNT + 1) {
+        r.kind = ROW_SETTING;
+        r.which = SET_INVERT;
+        r.label = "Invert camera";
+    }
+    return r;
+}
+
+static void setting_text(int which, char* out, size_t n) {
+    int s;
+    switch (which) {
+    case SET_FULLSCREEN: snprintf(out, n, g_settings.fullscreen ? "On" : "Off"); break;
+    case SET_SCALE:
+        s = g_settings.scale ? g_settings.scale : display_scale();
+        snprintf(out, n, g_settings.scale ? "%dx" : "Auto (%dx)", s);
+        break;
+    case SET_MSAA:
+        if (g_settings.msaa == 1) snprintf(out, n, "Off");
+        else if (display_msaa() < g_settings.msaa) snprintf(out, n, "%dx (GPU %dx)", g_settings.msaa, display_msaa());
+        else snprintf(out, n, "%dx", g_settings.msaa);
+        break;
+    case SET_FRAME_RATE: snprintf(out, n, "%d fps", g_settings.frame_rate); break;
+    case SET_FOV: snprintf(out, n, "%d%%", g_settings.fov); break;
+    case SET_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
+    case SET_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
+    default: *out = 0;
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* State */
+
+enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
+#define VISIBLE_ROWS 8
+
+static volatile int sOpen;
+static int sSection, sOnRows, sRow, sSlot, sTop, sCapture;
+static volatile unsigned sChanges; /* what's drawn is redrawn when this changes */
+
+int options_is_open(void) { return sOpen; }
+
+static void changed(void) { sChanges++; }
+
+static void set_open(int open) {
+    sOpen = open;
+    sCapture = CAPTURE_NONE;
+    sOnRows = 0;
+    changed();
+}
+
+static void show_row(void) {
+    if (sRow < sTop) sTop = sRow;
+    if (sRow >= sTop + VISIBLE_ROWS) sTop = sRow - VISIBLE_ROWS + 1;
+}
+
+static void up_down(int d) {
+    if (!sOnRows) {
+        sSection = (sSection + d + SECTIONS) % SECTIONS;
+        sRow = sTop = sSlot = 0;
+    } else {
+        sRow = (sRow + d + row_count(sSection)) % row_count(sSection);
+        show_row();
+    }
+    changed();
+}
+
+static void enter_rows(void) {
+    sOnRows = 1;
+    changed();
+}
+
+static void back(void) {
+    if (sOnRows) {
+        sOnRows = 0;
+        changed();
+    } else {
+        set_open(0);
+    }
+}
+
+static void left_right(int d) {
+    Row r;
+    if (!sOnRows) {
+        if (d < 0) set_open(0);
+        else enter_rows();
+        return;
+    }
+    r = row_at(sSection, sRow);
+    if (r.kind == ROW_SETTING) {
+        settings_step(r.which, d);
+    } else if (r.kind == ROW_BINDING && sSlot + d >= 0 && sSlot + d < BIND_SLOTS) {
+        sSlot += d;
+    } else if (d < 0) {
+        sOnRows = 0;
+    }
+    changed();
+}
+
+static void select_(void) {
+    Row r;
+    if (!sOnRows) {
+        enter_rows();
+        return;
+    }
+    r = row_at(sSection, sRow);
+    if (r.kind == ROW_SETTING) {
+        settings_step(r.which, 1);
+    } else if (r.kind == ROW_BINDING) {
+        sCapture = sSection == SEC_CONTROLLER ? CAPTURE_PAD : CAPTURE_KEY;
+    } else {
+        settings_default_controls();
+        settings_save();
+    }
+    changed();
+}
+
+static void clear(void) {
+    Row r = row_at(sSection, sRow);
+    if (!sOnRows || r.kind != ROW_BINDING) return;
+    if (sSection == SEC_CONTROLLER) g_settings.pad[r.which][sSlot] = 0;
+    else g_settings.key[r.which][sSlot] = 0;
+    settings_save();
+    changed();
+}
+
+static void bind(int vk, uint32_t pad) {
+    settings_bind(row_at(sSection, sRow).which, sSlot, vk, pad);
+    sCapture = CAPTURE_NONE;
+    changed();
+}
+
+/* ------------------------------------------------------------------------ */
+/* Where things are: in a 1621 x 912 picture, where the Pad was measured,
+ * scaled to the window's height and centred, as the game's picture is. */
+
+#define REF_W 1621
+#define REF_H 912
+
+typedef struct {
+    float x0, y0, x1, y1;
+} Rect;
+
+static const Rect kTab = {810, 46, 1046, 120};            /* the other tab, at the right page's top */
+static const Rect kButton[SECTIONS] = {{333, 177, 748, 262}, {320, 315, 737, 405}, {328, 487, 746, 562}};
+static const Rect kPage = {845, 40, 1325, 765};           /* the right page's writing */
+#define ROWS_TOP 140.0f
+#define ROW_PITCH 72.0f
+#define ROW_HEIGHT 60.0f
+#define BAR_TOP 771.0f /* the game's button bar, left clear */
+#define BAR_BOTTOM 859.0f
+
+static float sScale, sOffX, sOffY;
+
+static float X(float x) { return sOffX + x * sScale; }
+static float Y(float y) { return sOffY + y * sScale; }
+
+static Rect row_rect(int visible) {
+    Rect r = {kPage.x0, ROWS_TOP + visible * ROW_PITCH, kPage.x1, ROWS_TOP + visible * ROW_PITCH + ROW_HEIGHT};
+    return r;
+}
+
+/* Where a binding row's slot k is centred. */
+static float slot_x(int k) { return k ? 1262.0f : 1140.0f; }
+
+/* ------------------------------------------------------------------------ */
+/* Drawing: an image, top row first, 0xAARRGGBB, not premultiplied */
+
+static uint32_t* sPx;
+static int sW, sH;
+
+static void blend(uint32_t* d, uint32_t c, float alpha) {
+    float sa = (c >> 24) / 255.0f * alpha, da = (*d >> 24) / 255.0f, oa = sa + da * (1 - sa);
+    int k;
+    uint32_t out;
+    if (sa <= 0) return;
+    out = (uint32_t)(oa * 255 + 0.5f) << 24;
+    for (k = 0; k < 24; k += 8) {
+        float sc = (float)(c >> k & 255), dc = (float)(*d >> k & 255);
+        out |= (uint32_t)((sc * sa + dc * da * (1 - sa)) / oa + 0.5f) << k;
+    }
+    *d = out;
+}
+
+static uint32_t sample(const uint32_t* img, int w, int h, float u, float v) {
+    int x0 = (int)floorf(u - 0.5f), y0 = (int)floorf(v - 0.5f), k, i;
+    float fx = u - 0.5f - x0, fy = v - 0.5f - y0, acc[4] = {0}, wsum = 0;
+    for (i = 0; i < 4; i++) {
+        int x = x0 + (i & 1), y = y0 + (i >> 1);
+        float wt = ((i & 1) ? fx : 1 - fx) * ((i >> 1) ? fy : 1 - fy);
+        uint32_t c;
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        if (x >= w) x = w - 1;
+        if (y >= h) y = h - 1;
+        c = img[y * w + x];
+        /* premultiplied while filtering, so clear texels add no colour */
+        acc[3] += wt * (c >> 24);
+        for (k = 0; k < 3; k++) acc[k] += wt * (c >> (8 * k) & 255) * (c >> 24) / 255.0f;
+        wsum += wt;
+    }
+    if (acc[3] < 0.5f) return 0;
+    return (uint32_t)(acc[3] + 0.5f) << 24 | (uint32_t)(acc[2] * 255 / acc[3] + 0.5f) << 16 |
+           (uint32_t)(acc[1] * 255 / acc[3] + 0.5f) << 8 | (uint32_t)(acc[0] * 255 / acc[3] + 0.5f);
+}
+
+/* Draws part src of an image into dst (picture coordinates), its colour
+ * times tint (0xRRGGBB), flipped left to right if mirror. */
+static void draw_image(const uint32_t* img, int w, int h, Rect src, Rect dst, uint32_t tint, int mirror) {
+    int x0 = (int)X(dst.x0), y0 = (int)Y(dst.y0), x1 = (int)ceilf(X(dst.x1)), y1 = (int)ceilf(Y(dst.y1)), x, y;
+    float dw = X(dst.x1) - X(dst.x0), dh = Y(dst.y1) - Y(dst.y0);
+    if (!img || dw <= 0 || dh <= 0) return;
+    for (y = y0 < 0 ? 0 : y0; y < y1 && y < sH; y++) {
+        float v = src.y0 + (y + 0.5f - Y(dst.y0)) / dh * (src.y1 - src.y0);
+        for (x = x0 < 0 ? 0 : x0; x < x1 && x < sW; x++) {
+            float t = (x + 0.5f - X(dst.x0)) / dw, u = src.x0 + (mirror ? 1 - t : t) * (src.x1 - src.x0);
+            uint32_t c;
+            if (t < 0 || t > 1 || v < src.y0 || v > src.y1) continue;
+            c = sample(img, w, h, u, v);
+            if (tint != 0xFFFFFF) {
+                int k;
+                uint32_t o = c & 0xFF000000u;
+                for (k = 0; k < 24; k += 8) o |= ((c >> k & 255) * (tint >> k & 255) / 255) << k;
+                c = o;
+            }
+            blend(&sPx[y * sW + x], c, 1.0f);
+        }
+    }
+}
+
+static void draw_picture(const char* name, const char* alpha, Rect src, Rect dst, uint32_t tint) {
+    int w, h;
+    const uint32_t* img = hle_pause_image(name, alpha, &w, &h);
+    if (src.x1 <= 0) {
+        src.x0 = src.y0 = 0;
+        src.x1 = (float)w;
+        src.y1 = (float)h;
+    }
+    draw_image(img, w, h, src, dst, tint, 0);
+}
+
+/* A rounded box of colour c (0xAARRGGBB), its edge softened. */
+static void draw_box(Rect r, float radius, uint32_t c) {
+    float rx0 = X(r.x0), ry0 = Y(r.y0), rx1 = X(r.x1), ry1 = Y(r.y1), rad = radius * sScale;
+    int x, y;
+    for (y = (int)ry0 < 0 ? 0 : (int)ry0; y < (int)ceilf(ry1) && y < sH; y++) {
+        for (x = (int)rx0 < 0 ? 0 : (int)rx0; x < (int)ceilf(rx1) && x < sW; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float cx = px < rx0 + rad ? rx0 + rad : px > rx1 - rad ? rx1 - rad : px;
+            float cy = py < ry0 + rad ? ry0 + rad : py > ry1 - rad ? ry1 - rad : py;
+            float d = sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy)) - rad;
+            float a = d < -1.5f ? 1.0f : d > 0 ? 0.0f : -d / 1.5f;
+            if (a > 0) blend(&sPx[y * sW + x], c, a);
+        }
+    }
+}
+
+/* A triangle pointing up or down (dir 1, -1), centred at (cx, cy). */
+static void draw_triangle(float cx, float cy, float size, int dir, uint32_t c) {
+    int x, y;
+    for (y = (int)Y(cy - size); y < (int)Y(cy + size) + 1; y++) {
+        for (x = (int)X(cx - size); x < (int)X(cx + size) + 1; x++) {
+            float u = ((x + 0.5f) - X(cx)) / (size * sScale), v = ((y + 0.5f) - Y(cy)) / (size * sScale) * dir;
+            if (x < 0 || y < 0 || x >= sW || y >= sH) continue;
+            if (v >= -0.6f && v <= 0.6f && fabsf(u) <= (v + 0.6f) / 1.2f) blend(&sPx[y * sW + x], c, 1.0f);
+        }
+    }
+}
+
+/* Text, in the game's font: size is its cell height in picture units. */
+static int sCellW, sCellH, sBaseline;
+
+static float text_width(const char* s, float size) {
+    static uint8_t cov[64 * 64];
+    float w = 0;
+    int left, advance;
+    for (; *s; s++) {
+        if (hle_font_glyph((uint8_t)*s, cov, &left, &advance)) w += advance;
+    }
+    return w * size / sCellH;
+}
+
+enum { ALIGN_LEFT, ALIGN_CENTRE, ALIGN_RIGHT };
+
+/* Draws s with its middle at y, filled with fill, edged outline wide (in
+ * picture units) with edge, and, if bold, thickened a little. Shrinks it
+ * to fit in maxWidth. */
+static void draw_text(const char* s, float x, float y, float size, int align, uint32_t fill, uint32_t edge,
+                      float outline, int bold, float maxWidth) {
+    static uint8_t cov[64 * 64];
+    static float* mask;
+    static int maskSize;
+    float width = text_width(s, size), k, pen;
+    int bx0, by0, bw, bh, i, j, pad;
+    if (maxWidth > 0 && width > maxWidth) {
+        size *= maxWidth / width;
+        width = maxWidth;
+    }
+    k = size / sCellH;
+    x = align == ALIGN_CENTRE ? x - width / 2 : align == ALIGN_RIGHT ? x - width : x;
+    pad = (int)ceilf((outline + 2) * sScale) + 1;
+    bx0 = (int)X(x) - pad;
+    by0 = (int)Y(y - size / 2) - pad;
+    bw = (int)(width * sScale) + 2 * pad + 2;
+    bh = (int)(size * sScale) + 2 * pad + 2;
+    if (bw * bh > maskSize) {
+        free(mask);
+        maskSize = bw * bh;
+        mask = (float*)malloc((size_t)maskSize * sizeof(float));
+        if (!mask) {
+            maskSize = 0;
+            return;
+        }
+    }
+    memset(mask, 0, (size_t)bw * bh * sizeof(float));
+    /* The glyphs' coverage, scaled. */
+    for (pen = x; *s; s++) {
+        int left, advance, gx0, gy0, gx1, gy1;
+        if (!hle_font_glyph((uint8_t)*s, cov, &left, &advance)) continue;
+        gx0 = (int)X(pen + left * k) - bx0;
+        gy0 = (int)Y(y - size / 2) - by0;
+        gx1 = gx0 + (int)(sCellW * k * sScale) + 1;
+        gy1 = gy0 + (int)(size * sScale) + 1;
+        for (j = gy0 < 0 ? 0 : gy0; j < gy1 && j < bh; j++) {
+            float v = (j - gy0 + 0.5f) / (k * sScale);
+            for (i = gx0 < 0 ? 0 : gx0; i < gx1 && i < bw; i++) {
+                float u = (i - gx0 + 0.5f) / (k * sScale), c;
+                int ux = (int)u, vy = (int)v;
+                float fx = u - ux, fy = v - vy;
+                if (ux >= sCellW || vy >= sCellH) continue;
+                c = cov[vy * sCellW + ux] * (1 - fx) * (1 - fy) +
+                    (ux + 1 < sCellW ? cov[vy * sCellW + ux + 1] : 0) * fx * (1 - fy) +
+                    (vy + 1 < sCellH ? cov[(vy + 1) * sCellW + ux] : 0) * (1 - fx) * fy +
+                    (ux + 1 < sCellW && vy + 1 < sCellH ? cov[(vy + 1) * sCellW + ux + 1] : 0) * fx * fy;
+                c /= 255.0f;
+                if (c > mask[j * bw + i]) mask[j * bw + i] = c;
+            }
+        }
+        pen += advance * k;
+    }
+    /* The edge, then the letters, each the coverage grown by a disc. */
+    for (j = 0; j < 2; j++) {
+        float r = j == 0 ? outline * sScale + (bold ? 0.6f * sScale : 0) : (bold ? 0.6f * sScale : 0);
+        uint32_t c = j == 0 ? edge : fill;
+        int ri = (int)ceilf(r), a, b;
+        if (j == 0 && outline <= 0) continue;
+        for (b = 0; b < bh; b++) {
+            int py = by0 + b;
+            if (py < 0 || py >= sH) continue;
+            for (a = 0; a < bw; a++) {
+                int px = bx0 + a, dx, dy;
+                float m = 0;
+                if (px < 0 || px >= sW) continue;
+                for (dy = -ri; dy <= ri; dy++) {
+                    for (dx = -ri; dx <= ri; dx++) {
+                        float d = sqrtf((float)(dx * dx + dy * dy)), w, v;
+                        if (d > r + 1 || a + dx < 0 || b + dy < 0 || a + dx >= bw || b + dy >= bh) continue;
+                        w = d <= r ? 1.0f : r + 1 - d;
+                        v = mask[(b + dy) * bw + a + dx] * w;
+                        if (v > m) m = v;
+                    }
+                }
+                if (m > 0) blend(&sPx[py * sW + px], c, m > 1 ? 1 : m);
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* The book */
+
+#define BROWN 0xFF8C2A10u
+#define GREEN 0xFF448822u
+#define CREAM 0xFFF2EAD2u
+#define INK 0xFF2A2A2Au
+#define PURPLE 0xFF5B2A9Eu
+#define WAIT 0xFFE05A00u
+
+static const Rect kWhole = {0, 0, 0, 0};
+
+/* The other tab: a piece of the title strip, a little darker, with an
+ * arrowhead pointing the way to it. */
+static void draw_tab(const char* name, int right) {
+    static const Rect kStrip = {40, 18, 270, 72}, kArrow = {3, 8, 28, 54};
+    int w, h;
+    const uint32_t* arrow;
+    draw_picture("PmPocketbookL01", "PmPocketbookL01A", kStrip, kTab, 0xD8D0C0);
+    draw_text(name, (kTab.x0 + kTab.x1) / 2 + (right ? -14 : 14), (kTab.y0 + kTab.y1) / 2 + 2, 38, ALIGN_CENTRE,
+              BROWN, 0, 0, 1, kTab.x1 - kTab.x0 - 70);
+    arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &w, &h);
+    {
+        Rect d = {right ? kTab.x1 - 34 : kTab.x0 + 14, kTab.y0 + 20, right ? kTab.x1 - 14 : kTab.x0 + 34, kTab.y1 - 16};
+        draw_image(arrow, w, h, kArrow, d, 0xFFFFFF, right);
+    }
+}
+
+/* What doesn't change: the pages, the title and the other tab. */
+static const Rect kRightPage = {774, 7, 1499, 893}, kLeftPage = {193, 9, 812, 897};
+static const Rect kLeaves = {1, 4, 63, 232}, kLeavesAt = {1342, 46, 1466, 504};
+
+static void draw_pages(void) {
+    draw_picture("PmPocketbookR", "PmPocketbookRA", kWhole, kRightPage, 0xFFFFFF);
+    draw_picture("PmReaf01", "PmReaf01A", kLeaves, kLeavesAt, 0xFFFFFF);
+    draw_tab("Pok\xE9Park Pad", 0); /* the font's Latin-1 */
+    draw_picture("PmPocketbookL01", "PmPocketbookL01A", kWhole, kLeftPage, 0xFFFFFF);
+    draw_text("Options", 450, 104, 54, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
+}
+
+static void draw_book(void) {
+    static const Rect kPocket[SECTIONS] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {27, 223, 297, 327}};
+    static const Rect kPocketAt[SECTIONS] = {{262, 262, 778, 426}, {272, 408, 780, 600}, {290, 560, 780, 760}};
+    static const Rect kBlue[SECTIONS] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 170, 120, 229}};
+    static const Rect kArrow = {3, 8, 28, 54};
+    int i, n = row_count(sSection), aw, ah;
+    const uint32_t* arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &aw, &ah);
+    char buf[64];
+
+
+    /* The sections, as the Pad's buttons: each in its pocket, the chosen
+     * one orange. */
+    for (i = 0; i < SECTIONS; i++) {
+        Rect src = kBlue[i];
+        Rect at = kButton[i];
+        if (i == sSection) {
+            src.x0 += 128;
+            src.x1 += 128;
+        }
+        draw_picture("PmMenuButton", NULL, src, at, sOnRows && i == sSection ? 0xE8E0E0 : 0xFFFFFF);
+        draw_text(kSection[i], (at.x0 + at.x1) / 2 + 8, (at.y0 + at.y1) / 2 + 2, 60, ALIGN_CENTRE, 0xFFFFFFFFu, PURPLE,
+                  3.5f, 1, at.x1 - at.x0 - 60);
+        draw_picture("PmButtonPocket", NULL, kPocket[i], kPocketAt[i], 0xFFFFFF);
+    }
+
+    /* The section's settings, a bar each as the Pad's counts are shown. */
+    draw_text(kSection[sSection], 1192, 88, 52, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
+    if (sSection != SEC_DISPLAY) {
+        draw_text("Slot 1", slot_x(0), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
+        draw_text("Slot 2", slot_x(1), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
+    }
+    for (i = sTop; i < n && i < sTop + VISIBLE_ROWS; i++) {
+        Row r = row_at(sSection, i);
+        Rect bar = row_rect(i - sTop);
+        float my = (bar.y0 + bar.y1) / 2;
+        int chosen = sOnRows && i == sRow;
+        draw_box(bar, 10, chosen ? 0xE0FFC070u : 0xB6CCBB99u);
+        draw_text(r.label, bar.x0 + 14, my + 2, r.kind == ROW_BINDING ? 40 : 42, ALIGN_LEFT, GREEN, CREAM, 2.0f, 1,
+                  r.kind == ROW_SETTING ? 250 : 210);
+        if (r.kind == ROW_SETTING) {
+            float cx = 1190;
+            setting_text(r.which, buf, sizeof(buf));
+            draw_text(buf, cx, my + 2, 40, ALIGN_CENTRE, INK, 0, 0, 1, 170);
+            if (chosen) {
+                Rect l = {cx - 112, my - 16, cx - 96, my + 16}, rr = {cx + 96, my - 16, cx + 112, my + 16};
+                draw_image(arrow, aw, ah, kArrow, l, 0xFFFFFF, 0);
+                draw_image(arrow, aw, ah, kArrow, rr, 0xFFFFFF, 1);
+            }
+        } else if (r.kind == ROW_BINDING) {
+            int k;
+            for (k = 0; k < BIND_SLOTS; k++) {
+                float cx = slot_x(k);
+                int none;
+                if (chosen && k == sSlot) {
+                    Rect b = {cx - 58, bar.y0 + 7, cx + 58, bar.y1 - 7};
+                    draw_box(b, 8, 0xE6FFFFFFu);
+                }
+                if (chosen && k == sSlot && sCapture != CAPTURE_NONE) {
+                    draw_text(sCapture == CAPTURE_KEY ? "Press a key" : "Press a button", cx, my + 2, 30, ALIGN_CENTRE,
+                              WAIT, 0, 0, 1, 112);
+                    continue;
+                }
+                if (sSection == SEC_CONTROLLER) {
+                    snprintf(buf, sizeof(buf), "%s", settings_pad_name(g_settings.pad[r.which][k]));
+                } else {
+                    settings_key_name(g_settings.key[r.which][k], buf, sizeof(buf));
+                }
+                none = !strcmp(buf, "-");
+                draw_text(buf, cx, my + 2, 34, ALIGN_CENTRE, none ? 0xFF9A8A70u : INK, 0, 0, !none, 112);
+            }
+        }
+    }
+    /* More above or below. */
+    if (sTop > 0) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP - 8, 9, 1, PURPLE);
+    if (sTop + VISIBLE_ROWS < n) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP + VISIBLE_ROWS * ROW_PITCH - 4, 9, -1, PURPLE);
+    /* What the keys do here, when it's not plain. */
+    if (sOnRows && row_at(sSection, sRow).kind == ROW_BINDING) {
+        draw_text(sCapture != CAPTURE_NONE ? "Esc: cancel" : input_controller_last() ? "Select: rebind    Y: clear"
+                                                                                   : "Select: rebind    Delete: clear",
+                  (kPage.x0 + kPage.x1) / 2, 752, 28, ALIGN_CENTRE, 0xFF7A6448u, 0, 0, 0, 0);
+    }
+}
+
+const uint32_t* options_draw(int w, int h) {
+    static unsigned drawn = ~0u;
+    static int drawnW, drawnH, drawnWhat, cw;
+    int what = sOpen ? 2 : hle_pause_main_page() ? 1 : 0, y;
+    if (sOpen && !hle_pause_main_page()) { /* the Pad closed (or the scene changed) under it */
+        set_open(0);
+        what = 0;
+    }
+    if (!what || w <= 0 || h <= 0 || !hle_font_metrics(&sCellW, &sCellH, &sBaseline) ||
+        !hle_pause_image("PmPocketbookL01", NULL, &cw, &cw))
+        return NULL;
+    if (what == drawnWhat && drawn == sChanges && w == drawnW && h == drawnH && sPx) return sPx;
+    if (w != sW || h != sH || !sPx) {
+        free(sPx);
+        sPx = (uint32_t*)malloc((size_t)w * h * 4);
+        if (!sPx) return NULL;
+        sW = w;
+        sH = h;
+    }
+    drawn = sChanges;
+    drawnW = w;
+    drawnH = h;
+    drawnWhat = what;
+    sScale = (float)w / REF_W < (float)h / REF_H ? (float)w / REF_W : (float)h / REF_H;
+    sOffX = (w - REF_W * sScale) / 2;
+    sOffY = (h - REF_H * sScale) / 2;
+    memset(sPx, 0, (size_t)w * h * 4);
+    if (what == 1) {
+        draw_tab("Options", 1);
+        return sPx;
+    }
+    {
+        /* The pages, drawn once for this size. */
+        static uint32_t* pages;
+        static int pagesW, pagesH;
+        if (!pages || pagesW != w || pagesH != h) {
+            free(pages);
+            draw_pages();
+            pages = (uint32_t*)malloc((size_t)w * h * 4);
+            if (pages) memcpy(pages, sPx, (size_t)w * h * 4);
+            pagesW = w;
+            pagesH = h;
+        } else {
+            memcpy(sPx, pages, (size_t)w * h * 4);
+        }
+    }
+    draw_book();
+    for (y = (int)Y(BAR_TOP); y < (int)ceilf(Y(BAR_BOTTOM)) && y < h; y++) {
+        if (y >= 0) memset(sPx + (size_t)y * w, 0, (size_t)w * 4);
+    }
+    return sPx;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Input */
+
+/* Whether keyboard key vk is bound to act. */
+static int key_is(int vk, int act) {
+    int k;
+    for (k = 0; k < BIND_SLOTS; k++) {
+        if (g_settings.key[act][k] == vk) return 1;
+    }
+    return 0;
+}
+
+static int pad_is(uint32_t pressed, int act) {
+    int k;
+    for (k = 0; k < BIND_SLOTS; k++) {
+        if (g_settings.pad[act][k] && (pressed & g_settings.pad[act][k])) return 1;
+    }
+    return 0;
+}
+
+static int in(Rect r, float x, float y) { return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1; }
+
+/* A click at window pixel (mx, my); returns 1 if it was on something. */
+static int click(int mx, int my) {
+    float x, y;
+    int i;
+    if (sScale <= 0) return 0;
+    x = (mx - sOffX) / sScale;
+    y = (my - sOffY) / sScale;
+    if (in(kTab, x, y)) {
+        set_open(0);
+        return 1;
+    }
+    for (i = 0; i < SECTIONS; i++) {
+        if (in(kButton[i], x, y)) {
+            sSection = i;
+            sOnRows = 0;
+            sRow = sTop = sSlot = 0;
+            changed();
+            return 1;
+        }
+    }
+    for (i = 0; i < VISIBLE_ROWS && sTop + i < row_count(sSection); i++) {
+        Rect r = row_rect(i);
+        Row row;
+        if (!in(r, x, y)) continue;
+        row = row_at(sSection, sTop + i);
+        sOnRows = 1;
+        if (sRow != sTop + i || row.kind == ROW_BINDING) {
+            sRow = sTop + i;
+            if (row.kind == ROW_BINDING) {
+                sSlot = x >= (slot_x(0) + slot_x(1)) / 2;
+                sCapture = sSection == SEC_CONTROLLER ? CAPTURE_PAD : CAPTURE_KEY;
+            }
+            changed();
+        } else {
+            select_();
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* The key a WM_KEYDOWN means, with left and right modifiers told apart. */
+static int key_of(WPARAM wp, LPARAM lp) {
+    int extended = (int)((lp >> 24) & 1);
+    if (wp == VK_SHIFT) return (int)MapVirtualKeyA((UINT)((lp >> 16) & 0xFF), MAPVK_VSC_TO_VK_EX);
+    if (wp == VK_CONTROL) return extended ? VK_RCONTROL : VK_LCONTROL;
+    if (wp == VK_MENU) return extended ? VK_RMENU : VK_LMENU;
+    return (int)wp;
+}
+
+int options_window_message(unsigned msg, uintptr_t wp, intptr_t lp) {
+    int down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN, repeat = down && (lp & (1 << 30)), vk = 0;
+    if (down) vk = key_of(wp, lp);
+    if (msg == WM_LBUTTONDOWN) vk = VK_LBUTTON;
+    if (msg == WM_RBUTTONDOWN) vk = VK_RBUTTON;
+    if (msg == WM_MBUTTONDOWN) vk = VK_MBUTTON;
+    if (msg == WM_XBUTTONDOWN) vk = HIWORD(wp) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
+    if (!sOpen) {
+        /* Right, on the Pad's main page, opens the tab. */
+        if (down && !repeat && (vk == VK_RIGHT || key_is(vk, ACT_RIGHT)) && hle_pause_main_page()) {
+            set_open(1);
+            return 1;
+        }
+        return 0;
+    }
+    if (sCapture != CAPTURE_NONE) {
+        if (repeat) return 1;
+        if (vk == VK_ESCAPE || vk == VK_BACK) {
+            sCapture = CAPTURE_NONE;
+            changed();
+        } else if (vk && sCapture == CAPTURE_KEY) {
+            bind(vk, 0);
+        }
+        return down || vk;
+    }
+    if (vk >= VK_LBUTTON && vk <= VK_XBUTTON2 && vk != VK_CANCEL && click((short)LOWORD(lp), (short)HIWORD(lp)))
+        return 1;
+    if (!vk) return 0;
+    if (vk == VK_UP || key_is(vk, ACT_UP)) up_down(-1);
+    else if (vk == VK_DOWN || key_is(vk, ACT_DOWN)) up_down(1);
+    else if (vk == VK_LEFT || key_is(vk, ACT_LEFT)) left_right(-1);
+    else if (vk == VK_RIGHT || key_is(vk, ACT_RIGHT)) left_right(1);
+    else if (repeat) return 1;
+    else if (vk == VK_RETURN || key_is(vk, ACT_2)) select_();
+    else if (vk == VK_ESCAPE || vk == VK_BACK || key_is(vk, ACT_1)) back();
+    else if (vk == VK_DELETE) clear();
+    return 1;
+}
+
+void options_controller(uint32_t raw, uint32_t nav) {
+    static uint32_t lastRaw, lastNav;
+    uint32_t pressed = raw & ~lastRaw, navPressed = nav & ~lastNav;
+    lastRaw = raw;
+    lastNav = nav;
+    if (!sOpen) {
+        if ((navPressed & XPAD_RIGHT) && hle_pause_main_page()) set_open(1);
+        return;
+    }
+    if (sCapture == CAPTURE_PAD) {
+        if (pressed) bind(0, pressed & (0u - pressed)); /* the lowest one */
+        return;
+    }
+    if (sCapture != CAPTURE_NONE) return;
+    if (navPressed & XPAD_UP) up_down(-1);
+    if (navPressed & XPAD_DOWN) up_down(1);
+    if (navPressed & XPAD_LEFT) left_right(-1);
+    if (navPressed & XPAD_RIGHT) left_right(1);
+    if ((pressed & XPAD_A) || pad_is(pressed, ACT_2)) select_();
+    else if ((pressed & XPAD_B) || pad_is(pressed, ACT_1)) back();
+    else if (pressed & XPAD_Y) clear();
+}
+
+int options_script(uint32_t held) {
+    static uint32_t last;
+    static int swallow; /* what the tab took stays its until let go */
+    uint32_t p = held & ~last;
+    last = held;
+    if (!held) swallow = 0;
+    if (!sOpen) {
+        if ((p & HOST_PAD_SCREEN_RIGHT) && hle_pause_main_page()) set_open(1);
+        if (sOpen) swallow = 1;
+        return swallow;
+    }
+    swallow = 1;
+    if (p & HOST_PAD_SCREEN_UP) up_down(-1);
+    if (p & HOST_PAD_SCREEN_DOWN) up_down(1);
+    if (p & HOST_PAD_SCREEN_LEFT) left_right(-1);
+    if (p & HOST_PAD_SCREEN_RIGHT) left_right(1);
+    if (p & HOST_PAD_2) select_();
+    if (p & HOST_PAD_1) back();
+    if (p & HOST_PAD_MINUS) clear();
+    return 1;
+}

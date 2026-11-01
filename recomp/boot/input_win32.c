@@ -264,6 +264,9 @@ static void rumble(int chan, int on) {
     pXInputSetState(0, &v);
 }
 
+/* Scripted input goes to the Options tab first, as the controller's does. */
+static int script_input(uint32_t held) { return options_script(held) || menu_is_open(); }
+
 void input_init(void) {
     HMODULE x = LoadLibraryA("xinput1_4.dll");
     if (!x) x = LoadLibraryA("xinput9_1_0.dll");
@@ -272,6 +275,7 @@ void input_init(void) {
         pXInputSetState = (DWORD(WINAPI*)(DWORD, XPadVibration*))(void*)GetProcAddress(x, "XInputSetState");
     }
     g_host_pad_read = read_pad;
+    g_host_script_input = script_input;
     g_host_pad_rumble = rumble;
     g_host_mouse_read = read_mouse;
     prompts_init();

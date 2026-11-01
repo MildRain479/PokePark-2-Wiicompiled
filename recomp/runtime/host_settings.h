@@ -55,6 +55,28 @@ int input_controller_last(void);
 /* Sets up the button prompt icons (prompts_win32.c). */
 void prompts_init(void);
 
+/* What settings_step changes. */
+enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT };
+/* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
+ * and saves it. */
+void settings_step(int which, int d);
+/* Binds key vk (or, if 0, controller button pad) to action act's slot,
+ * taking it off any other (one key or button does one thing), and saves. */
+void settings_bind(int act, int slot, int vk, uint32_t pad);
+/* Names, as the menus show them: "-" for none. */
+void settings_key_name(int vk, char* out, size_t n);
+const char* settings_pad_name(uint32_t b);
+
+/* The Options tab of the pause menu (options_win32.c), as for the settings
+ * menu below; used by it while that is closed. */
+int options_is_open(void);
+int options_window_message(unsigned msg, uintptr_t wp, intptr_t lp);
+void options_controller(uint32_t buttons, uint32_t nav);
+const uint32_t* options_draw(int w, int h);
+/* Scripted presses (HOST_PAD_* bits held), as the controller's; returns 1
+ * if the tab is open. */
+int options_script(uint32_t held);
+
 /* The settings menu (menu_win32.c). */
 int menu_is_open(void);
 /* Takes the window's keyboard and mouse messages while open; returns 1 if

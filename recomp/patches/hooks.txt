@@ -63,6 +63,7 @@
 0x80136B20 nsDelhi::nsAttraction::AttractionManager::LoadAttractionResources  # hle_game.c: which minigame is playing
 0x801FA730 nw4r::ut::detail::ResFontBase::SetResourceBuffer  # hle_prompts.c: button prompts as the bound keys
 0x801B3090 nw4r::g3d::ResTex::Init  # hle_prompts.c: the menus' button bar as the bound keys
+0x80122C60 nsDelhi::nsMenu::MenuScriptPauseMenu::MenuScriptPauseMenu  # hle_pause.c: whether the PokePark Pad is on its main page
 0x80171630 SceneSpecializerPark::RunBegin  # hle_game.c: entering a minigame for testing
 0x8016C950 SceneManager::fn_8016C950  # hle_game.c: no second switch to Hold after leaving Strap early
 0x801081C0 resident_messageId_to_string  # hle_text.c: minigame instructions for the PC controls

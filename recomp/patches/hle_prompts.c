@@ -122,6 +122,50 @@ static void draw_icons(Font* f) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* The game's text font, for menus drawn over the picture (menu_win32.c):
+ * the first font loaded with the button glyphs, the one messages use. */
+
+/* A glyph's widths (CWDH): where its pixels start and how far the pen
+ * moves; 0 if it has none. */
+static int glyph_widths(const Font* f, int glyph, int* left, int* advance) {
+    uint32_t size = LD32(f->font + 8), pos;
+    for (pos = f->font + LD16(f->font + 0xC); pos + 8 <= f->font + size; pos += LD32(pos + 4)) {
+        if (LD32(pos + 4) < 8) break;
+        if (LD32(pos) == 0x43574448) { /* CWDH */
+            int first = LD16(pos + 8), last = LD16(pos + 10);
+            if (glyph >= first && glyph <= last) {
+                uint32_t e = pos + 0x10 + 3 * (uint32_t)(glyph - first);
+                *left = (int8_t)LD8(e);
+                *advance = LD8(e + 2);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int hle_font_metrics(int* cellW, int* cellH, int* baseline) {
+    if (!sFontCount) return 0;
+    *cellW = sFonts[0].cw;
+    *cellH = sFonts[0].ch;
+    *baseline = sFonts[0].baseline;
+    return 1;
+}
+
+int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance) {
+    const Font* f = &sFonts[0];
+    int glyph, sheet, x0, y0, x, y;
+    if (!sFontCount || (glyph = glyph_of(f->font, LD32(f->font + 8), code)) < 0 ||
+        !glyph_widths(f, glyph, left, advance))
+        return 0;
+    cell_of(f, glyph, &sheet, &x0, &y0);
+    for (y = 0; y < f->ch; y++) {
+        for (x = 0; x < f->cw; x++) cov[y * f->cw + x] = (uint8_t)(get_px(f, sheet, x0 + x, y0 + y) * 17);
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------------ */
 /* The menus' button bar ("+ Skip", "1 Back", "2 Next"): its buttons are
  * pictures, in a texture named KeyButton (256x256, 8-bit colour indices
  * into 192 RGB5A3 colours) in each menu's model (lobbies, start menu,
@@ -283,6 +327,7 @@ void f_801B3090(ppc_t* c) {
     Bar* b;
     int i, x, y;
     f_801B3090_orig(c);
+    if (tex) hle_pause_texture(tex);
     if (!tex || !is_bar(tex)) return;
     for (i = 0; i < sBarCount; i++) {
         if (sBars[i].tex == tex) break;

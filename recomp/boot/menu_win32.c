@@ -1,8 +1,10 @@
 /* Settings (settings.ini) and the settings menu: display, mouse and
  * controls. Backspace, or Back+Start on a controller, opens and closes
  * it; the game keeps running behind it but gets no input. It is drawn
- * with GDI into an image that gl_backend.c lays over the picture: plain
- * for now, until there is a proper pause menu.
+ * with GDI into an image that gl_backend.c lays over the picture: plain,
+ * for testing (it can start any minigame). The same settings, but for
+ * the debug ones, are in the Options tab of the pause menu
+ * (options_win32.c).
  *
  *   Up/Down choose, Left/Right change, Enter rebinds (then press the key,
  *   mouse button or controller button; Esc cancels), Delete clears.
@@ -87,7 +89,7 @@ static int valid_msaa(int n) { return n >= 8 ? 8 : n >= 4 ? 4 : n >= 2 ? 2 : 1; 
 /* ------------------------------------------------------------------------ */
 /* Names */
 
-static void key_name(int vk, char* out, size_t n) {
+void settings_key_name(int vk, char* out, size_t n) {
     static const struct { int vk; const char* name; } kNames[] = {
         {VK_LBUTTON, "Left click"}, {VK_RBUTTON, "Right click"}, {VK_MBUTTON, "Middle click"},
         {VK_XBUTTON1, "Mouse 4"}, {VK_XBUTTON2, "Mouse 5"},
@@ -116,7 +118,7 @@ static void key_name(int vk, char* out, size_t n) {
     if (!GetKeyNameTextA(lp, out, (int)n)) snprintf(out, n, "Key %02X", vk);
 }
 
-static const char* pad_name(uint32_t b) {
+const char* settings_pad_name(uint32_t b) {
     static const struct { uint32_t bit; const char* name; } kNames[] = {
         {XPAD_UP, "D-pad up"}, {XPAD_DOWN, "D-pad down"}, {XPAD_LEFT, "D-pad left"}, {XPAD_RIGHT, "D-pad right"},
         {XPAD_START, "Start"}, {XPAD_BACK, "Back"}, {XPAD_LTHUMB, "L stick click"}, {XPAD_RTHUMB, "R stick click"},
@@ -135,11 +137,11 @@ void settings_binding_name(int act, int controller, char* out, size_t n) {
     if (n) *out = 0;
     for (k = 0; k < BIND_SLOTS; k++) {
         if (controller && g_settings.pad[act][k]) {
-            snprintf(out, n, "%s", pad_name(g_settings.pad[act][k]));
+            snprintf(out, n, "%s", settings_pad_name(g_settings.pad[act][k]));
             return;
         }
         if (!controller && g_settings.key[act][k]) {
-            key_name(g_settings.key[act][k], out, n);
+            settings_key_name(g_settings.key[act][k], out, n);
             return;
         }
     }
@@ -189,14 +191,14 @@ void settings_save(void) {
     fprintf(f, "[keyboard] ; Windows virtual-key codes, two per button (0: none)\n");
     for (i = 0; i < ACT_COUNT; i++) {
         char a[32], b[32];
-        key_name(g_settings.key[i][0], a, sizeof(a));
-        key_name(g_settings.key[i][1], b, sizeof(b));
+        settings_key_name(g_settings.key[i][0], a, sizeof(a));
+        settings_key_name(g_settings.key[i][1], b, sizeof(b));
         fprintf(f, "%s = 0x%02X 0x%02X ; %s, %s\n", kActionIni[i], g_settings.key[i][0], g_settings.key[i][1], a, b);
     }
     fprintf(f, "\n[controller] ; XInput buttons, two per button (0x10000: LT, 0x20000: RT)\n");
     for (i = 0; i < ACT_COUNT; i++) {
         fprintf(f, "%s = 0x%04X 0x%04X ; %s, %s\n", kActionIni[i], g_settings.pad[i][0], g_settings.pad[i][1],
-                pad_name(g_settings.pad[i][0]), pad_name(g_settings.pad[i][1]));
+                settings_pad_name(g_settings.pad[i][0]), settings_pad_name(g_settings.pad[i][1]));
     }
     fclose(f);
 }
@@ -294,7 +296,7 @@ enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
 
 static int sOpen, sRow, sCol, sCapture;
 
-int menu_is_open(void) { return sOpen; }
+int menu_is_open(void) { return sOpen || options_is_open(); }
 
 static void set_open(int open) {
     sOpen = open;
@@ -303,40 +305,45 @@ static void set_open(int open) {
 
 static void move(int d) { sRow = (sRow + d + ROW_COUNT) % ROW_COUNT; }
 
-static void change(int d) {
+void settings_step(int which, int d) {
     static const int kMsaa[] = {1, 2, 4, 8};
     int i;
-    switch (sRow) {
-    case ROW_FULLSCREEN: g_settings.fullscreen = !g_settings.fullscreen; break;
-    case ROW_SCALE: g_settings.scale = (g_settings.scale + d + MAX_SCALE + 1) % (MAX_SCALE + 1); break;
-    case ROW_MSAA:
+    switch (which) {
+    case SET_FULLSCREEN: g_settings.fullscreen = !g_settings.fullscreen; break;
+    case SET_SCALE: g_settings.scale = (g_settings.scale + d + MAX_SCALE + 1) % (MAX_SCALE + 1); break;
+    case SET_MSAA:
         for (i = 0; i < 4 && kMsaa[i] != g_settings.msaa; i++) {}
         g_settings.msaa = kMsaa[(i + d + 4) % 4];
         break;
-    case ROW_FPS:
+    case SET_FRAME_RATE:
         for (i = 0; i < FRAME_RATES && kFrameRates[i] != g_settings.frame_rate; i++) {}
         g_settings.frame_rate = kFrameRates[(i + d + FRAME_RATES) % FRAME_RATES];
         apply_frame_rate();
         break;
-    case ROW_MINIGAME:
-        sMinigame = (sMinigame + d + MINIGAMES) % MINIGAMES;
-        return;
-    case ROW_FOV:
+    case SET_FOV:
         g_settings.fov = g_settings.fov + 5 * d < FOV_MIN ? FOV_MIN : g_settings.fov + 5 * d > FOV_MAX ? FOV_MAX : g_settings.fov + 5 * d;
         hle_set_fov(g_settings.fov);
         break;
-    case ROW_SENSITIVITY: {
+    case SET_SENSITIVITY: {
         int tenths = (int)(g_settings.mouse_sensitivity * 10 + 0.5f) + d;
         g_settings.mouse_sensitivity = (tenths < 1 ? 1 : tenths > 30 ? 30 : tenths) / 10.0f;
         break;
     }
-    case ROW_INVERT: g_settings.invert_tilt = !g_settings.invert_tilt; break;
-    case ROW_RESET: return;
-    default: /* a binding row: moves between its columns */
-        sCol = sCol + d < 0 ? 0 : sCol + d >= COLS ? COLS - 1 : sCol + d;
-        return;
+    case SET_INVERT: g_settings.invert_tilt = !g_settings.invert_tilt; break;
+    default: return;
     }
     settings_save();
+}
+
+static void change(int d) {
+    static const int kStep[] = {SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, -1, SET_SENSITIVITY, SET_INVERT};
+    if (sRow == ROW_MINIGAME) {
+        sMinigame = (sMinigame + d + MINIGAMES) % MINIGAMES;
+    } else if (sRow < ROW_BIND) {
+        settings_step(kStep[sRow], d);
+    } else if (sRow < ROW_RESET) { /* a binding row: moves between its columns */
+        sCol = sCol + d < 0 ? 0 : sCol + d >= COLS ? COLS - 1 : sCol + d;
+    }
 }
 
 static void activate(void) {
@@ -360,9 +367,7 @@ static void clear(void) {
     settings_save();
 }
 
-/* Binds to the selected slot, taking it off any other: one key or button
- * does one thing. */
-static void bind(int vk, uint32_t pad) {
+void settings_bind(int act, int slot, int vk, uint32_t pad) {
     int i, k;
     for (i = 0; i < ACT_COUNT; i++) {
         for (k = 0; k < BIND_SLOTS; k++) {
@@ -370,10 +375,15 @@ static void bind(int vk, uint32_t pad) {
             if (pad && g_settings.pad[i][k] == pad) g_settings.pad[i][k] = 0;
         }
     }
-    if (vk) g_settings.key[sRow - ROW_BIND][sCol] = vk;
-    else g_settings.pad[sRow - ROW_BIND][sCol - BIND_SLOTS] = pad;
-    sCapture = CAPTURE_NONE;
+    if (vk) g_settings.key[act][slot] = vk;
+    else g_settings.pad[act][slot] = pad;
     settings_save();
+}
+
+/* Binds to the selected slot. */
+static void bind(int vk, uint32_t pad) {
+    settings_bind(sRow - ROW_BIND, vk ? sCol : sCol - BIND_SLOTS, vk, pad);
+    sCapture = CAPTURE_NONE;
 }
 
 /* The key a WM_KEYDOWN means, with left and right modifiers told apart. */
@@ -388,6 +398,7 @@ static int key_of(WPARAM wp, LPARAM lp) {
 int menu_window_message(void* wnd, unsigned msg, uintptr_t wp, intptr_t lp) {
     int down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN, repeat = down && (lp & (1 << 30));
     (void)wnd;
+    if (!sOpen && options_window_message(msg, wp, lp)) return 1;
     if (msg == WM_KEYDOWN && wp == VK_BACK && sCapture == CAPTURE_NONE) {
         if (!repeat) set_open(!sOpen);
         return 1;
@@ -423,11 +434,14 @@ void menu_controller(uint32_t raw, uint32_t nav) {
     uint32_t pressed = raw & ~lastRaw, navPressed = nav & ~lastNav;
     lastRaw = raw;
     lastNav = nav;
-    if ((raw & both) == both && (pressed & both)) {
+    if ((raw & both) == both && (pressed & both) && !options_is_open()) {
         set_open(!sOpen);
         return;
     }
-    if (!sOpen) return;
+    if (!sOpen) {
+        options_controller(raw, nav);
+        return;
+    }
     if (sCapture == CAPTURE_PAD) {
         if (pressed) bind(0, pressed & (0u - pressed)); /* the lowest one */
         return;
@@ -529,7 +543,8 @@ const uint32_t* menu_draw(int w, int h) {
                                                 "Camera sensitivity", "Invert camera tilt"};
     int pw, ph, x0, y0, x, y, i, k, cell, valueX;
     char buf[64];
-    if (!sOpen || w <= 0 || h <= 0) return NULL;
+    if (!sOpen) return options_draw(w, h);
+    if (w <= 0 || h <= 0) return NULL;
     if (w != sW || h != sH) setup(w, h);
     memset(sPixels, 0, (size_t)w * h * 4);
     pw = sLine * 30 < w - 2 * sLine ? sLine * 30 : w - 2 * sLine;
@@ -572,8 +587,8 @@ const uint32_t* menu_draw(int w, int h) {
                     text(cx, y, kWait, sCapture == CAPTURE_KEY ? "Press a key..." : "Press a button...");
                     continue;
                 }
-                if (k < BIND_SLOTS) key_name(g_settings.key[a][k], buf, sizeof(buf));
-                else snprintf(buf, sizeof(buf), "%s", pad_name(g_settings.pad[a][k - BIND_SLOTS]));
+                if (k < BIND_SLOTS) settings_key_name(g_settings.key[a][k], buf, sizeof(buf));
+                else snprintf(buf, sizeof(buf), "%s", settings_pad_name(g_settings.pad[a][k - BIND_SLOTS]));
                 text(cx, y, strcmp(buf, "-") ? kText : kDim, buf);
             }
         } else {

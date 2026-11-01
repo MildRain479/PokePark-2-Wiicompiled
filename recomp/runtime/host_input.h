@@ -41,6 +41,10 @@ extern void (*g_host_pointer_read)(float* dx, float* dy);
 /* The controller's sticks, -1 to 1 each (x right, y up), dead zone taken
  * off; 0 without a controller. */
 extern void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);
+/* Scripted input (RECOMP_PAD_SCRIPT, for test runs), the HOST_PAD_* bits
+ * held, offered to the host's menus first; returns 1 if they took it, and
+ * then the game doesn't get it. */
+extern int (*g_host_script_input)(uint32_t held);
 /* Button prompts (hle_prompts.c). The icon for a Wii Remote button (a
  * HOST_PAD_* bit; HOST_PAD_SCREEN_UP stands for the whole d-pad), as
  * coverage 0-255 in a w x h box, top row first: what the player has bound
