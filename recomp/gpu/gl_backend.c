@@ -1772,9 +1772,27 @@ static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int 
     r->a[3] = count;
 }
 
-/* Pairs each draw of sCur with the same draw of sPrev: the first not yet
- * taken with the same key. */
+/* How far apart two draws' position matrices are (the first 10 of XF
+ * memory): the sum of their words' differences, or at least limit. */
+static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) {
+    float d = 0;
+    int i;
+    for (i = 0; i < 120 && d < limit; i++) {
+        float x, y;
+        if (a[i] == b[i]) continue;
+        memcpy(&x, &a[i], 4);
+        memcpy(&y, &b[i], 4);
+        if (x == x && y == y) d += fabsf(y - x);
+    }
+    return d;
+}
+
+/* Pairs each draw of sCur with the same draw of sPrev: of the first few
+ * not yet taken with the same key, the one whose matrices are nearest.
+ * (Draws of one key can change order between frames: the save files
+ * screen's panels do, and taken in order they swapped places.) */
 static void match_draws(void) {
+    enum { CANDIDATES = 8 };
     enum { SLOTS = 8192 };
     static uint64_t keys[SLOTS];
     static uint8_t used[SLOTS];
@@ -1808,8 +1826,20 @@ static void match_draws(void) {
         if (r->op != OP_DRAW) continue;
         while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
         if (used[slot] && head[slot] >= 0) {
-            r->match = head[slot];
-            head[slot] = next[head[slot]];
+            const uint32_t* xf = sCur->xf + r->xf;
+            int* link = &head[slot];
+            int* best = link;
+            float bestD = next[*link] < 0 ? 0 : matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, 1e30f);
+            int n;
+            for (n = 1, link = &next[*link]; n < CANDIDATES && *link >= 0 && bestD > 0; n++, link = &next[*link]) {
+                float d = matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, bestD);
+                if (d < bestD) {
+                    bestD = d;
+                    best = link;
+                }
+            }
+            r->match = *best;
+            *best = next[*best];
         }
     }
 }
