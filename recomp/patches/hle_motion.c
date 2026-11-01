@@ -67,8 +67,11 @@ static const struct {
 };
 
 /* How far the keys and stick tilt the remote, and how quickly it gets
- * there (a share of the way each report: about 30 ms). */
-#define MAX_STEER (35.0f * PI / 180.0f)
+ * there (a share of the way each report: about 30 ms). The minigames'
+ * scripts read the accelerometer themselves (FScriptLoader::syscall0x15);
+ * at 35 degrees (0.57 g across) their turns were too wide to make, and
+ * at 80 Gyarados' Aqua Dash turns visibly sharper. */
+#define MAX_STEER (80.0f * PI / 180.0f)
 /* Forward and back as far as climbing goes: Pelipper's balloon climbs
  * as fast at 50 degrees as at 70, and at 30 too slowly. */
 #define MAX_PITCH (50.0f * PI / 180.0f)
@@ -162,15 +165,20 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
      * pointer end), z out of its face. Sideways, the pointer end is to the
      * left: a positive steer lifts it (turning left), and tilting forward
      * lifts the edge nearest the player (+x). Upright, the pointer end is up and the face
-     * toward the player. */
+     * toward the player. Steering and pitch each set their own axis, as
+     * if tilted one way and then the other, so steering hard keeps all of
+     * the climb or dive (a single rotation would take it away); z, out of
+     * the face, makes up the rest of g. */
     if (hold == HOLD_UPRIGHT) {
         x = 0;
         y = (float)G;
         z = 0;
     } else {
-        x = sinf(pitch) * cosf(steer) * G;
+        float rest;
+        x = sinf(pitch) * G;
         y = sinf(steer) * G;
-        z = cosf(pitch) * cosf(steer) * G;
+        rest = (float)G * G - x * x - y * y;
+        z = rest > 0 ? sqrtf(rest) : 0;
     }
 
     /* Bursts of acceleration on top. */

@@ -149,7 +149,7 @@ instructions ask, from the same keys:
 | Rotom's Spooky Shoot-'em-Up | pointer: mouse | right stick |
 | Bastiodon's Panel Crush | buttons, as on the Wii | |
 
-Tilting eases to 35 degrees (left/right) or 30 (forward/back), and the
+Tilting eases to 80 degrees (left/right) or 50 (forward/back), and the
 stick tilts in proportion. Directions follow the remote's axes as the
 game reads them; `RECOMP_TILT_FLIP=lr`, `fb` or `lrfb` and
 `RECOMP_POINTER_FLIP=y` turn them round, if a minigame turns out to
