@@ -69,7 +69,9 @@ static const struct {
 /* How far the keys and stick tilt the remote, and how quickly it gets
  * there (a share of the way each report: about 30 ms). */
 #define MAX_STEER (35.0f * PI / 180.0f)
-#define MAX_PITCH (30.0f * PI / 180.0f)
+/* Forward and back as far as climbing goes: Pelipper's balloon climbs
+ * as fast at 50 degrees as at 70, and at 30 too slowly. */
+#define MAX_PITCH (50.0f * PI / 180.0f)
 #define EASE 0.15f
 
 /* The pointer: how far a pixel of mouse movement and a second of full
