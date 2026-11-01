@@ -70,6 +70,7 @@ uint32_t hle_call(ppc_t* c, uint32_t fn, uint32_t r3, uint32_t r4);
  * and files/ extracted from the disc. */
 int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
+void hle_text_boot_setup(void);
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst);
 uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max);
 const uint8_t* hle_dvd_disc_id(void);

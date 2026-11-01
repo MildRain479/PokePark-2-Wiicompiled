@@ -4,6 +4,7 @@
  * them. RECOMP_SETTINGS=<file> reads and writes another file instead. */
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* What can be bound: the Wii Remote's buttons, held sideways. */
@@ -43,6 +44,9 @@ void settings_load(void);
 void settings_save(void);
 void settings_default_controls(void);
 
+/* The name of the first key (or, with controller, controller button)
+ * bound to action act, as the menu shows it; "" if none is. */
+void settings_binding_name(int act, int controller, char* out, size_t n);
 /* How many times the settings have been saved (so changed). */
 uint32_t settings_generation(void);
 /* Whether the controller was used more recently than the keyboard and

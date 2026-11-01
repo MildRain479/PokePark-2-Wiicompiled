@@ -218,7 +218,18 @@ static int prompt_icon(uint32_t button, uint8_t* out, int w, int h) {
  * the other device was used. */
 static uint32_t prompt_generation(void) { return settings_generation() * 2 + (uint32_t)input_controller_last(); }
 
+static void button_name(uint32_t button, char* out, int n) {
+    int a;
+    for (a = 0; a < ACT_COUNT && kBit[a] != button; a++) {}
+    if (a == ACT_COUNT) {
+        if (n) *out = 0;
+        return;
+    }
+    settings_binding_name(a, input_controller_last(), out, (size_t)n);
+}
+
 void prompts_init(void) {
     g_host_prompt_icon = prompt_icon;
     g_host_prompt_generation = prompt_generation;
+    g_host_button_name = button_name;
 }

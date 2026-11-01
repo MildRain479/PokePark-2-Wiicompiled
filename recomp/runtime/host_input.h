@@ -49,3 +49,7 @@ extern void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);
 extern int (*g_host_prompt_icon)(uint32_t button, uint8_t* coverage, int w, int h);
 /* Changes whenever those icons may have. */
 extern uint32_t (*g_host_prompt_generation)(void);
+/* The name of what the player has bound to a button (a HOST_PAD_* bit) on
+ * the device used last, as the settings menu shows it ("Q", "LB"); "" if
+ * nothing is. For text that names it (hle_text.c). */
+extern void (*g_host_button_name)(uint32_t button, char* out, int n);

@@ -130,6 +130,21 @@ static const char* pad_name(uint32_t b) {
     return "-";
 }
 
+void settings_binding_name(int act, int controller, char* out, size_t n) {
+    int k;
+    if (n) *out = 0;
+    for (k = 0; k < BIND_SLOTS; k++) {
+        if (controller && g_settings.pad[act][k]) {
+            snprintf(out, n, "%s", pad_name(g_settings.pad[act][k]));
+            return;
+        }
+        if (!controller && g_settings.key[act][k]) {
+            key_name(g_settings.key[act][k], out, n);
+            return;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------------ */
 /* settings.ini */
 

@@ -15,6 +15,7 @@
 
 int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
+void hle_text_boot_setup(void);
 void hle_nand_set_root(const char* root);
 void hle_dump_threads(void);
 void input_init(void);
@@ -475,7 +476,10 @@ int main(int argc, char** argv) {
         slash = strrchr(root, '/');
         if (slash) strcpy(slash + 1, "disc");
         else strcpy(root, "disc");
-        if (hle_dvd_init(root) == 0) hle_dvd_boot_setup();
+        if (hle_dvd_init(root) == 0) {
+            hle_dvd_boot_setup();
+            hle_text_boot_setup();
+        }
         /* Saves live in "nand" beside "disc", or RECOMP_NAND (test runs,
          * which keep their own). */
         strcpy(root + strlen(root) - 4, "nand");
