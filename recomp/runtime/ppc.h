@@ -107,8 +107,7 @@ static inline void st_f64(uint32_t a, double v) { ST64(a, f64_bits(v)); }
 
 /* Function-entry trace: a ring of the most recent guest functions entered,
  * printed when the runtime stops on an error. Compiled out unless
- * RECOMP_TRACE is defined. */
-#ifdef RECOMP_TRACE
+ * RECOMP_TRACE is defined (then the ring stays empty). */
 extern uint32_t g_trace[256];
 extern unsigned g_trace_pos;
 /* ...and, while g_count_calls is set (RECOMP_CALLS), a call count per
@@ -116,6 +115,7 @@ extern unsigned g_trace_pos;
  * predictable branch; on, a 4 MB table that every call writes to. */
 extern uint32_t g_calls[0x100000];
 extern int g_count_calls;
+#ifdef RECOMP_TRACE
 #define PPC_TRACE(a)     (g_trace[g_trace_pos++ & 255] = (a), g_count_calls ? (void)g_calls[((a) >> 2) & 0xFFFFF]++ : (void)0)
 #else
 #define PPC_TRACE(a) ((void)0)

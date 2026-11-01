@@ -9,6 +9,10 @@ Usage:
                                                  # each build ~70 s
     python tools/recomp/build.py --release --dist  # ...and put the game program
                                                  # in build/recomp/dist
+    python tools/recomp/build.py --release --pgo --dist  # ...optimized with a
+                                                 # profile of a run through
+                                                 # the park (MSVC): ~8% less
+                                                 # time per frame
 
 Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 """
@@ -83,6 +87,62 @@ def build_msvc(common, targets, opt):
     subprocess.check_call(["cmd", "/c", bat])
 
 
+# Profile-guided optimization (MSVC): the boot program linked instrumented,
+# run through the park (the title, a save file, into the park and walking
+# about) to see which code runs most, and linked again with that. The
+# profile is kept in build/recomp/pgo and used by later builds (code that
+# changed since goes without) until --pgo-train makes a new one.
+def pgo_script():
+    # Slowly: the instrumented program runs at about 15 fps.
+    sc = [f"{t}:2 {t}.5:" for t in range(20, 141, 12)]
+    t = 150
+    for d in "up up+left up right up down+right up left up right up down up+left up right up".split():
+        sc.append(f"{t}:{d}")
+        t += 8
+    return " ".join(sc)
+
+
+def pgo(train):
+    pgo_dir = os.path.join(OUT, "pgo")
+    pgd = os.path.join(pgo_dir, "boot.pgd")
+    objs = f'"{os.path.join(OBJ, "*.obj")}" "{os.path.join(OBJ, "boot", "*.obj")}"'
+    libs = " ".join(LIBS["boot"])
+    bat = os.path.join(pgo_dir, "link.bat")
+
+    def link(mode, exe):
+        with open(bat, "w") as f:
+            f.write(f'@call "{vcvars()}" >nul 2>nul\n')
+            f.write(f'link /nologo /DEBUG /MANIFEST:EMBED /LTCG:{mode} /PGD:"{pgd}" /OUT:"{exe}" {objs} {libs} '
+                    "|| exit /b 1\n")
+        subprocess.check_call(["cmd", "/c", bat])
+
+    os.makedirs(pgo_dir, exist_ok=True)
+    if train or not glob.glob(os.path.join(pgo_dir, "boot!*.pgc")):
+        if not os.path.exists(DOL):
+            print("pgo: no game in orig/R8AE01 to train with; linked without a profile")
+            return
+        for f in glob.glob(os.path.join(pgo_dir, "boot!*.pgc")):
+            os.remove(f)
+        exe = os.path.join(pgo_dir, "boot.exe")
+        link("PGINSTRUMENT", exe)
+        # The instrumented program needs the profiling runtime beside it.
+        with open(bat, "w") as f:
+            f.write(f'@call "{vcvars()}" >nul 2>nul\nwhere pgort140.dll\n')
+        runtime = subprocess.check_output(["cmd", "/c", bat], text=True).split("\n")[0].strip()
+        shutil.copy2(runtime, pgo_dir)
+        shutil.copytree(os.path.join(ROOT, "recomp", "assets", "prompts"), os.path.join(pgo_dir, "prompts"),
+                        dirs_exist_ok=True)
+        nand = os.path.join(pgo_dir, "nand")
+        shutil.rmtree(nand, ignore_errors=True)
+        shutil.copytree(os.path.join(ROOT, "orig", "R8AE01", "nand"), nand)
+        env = dict(os.environ, RECOMP_NAND=nand, RECOMP_SKIP_MOVIES="1", RECOMP_GX_HIDDEN="1", RECOMP_AUDIO="0",
+                   RECOMP_SETTINGS=os.path.join(pgo_dir, "settings.ini"), RECOMP_PAD_SCRIPT=pgo_script())
+        print("pgo: training, about 5 minutes")
+        subprocess.call([exe, DOL, "290"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.rmtree(nand, ignore_errors=True)
+    link("PGOPTIMIZE", os.path.join(OUT, "boot.exe"))
+
+
 def build_cc(common, targets, opt):
     inc = ["-I", os.path.join(ROOT, "recomp", "runtime"), "-I", GEN, "-I", os.path.join(ROOT, "src")]
     defs = [f"-D{d}" for d in DEFINES]
@@ -110,6 +170,11 @@ def main():
     ap.add_argument("--run", choices=sorted(TARGETS))
     ap.add_argument("--opt", default=None, help="optimization flag (default /O2 or -O2)")
     ap.add_argument("--release", action="store_true", help="whole-program optimization (MSVC /GL with /LTCG)")
+    ap.add_argument("--pgo", action="store_true",
+                    help="with --release: optimize the boot program with a profile of a run through the park")
+    ap.add_argument("--pgo-train", action="store_true", help="with --pgo: make a new profile")
+    ap.add_argument("--no-trace", action="store_true",
+                    help="without the trace of recent calls (RECOMP_TRACE) kept for crash reports and RECOMP_CALLS")
     ap.add_argument("--dist", action="store_true",
                     help="copy the boot program, as PokePark.exe, and its files to build/recomp/dist")
     ap.add_argument("args", nargs="*", help="extra arguments for --run")
@@ -120,6 +185,9 @@ def main():
     # Objects built with other flags go elsewhere, so switching rebuilds.
     if args.opt and args.opt not in ("/O2", "-O2"):
         OBJ = os.path.join(OUT, "obj_" + "".join(ch for ch in args.opt if ch.isalnum()))
+    if args.no_trace:
+        DEFINES.remove("RECOMP_TRACE")
+        OBJ += "_notrace"
 
     gen = sorted(glob.glob(os.path.join(GEN, "*.c")))
     if not gen:
@@ -135,6 +203,8 @@ def main():
             os.remove(o)
     if os.name == "nt":
         build_msvc(common, TARGETS, args.opt or "/O2")
+        if args.pgo and args.release:
+            pgo(args.pgo_train)
     else:
         build_cc(common, TARGETS, args.opt or "-O2")
     # The button prompt icons, beside the program (prompts_win32.c).
