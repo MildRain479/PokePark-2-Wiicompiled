@@ -300,12 +300,22 @@ int hle_wait_for_event(ppc_t* c) {
         }
         if (!have) return 0;
         /* Frames shown between the game's (above 60 fps) are drawn while
-         * it waits. */
+         * it waits, but only when one should be done before the wait is
+         * over: a late wake-up slows the game itself. Otherwise the
+         * frame waits for the next one (or is left out). */
         if (g_host_frame_due) {
+            static uint64_t cost; /* a frame's drawing, smoothed, in ticks */
             uint64_t due;
             while ((due = g_host_frame_due()) != 0 && (int64_t)(due - deadline) < 0) {
+                uint64_t start;
+                if ((int64_t)(deadline - due) < (int64_t)(cost + cost / 2)) {
+                    cost -= cost / 16; /* so one slow stretch doesn't leave them out for good */
+                    break;
+                }
                 sleep_until(due, 1);
+                start = ppc_timebase();
                 g_host_frame_render();
+                cost = (cost * 7 + (ppc_timebase() - start)) / 8;
             }
         }
         sleep_until(deadline, precise);

@@ -625,6 +625,7 @@ static int sDumpEvery = 30;
 static unsigned sPresented;
 /* The settings as applied. */
 static int sScale, sMsaa = 1, sMaxSamples = 1, sFullscreen, sHidden;
+static unsigned sGameFrames; /* the game's frames, for the fps report */
 static float sMaxAniso; /* the most anisotropic filtering this GPU does; 0 if none */
 static WINDOWPLACEMENT sWindowed;
 
@@ -936,6 +937,9 @@ static void dump_shared(const char* path) {
     ID3D11Texture2D_Release(staging);
 }
 
+static int sRecording;            /* frames between the game's are drawn ("Frames between the game's") */
+static unsigned sPresentsDropped; /* frames left out as the compositor was full, for the fps report */
+
 /* Shows what was drawn into the window's framebuffer, w x h. */
 static void window_present(int w, int h) {
     ID3D11Texture2D* back;
@@ -958,8 +962,15 @@ static void window_present(int w, int h) {
         ID3D11DeviceContext_CopyResource(sD3dCtx, (ID3D11Resource*)back, (ID3D11Resource*)sShared);
         ID3D11Texture2D_Release(back);
     }
-    hr = IDXGISwapChain1_Present(sChain, 0, sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
-    if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
+    /* Above 60 fps a frame is never waited for: in a window the
+     * compositor takes frames at its own rate (with more than one
+     * display, maybe a slower one's), and once its queue is full a
+     * present waits for it, and the game, drawing these frames while it
+     * waits, would slow down. Then the frame is left out. */
+    hr = IDXGISwapChain1_Present(sChain, 0,
+                                 (sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0) | (sRecording ? DXGI_PRESENT_DO_NOT_WAIT : 0));
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) sPresentsDropped++;
+    else if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
 }
 
 /* RECOMP_GL_DEBUG=1: a debug context (compatibility profile, as the
@@ -1673,13 +1684,18 @@ static void present_output(int x, int y, int cw, int ch) {
              * for an event: how much headroom is left. */
             extern uint64_t g_wait_ticks;
             static uint64_t lastWait;
+            static unsigned lastGameFrames, lastDropped;
             double secs = (double)(now.QuadPart - since.QuadPart) / freq.QuadPart;
             double busy = 100.0 * (1.0 - (double)(g_wait_ticks - lastWait) / PPC_TB_HZ / secs);
             lastWait = g_wait_ticks;
             snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
                      worst, busy);
             SetWindowTextA(sWnd, title);
-            if (e && *e == '1') fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%\n", fps, worst, busy);
+            if (e && *e == '1')
+                fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%, game %u, left out %u\n", fps, worst, busy,
+                        sGameFrames - lastGameFrames, sPresentsDropped - lastDropped);
+            lastGameFrames = sGameFrames;
+            lastDropped = sPresentsDropped;
             if (e && *e == '1') print_gl_stats();
             since = now;
             frames = 0;
@@ -2133,6 +2149,7 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
 }
 
 void gxb_present(int x, int y, int cw, int ch) {
+    sGameFrames++;
     if (sRecording) {
         RecOp* r = rec_op(OP_PRESENT);
         r->a[0] = x;
