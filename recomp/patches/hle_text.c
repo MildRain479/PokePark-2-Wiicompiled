@@ -54,7 +54,7 @@ static const struct {
      "Once you reach Rayquaza's head,\nyou'll see a Pointer.\nMove it with the right stick."},
     /* Venusaur's Vine Swing */
     {35, "Hold the Wii Remote vertically", "When the time starts, press [shake]\nby turns to swing on the vine!"},
-    {37, "Once you are swinging well,", "Once you are swinging well,\nit's time to jump!\nPress [B] or [2]."},
+    {37, "Once you are swinging well,", "Once you are swinging well,\nit's time to jump!\nPress [B]."},
     /* Tangrowth's Swing-Along */
     {41, "Hold the Wii Remote vertically", "When the time starts, press [shake]\nby turns to swing on the rope!"},
     {42, "Swing in time with the rope", "Swing in time with the rope\nand jump when ready.\nPress [B] or [2] to jump."},
