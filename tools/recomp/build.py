@@ -140,6 +140,10 @@ def pgo(train):
         print("pgo: training, about 5 minutes")
         subprocess.call([exe, DOL, "290"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         shutil.rmtree(nand, ignore_errors=True)
+        # Only the profile is kept: the instrumented program is ~70 MB with its symbols.
+        for f in ("boot.exe", "boot.pdb", "boot.ilk"):
+            if os.path.exists(os.path.join(pgo_dir, f)):
+                os.remove(os.path.join(pgo_dir, f))
     link("PGOPTIMIZE", os.path.join(OUT, "boot.exe"))
 
 
