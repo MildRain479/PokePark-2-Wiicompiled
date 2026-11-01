@@ -335,7 +335,8 @@ runs unchanged.
 - **Backend**: `gx_frames.c` takes the decoder's calls, records frames
   and paces the ones between the game's, and hands the drawing to a
   device (`gx_device.h`) in a window (`window_win32.c`). There are two,
-  picked by the Renderer setting (Options, Display) from the next start;
+  picked by the Renderer setting (Options, Display; Vulkan unless set
+  otherwise) from the next start;
   if the one picked can't start, the other draws. The OpenGL one,
   `gl_backend.c`, OpenGL 3.3:
   - The EFB is an offscreen framebuffer at the settings' internal

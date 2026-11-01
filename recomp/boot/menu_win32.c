@@ -254,6 +254,7 @@ void settings_load(void) {
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
     g_settings.aniso = 1;
+    g_settings.renderer = RENDERER_VULKAN; /* OpenGL draws if it can't start */
     g_settings.rumble = 2;
     g_settings.text_speed = 1;
     g_settings.berries = 100;
