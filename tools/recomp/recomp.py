@@ -153,7 +153,10 @@ def emit_function(dol, f, entries, switch, stats, hooked=False, regcache=True):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dol", default=os.path.join(ROOT, "orig/R8AE01/sys/main.dol"))
+    dol = os.path.join(ROOT, "orig/R8AE01/sys/main.dol")
+    if not os.path.exists(dol):  # only the disc extracted (dtk disc extract)
+        dol = os.path.join(ROOT, "orig/R8AE01/disc/sys/main.dol")
+    ap.add_argument("--dol", default=dol)
     ap.add_argument("--symbols", default=os.path.join(ROOT, "config/R8AE01/symbols.txt"))
     ap.add_argument("--out", default=os.path.join(ROOT, "build/recomp/gen"))
     ap.add_argument("--hooks", default=os.path.join(ROOT, "recomp/patches/hooks.txt"))

@@ -35,6 +35,8 @@ OUT = os.path.join(ROOT, "build", "recomp")
 GEN = os.path.join(OUT, "gen")
 OBJ = os.path.join(OUT, "obj")
 DOL = os.path.join(ROOT, "orig", "R8AE01", "sys", "main.dol")
+if not os.path.exists(DOL):  # only the disc extracted (dtk disc extract)
+    DOL = os.path.join(ROOT, "orig", "R8AE01", "disc", "sys", "main.dol")
 
 TARGETS = {
     "test": [
