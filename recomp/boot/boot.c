@@ -200,7 +200,7 @@ static void dump_calls(int n) {
 
 #define MAX_SAMPLES 400000
 static HANDLE gGameThread;
-extern volatile long g_in_gl; /* gl_backend.c */
+extern volatile long g_in_gl; /* gx_frames.c */
 #define SAMPLE_IN_GL 1 /* a sample taken while the game thread was inside OpenGL */
 static DWORD64 gSamples[MAX_SAMPLES];
 static volatile LONG gSampleCount;

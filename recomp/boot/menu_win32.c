@@ -21,8 +21,8 @@ int hle_widescreen(void);
 int display_scale(void); /* gl_backend.c: as applied */
 int display_msaa(void);
 void hle_set_frame_rate(int fps);   /* hle_game.c */
-void gxb_set_output_rate(int fps);  /* gl_backend.c */
-int gxb_display_hz(void);           /* gl_backend.c: the window's monitor's refresh rate */
+void gxb_set_output_rate(int fps);  /* gx_frames.c */
+int gxb_display_hz(void);           /* window_win32.c: the window's monitor's refresh rate */
 
 /* The frame rates offered. Above 60 the game still draws 60 frames a
  * second and the ones between are interpolated (gl_backend.c). */

@@ -1,4 +1,4 @@
-/* OpenGL backend for the GX decoder.
+/* OpenGL device for the GX decoder (gx_device.h).
  *
  * The EFB (the GPU's embedded framebuffer, 640x528) is an offscreen
  * framebuffer rendered at a multiple of the native resolution (the
@@ -9,11 +9,11 @@
  * draws without compiling a new shader. Copies of the EFB to the XFB are
  * presented in a window, or borderless fullscreen, at the shape they have
  * on a TV, with the settings menu over them while it is open;
- * RECOMP_GX_DUMP=<dir> also writes them as BMPs.
+ * RECOMP_GX_DUMP=<dir> also writes them as BMPs. gx_frames.c decides
+ * what is drawn when; the window is window_win32.c's.
  *
  * Environment:
  *   RECOMP_GX_SCALE=n          internal resolution multiplier, over the settings
- *   RECOMP_GX_HIDDEN=1         do not show the window
  *   RECOMP_GX_DUMP=<dir>       write presented frames as BMP files
  *   RECOMP_GX_DUMP_EVERY=n     ...every nth frame (default 30)
  *   RECOMP_GX_DUMP_FROM=n      ...from the nth on (default 0)
@@ -35,11 +35,8 @@
 #pragma comment(lib, "dxguid.lib")
 
 
-#include "gx.h"
+#include "gx_device.h"
 #include "host_settings.h"
-
-#define EFB_W 640
-#define EFB_H 528
 
 /* ------------------------------------------------------------------------ */
 /* GL 2+ entry points */
@@ -128,15 +125,13 @@ GL_FUNCS(DECLARE)
 #undef DECLARE
 
 static void gl_forget(void);
-static uint64_t frame_due(void);
 /* wglSwapIntervalEXT. Set to 0: presenting never waits for the display.
  * The game paces itself by its emulated retrace (and the frames between
- * by frame_render), and in a window or borderless window the compositor
+ * by gx_frames.c), and in a window or borderless window the compositor
  * shows only whole frames anyway. Waiting held up the game thread: with
  * a display whose refresh stalls (a virtual display with nobody
  * watching), every present took 110 ms and the game ran at 7 fps. */
 static BOOL(WINAPI* pSwapInterval)(int);
-static void frame_render(void);
 
 static void load_gl(void) {
 #define LOAD(ret, name, args) \
@@ -230,7 +225,7 @@ static const char* kVertexShader =
     "    ? vec4(p0 * world.x + p1 * world.z, p2 * world.y + p3 * world.z, p4 * world.z + p5, -world.z)\n"
     "    : vec4(p0 * world.x + p1, p2 * world.y + p3, p4 * world.z + p5, 1.0);\n"
     /* GX depth runs from -w (near) to 0 (far). The EFB depth is stored
-     * reversed (see gxb_init), so the far plane, where GX scenes keep
+     * reversed (see gxd_init), so the far plane, where GX scenes keep
      * nearly everything, gets the float precision: 0..w, far to near. */
     "  gl_Position = vec4(clip.x, clip.y, -clip.z, clip.w);\n"
     "  v_col0 = channel(0, a_col0, world, n);\n"
@@ -365,36 +360,6 @@ static const char* kFragmentShader =
     "  o_color = last;\n"
     "}\n";
 
-extern volatile long g_in_gl;
-static void print_gl_stats(void);
-
-/* Time and calls per entry point, for RECOMP_FPS=1. */
-enum { GLK_TEXTURE, GLK_TEXTURE_UPDATE, GLK_DRAW, GLK_CLEAR, GLK_COPY, GLK_PRESENT, GL_KINDS };
-static const char* const kGlKind[GL_KINDS] = {"texture", "update", "draw", "clear", "copy", "present"};
-static LONGLONG sGlTicks[GL_KINDS];
-static unsigned sGlCalls[GL_KINDS];
-
-static LONGLONG qpc(void) {
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return t.QuadPart;
-}
-#define GL_ENTER() LONGLONG t0_ = (g_in_gl = 1, qpc())
-#define GL_LEAVE(kind) (sGlTicks[kind] += qpc() - t0_, sGlCalls[kind]++, g_in_gl = 0)
-
-/* Prints and resets the per-entry-point totals. */
-static void print_gl_stats(void) {
-    LARGE_INTEGER f;
-    int k;
-    QueryPerformanceFrequency(&f);
-    fprintf(stderr, "  gl:");
-    for (k = 0; k < GL_KINDS; k++) {
-        fprintf(stderr, " %s %u calls %.0f ms%s", kGlKind[k], sGlCalls[k], sGlTicks[k] * 1000.0 / f.QuadPart,
-                k + 1 < GL_KINDS ? "," : "\n");
-        sGlTicks[k] = 0;
-        sGlCalls[k] = 0;
-    }
-}
 static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef;
 
@@ -596,22 +561,18 @@ static void build_overlay_program(void) {
 /* ------------------------------------------------------------------------ */
 /* Window and EFB */
 
-static HWND sWnd;
-static HDC sDC;
+static HDC sDC; /* the game window's */
 /* The DC the GL context is current on: a hidden window's of its own when
  * presenting through DXGI, else sDC. */
 static HDC sGlDC;
 /* What the window's picture is drawn into: sWinFbo, the size of the
  * window's client area, when presenting through DXGI, else 0. */
 static GLuint sWinFbo;
-/* EFB pixels to GL pixels. In 16:9 the game squeezes a wide picture into
- * the EFB's 640 columns for the TV to stretch out: its cameras project a
- * 16:9 picture onto the 640x456 it shows. So the EFB gets as many more
- * pixels across, and is shown at 16:9: the stretched picture is then at
- * full resolution and fills a 16:9 screen. (Shown 4/3 as wide, 1.87:1,
- * it was 5% too wide, with bars above and below.) */
+/* EFB pixels to GL pixels. In 16:9 an EFB pixel is shown wider
+ * (win_pixel_aspect), so the EFB gets as many more pixels across: the
+ * stretched picture is then at full resolution. */
 static double sScaleX = 2, sScaleY = 2;
-static double sPixelAspect = 1; /* width of an EFB pixel on screen, over its height */
+static double sPixelAspect = 1; /* win_pixel_aspect() */
 #define GLX(x) ((GLint)floor((x) * sScaleX + 0.5))
 #define GLY(y) ((GLint)floor((y) * sScaleY + 0.5))
 /* Draws go to sDrawFbo. Without anti-aliasing that is sEfbFbo, whose
@@ -626,55 +587,14 @@ static int sDumpEvery = 30;
 static unsigned sDumpFrom;
 static unsigned sPresented;
 /* The settings as applied. */
-static int sScale, sMsaa = 1, sMaxSamples = 1, sFullscreen, sHidden;
-static unsigned sGameFrames; /* the game's frames, for the fps report */
+static int sScale, sMsaa = 1, sMaxSamples = 1;
 static float sMaxAniso; /* the most anisotropic filtering this GPU does; 0 if none */
-static WINDOWPLACEMENT sWindowed;
 
 int display_scale(void) { return sScale; }
 int display_msaa(void) {
     int m;
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
     return m;
-}
-
-/* Borderless, covering the monitor the window is on; back to where the
- * window was before. */
-static void set_fullscreen(int on) {
-    DWORD style = (DWORD)GetWindowLongA(sWnd, GWL_STYLE);
-    if (on == sFullscreen) return;
-    sFullscreen = on;
-    if (on) {
-        MONITORINFO mi;
-        mi.cbSize = sizeof(mi);
-        sWindowed.length = sizeof(sWindowed);
-        GetWindowPlacement(sWnd, &sWindowed);
-        GetMonitorInfoA(MonitorFromWindow(sWnd, MONITOR_DEFAULTTOPRIMARY), &mi);
-        SetWindowLongA(sWnd, GWL_STYLE, (LONG)((style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP));
-        SetWindowPos(sWnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
-                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    } else {
-        SetWindowLongA(sWnd, GWL_STYLE, (LONG)((style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW));
-        SetWindowPlacement(sWnd, &sWindowed);
-        SetWindowPos(sWnd, NULL, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    }
-}
-
-static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CLOSE) exit(0);
-    /* Alt+Enter toggles fullscreen; Alt alone doesn't open the window
-     * menu, which would hold the game's keys. */
-    if (msg == WM_SYSKEYDOWN && wp == VK_RETURN && (lp & (1 << 29))) {
-        if (!(lp & (1 << 30))) {
-            g_settings.fullscreen = !g_settings.fullscreen;
-            settings_save();
-        }
-        return 0;
-    }
-    if (msg == WM_SYSCHAR || (msg == WM_SYSCOMMAND && (wp & 0xFFF0) == SC_KEYMENU)) return 0;
-    if (menu_window_message(h, msg, wp, lp)) return 0;
-    return DefWindowProcA(h, msg, wp, lp);
 }
 
 /* The internal resolution for a client area h pixels tall: RECOMP_GX_SCALE,
@@ -692,13 +612,11 @@ static int wanted_scale(int h) {
  * cache holds them). What they held is lost; the game redraws it. */
 static void alloc_efb(void);
 
-static void apply_settings(void) {
-    RECT r;
-    int s, m;
-    if (!sHidden) set_fullscreen(g_settings.fullscreen);
-    GetClientRect(sWnd, &r);
-    if (r.bottom - r.top <= 0) return; /* minimized */
-    s = wanted_scale(r.bottom - r.top);
+void gxd_apply_settings(void) {
+    int w, h, s, m;
+    win_size(&w, &h);
+    if (h <= 0) return; /* minimized */
+    s = wanted_scale(h);
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
     if (s == sScale && m == sMsaa) return;
     sScale = s;
@@ -822,12 +740,12 @@ static int dx_init(void) {
     d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     d.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     d.Flags = sTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-    if (FAILED(IDXGIFactory2_CreateSwapChainForHwnd(f2, (IUnknown*)sD3d, sWnd, &d, NULL, NULL, &sChain))) {
+    if (FAILED(IDXGIFactory2_CreateSwapChainForHwnd(f2, (IUnknown*)sD3d, (HWND)win_handle(), &d, NULL, NULL, &sChain))) {
         fprintf(stderr, "gl: no DXGI swapchain for the window\n");
         sChain = NULL;
     } else {
         /* Alt+Enter is the game's own (borderless fullscreen). */
-        IDXGIFactory2_MakeWindowAssociation(f2, sWnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        IDXGIFactory2_MakeWindowAssociation(f2, (HWND)win_handle(), DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     }
     IDXGIFactory2_Release(f2);
     IDXGIFactory1_Release(f1);
@@ -939,22 +857,20 @@ static void dump_shared(const char* path) {
     ID3D11Texture2D_Release(staging);
 }
 
-static int sRecording;            /* frames between the game's are drawn ("Frames between the game's") */
-static unsigned sPresentsDropped; /* frames left out as the compositor was full, for the fps report */
-
-/* Shows what was drawn into the window's framebuffer, w x h. */
-static void window_present(int w, int h) {
+/* Shows what was drawn into the window's framebuffer, w x h; 1 if it was
+ * left out, as may_drop allows. */
+static int window_present(int w, int h, int may_drop) {
     ID3D11Texture2D* back;
     HRESULT hr;
     static int failures;
     if (!sChain) {
         SwapBuffers(sDC);
-        return;
+        return 0;
     }
-    if (!sInterop || w != sChainW || h != sChainH) return; /* minimized, or no shared texture */
+    if (!sInterop || w != sChainW || h != sChainH) return 0; /* minimized, or no shared texture */
     if (!p_wglDXLockObjectsNV(sInteropDev, 1, &sInterop)) {
         if (failures++ < 5) fprintf(stderr, "gl: locking the shared texture failed\n");
-        return;
+        return 0;
     }
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sWinFbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sSharedFbo);
@@ -964,15 +880,11 @@ static void window_present(int w, int h) {
         ID3D11DeviceContext_CopyResource(sD3dCtx, (ID3D11Resource*)back, (ID3D11Resource*)sShared);
         ID3D11Texture2D_Release(back);
     }
-    /* Above 60 fps a frame is never waited for: in a window the
-     * compositor takes frames at its own rate (with more than one
-     * display, maybe a slower one's), and once its queue is full a
-     * present waits for it, and the game, drawing these frames while it
-     * waits, would slow down. Then the frame is left out. */
     hr = IDXGISwapChain1_Present(sChain, 0,
-                                 (sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0) | (sRecording ? DXGI_PRESENT_DO_NOT_WAIT : 0));
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) sPresentsDropped++;
-    else if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
+                                 (sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0) | (may_drop ? DXGI_PRESENT_DO_NOT_WAIT : 0));
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return 1;
+    if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
+    return 0;
 }
 
 /* RECOMP_GL_DEBUG=1: a debug context (compatibility profile, as the
@@ -1017,32 +929,18 @@ static HGLRC debug_context(HGLRC legacy) {
     return rc;
 }
 
-void gxb_init(void) {
+void gxd_init(void) {
     WNDCLASSA wc;
     PIXELFORMATDESCRIPTOR pfd;
-    RECT r = {0, 0, 640 * 2, 456 * 2}; /* the 456 lines the game shows, so the picture fills it */
     HGLRC rc;
     const char* v;
     uint32_t white = 0xFFFFFFFF;
-    extern int hle_widescreen(void);
-    if (hle_widescreen()) {
-        sPixelAspect = 16.0 / 9.0 * 456.0 / 640.0;
-        r.right = (LONG)(r.right * sPixelAspect + 0.5);
-    }
+    sPixelAspect = win_pixel_aspect();
     sDumpDir = getenv("RECOMP_GX_DUMP");
     if ((v = getenv("RECOMP_GX_DUMP_EVERY")) && atoi(v) > 0) sDumpEvery = atoi(v);
     if ((v = getenv("RECOMP_GX_DUMP_FROM")) && atoi(v) > 0) sDumpFrom = (unsigned)atoi(v);
 
-    memset(&wc, 0, sizeof(wc));
-    wc.lpfnWndProc = wnd_proc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "PokeParkRecomp";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassA(&wc);
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    sWnd = CreateWindowA("PokeParkRecomp", "PokePark (recompiled)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                         r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
-    sDC = GetDC(sWnd);
+    sDC = GetDC((HWND)win_handle());
     memset(&pfd, 0, sizeof(pfd));
     pfd.nSize = sizeof(pfd);
     pfd.nVersion = 1;
@@ -1051,6 +949,8 @@ void gxb_init(void) {
     pfd.cColorBits = 32;
     pfd.cDepthBits = 24;
     /* The context starts on a hidden window of its own (see Presenting). */
+    memset(&wc, 0, sizeof(wc));
+    wc.hInstance = GetModuleHandleA(NULL);
     wc.lpfnWndProc = DefWindowProcA;
     wc.lpszClassName = "PokeParkRecompGL";
     RegisterClassA(&wc);
@@ -1059,9 +959,6 @@ void gxb_init(void) {
     rc = wglCreateContext(sGlDC);
     wglMakeCurrent(sGlDC, rc);
     if ((v = getenv("RECOMP_GL_DEBUG")) && *v && *v != '0') rc = debug_context(rc);
-    v = getenv("RECOMP_GX_HIDDEN");
-    sHidden = v && *v && *v != '0';
-    if (!sHidden) ShowWindow(sWnd, SW_SHOW);
     load_gl();
     v = getenv("RECOMP_GL_PRESENT");
     if (!(v && strcmp(v, "swapbuffers") == 0) && dx_init()) {
@@ -1080,8 +977,6 @@ void gxb_init(void) {
     build_program();
     build_copy_program();
     build_overlay_program();
-    g_host_frame_due = frame_due;
-    g_host_frame_render = frame_render;
     pSwapInterval = (BOOL(WINAPI*)(int))(void*)wglGetProcAddress("wglSwapIntervalEXT");
     if (pSwapInterval) pSwapInterval(0);
 
@@ -1091,7 +986,7 @@ void gxb_init(void) {
     p_glGenRenderbuffers(1, &sEfbDepth);
     p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     p_glGenFramebuffers(1, &sEfbFbo);
-    apply_settings();
+    gxd_apply_settings();
 
     glGenTextures(1, &sWhite);
     glBindTexture(GL_TEXTURE_2D, sWhite);
@@ -1102,8 +997,6 @@ void gxb_init(void) {
 /* Textures */
 
 static GLint wrap_mode(int w) { return w == 0 ? GL_CLAMP_TO_EDGE : (w == 1 ? GL_REPEAT : GL_MIRRORED_REPEAT); }
-
-int gxb_texture_generation(void) { return g_settings.aniso; }
 
 static void upload_levels(int fresh, int width, int height, int levels, const uint8_t* rgba) {
     int l;
@@ -1120,13 +1013,12 @@ static void upload_levels(int fresh, int width, int height, int levels, const ui
  * minification filters (mipmap: none, nearest or linear), and LOD bias.
  * Anisotropic filtering, as the setting says, on what is filtered
  * linearly. */
-static uint32_t gxb_texture_gl(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+uint32_t gxd_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
     static const GLenum kMin[2][3] = {{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR},
                                       {GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR}};
     int mip = (mode0 >> 5) & 3, min_linear = (mode0 >> 7) & 1;
     GLuint t;
     gl_forget();
-    (void)key;
     if (mip > 2) mip = 2;
     if (levels <= 1) mip = 0;
     glGenTextures(1, &t);
@@ -1144,26 +1036,13 @@ static uint32_t gxb_texture_gl(uint64_t key, int width, int height, int levels, 
     return t;
 }
 
-static void gxb_texture_update_gl(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
+void gxd_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
     gl_forget();
     glBindTexture(GL_TEXTURE_2D, handle);
     upload_levels(0, width, height, levels, rgba);
 }
 
-/* Textures are deleted after the frame is presented: a draw earlier in the
- * frame may still refer to one, and GL hands a deleted name straight to
- * the next texture created. */
-#define MAX_PENDING_FREES 1024
-static GLuint sPendingFree[MAX_PENDING_FREES];
-static int sPendingFreeCount;
-
-void gxb_texture_free(uint32_t handle) {
-    if (sPendingFreeCount == MAX_PENDING_FREES) {
-        glDeleteTextures(sPendingFreeCount, sPendingFree);
-        sPendingFreeCount = 0;
-    }
-    sPendingFree[sPendingFreeCount++] = handle;
-}
+void gxd_texture_delete(const uint32_t* handles, int n) { glDeleteTextures(n, handles); }
 
 /* ------------------------------------------------------------------------ */
 /* Drawing */
@@ -1397,15 +1276,15 @@ static void apply_draw_state(const GXDrawState* st) {
 }
 
 /* The XF uniform buffer holds what the decoder's draws last left in it,
- * unless frames were drawn again from a recording since: then its next
- * draw sends all of it (sXfStale), and the recording's draws go by their
- * own copy of what it holds (sXfShadow). */
+ * unless a recorded frame was drawn since: then its next draw sends all of
+ * it (sXfStale), and the recording's draws go by their own copy of what
+ * it holds (sXfShadow). */
 static int sXfStale;
 static uint32_t sXfShadow[GX_XF_WORDS];
 static int sXfShadowValid;
 
-static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices,
-                                  const uint32_t* index, int first_index, int count) {
+void gxd_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+              int first_index, int count) {
     apply_draw_state(st);
     if (st->xf && sXfStale) {
         p_glBufferSubData(GL_UNIFORM_BUFFER, 0, GX_XF_WORDS * 4, st->xf);
@@ -1421,7 +1300,47 @@ static void gxb_draw_triangles_gl(const GXDrawState* st, const GXVertex* v, int 
     glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, NULL);
 }
 
-static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
+/* The frame's vertices and indices go to buffers made again each frame at
+ * a size that only grows. Made at the frame's own size, a little
+ * different every frame (24 MB of vertices in the park), the driver kept
+ * the old ones' memory: RAM and GPU memory grew by 24 MB at a time, to
+ * gigabytes. */
+static GLsizeiptr sFrameVbSize, sFrameIbSize;
+
+static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, const void* data) {
+    if (bytes > *size) *size = (bytes + bytes / 4 + 0xFFFFF) & ~(GLsizeiptr)0xFFFFF;
+    p_glBufferData(target, *size, NULL, GL_STREAM_DRAW);
+    p_glBufferSubData(target, 0, bytes, data);
+}
+
+void gxd_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+    p_glBindVertexArray(sVao);
+    p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
+    frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize, (GLsizeiptr)vertices * sizeof(GXVertex), v);
+    frame_buffer(GL_ELEMENT_ARRAY_BUFFER, &sFrameIbSize, (GLsizeiptr)count * sizeof(uint32_t), index);
+}
+
+/* Sends the words of xf that differ from what the buffer holds. */
+static void upload_xf(const uint32_t* xf) {
+    int lo = 0, hi = GX_XF_WORDS;
+    if (sXfShadowValid) {
+        while (lo < GX_XF_WORDS && xf[lo] == sXfShadow[lo]) lo++;
+        if (lo == GX_XF_WORDS) return;
+        while (hi > lo && xf[hi - 1] == sXfShadow[hi - 1]) hi--;
+    }
+    p_glBufferSubData(GL_UNIFORM_BUFFER, (GLintptr)lo * 4, (GLsizeiptr)(hi - lo) * 4, xf + lo);
+    memcpy(sXfShadow + lo, xf + lo, (size_t)(hi - lo) * 4);
+    sXfShadowValid = 1;
+    sXfStale = 1;
+}
+
+void gxd_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count) {
+    apply_draw_state(st);
+    upload_xf(xf);
+    p_glDrawElementsBaseVertex(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void*)((size_t)first_index * 4), first_vertex);
+}
+
+void gxd_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GLbitfield mask = 0;
     gl_forget();
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
@@ -1437,8 +1356,6 @@ static void gxb_clear_gl(int color, int alpha, int depth, uint32_t rgba, uint32_
     if (mask) glClear(mask);
 }
 
-void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt);
-
 /* EFB copies to textures. GX textures have row 0 at the top while the EFB
  * framebuffer has it at the bottom, so the copy flips. */
 typedef struct CopyTarget {
@@ -1449,38 +1366,37 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
-/* The texture that copies of a w x h rectangle to addr go to, made the
- * first time. */
-static CopyTarget* copy_target(uint32_t addr, int w, int h) {
-    CopyTarget* t = NULL;
+int gxd_copy_target(uint32_t addr, int w, int h) {
+    CopyTarget* t;
     int i;
     gl_forget();
     for (i = 0; i < sTargetCount; i++) {
-        if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) t = &sTargets[i];
+        if (sTargets[i].addr == addr && sTargets[i].w == w && sTargets[i].h == h) return i;
     }
-    if (!t) {
-        if (sTargetCount == 64) return NULL;
-        t = &sTargets[sTargetCount++];
-        t->addr = addr;
-        t->w = w;
-        t->h = h;
-        glGenTextures(1, &t->tex);
-        glBindTexture(GL_TEXTURE_2D, t->tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(w), GLY(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        p_glGenFramebuffers(1, &t->fbo);
-        p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
-        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->tex, 0);
-        p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
-    }
-    return t;
+    if (sTargetCount == 64) return -1;
+    t = &sTargets[sTargetCount];
+    t->addr = addr;
+    t->w = w;
+    t->h = h;
+    glGenTextures(1, &t->tex);
+    glBindTexture(GL_TEXTURE_2D, t->tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(w), GLY(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glGenFramebuffers(1, &t->fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->tex, 0);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
+    return sTargetCount++;
 }
 
+uint32_t gxd_copy_texture(int target) { return sTargets[target].tex; }
+
 /* Draws the EFB rectangle into the copy's texture. */
-static void copy_draw(CopyTarget* t, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+void gxd_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+    CopyTarget* t = &sTargets[target];
     GLint mode[4];
     GLfloat src[4];
     gl_forget();
@@ -1511,13 +1427,6 @@ static void copy_draw(CopyTarget* t, int x, int y, int w, int h, int fmt, int in
     p_glUseProgram(sProgram);
     p_glBindVertexArray(sVao);
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
-}
-
-static void gxb_copy_to_texture_gl(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
-    CopyTarget* t = copy_target(addr, w, h);
-    if (!t) return;
-    copy_draw(t, x, y, w, h, fmt, intensity, efb_alpha);
-    gx_register_copy(addr, t->tex, w, h, fmt);
 }
 
 static void alloc_efb(void) {
@@ -1592,18 +1501,11 @@ static void dump_bmp(const char* path, int w, int h) {
     free(px);
 }
 
-static void present_output(int x, int y, int cw, int ch);
-static void gxb_present_gl(int x, int y, int cw, int ch) { present_output(x, y, cw, ch); }
-
-static void present_output(int x, int y, int cw, int ch) {
-    RECT r;
-    MSG msg;
-    int w, h, dw, dh;
+int gxd_present(int x, int y, int cw, int ch, int may_drop) {
+    int w, h, dw, dh, dropped;
     double aspect;
     gl_forget();
-    GetClientRect(sWnd, &r);
-    w = r.right - r.left;
-    h = r.bottom - r.top;
+    win_size(&w, &h);
     /* The copied rectangle of the EFB, as large as fits in the window at
      * the shape it has on a TV (an EFB pixel is square in 4:3, wider in
      * 16:9), with black bars on the sides left over. */
@@ -1625,10 +1527,6 @@ static void present_output(int x, int y, int cw, int ch) {
     glClear(GL_COLOR_BUFFER_BIT);
     p_glBlitFramebuffer(GLX(x), GLY(EFB_H - y - ch), GLX(x + cw), GLY(EFB_H - y), (w - dw) / 2, (h - dh) / 2,
                         (w - dw) / 2 + dw, (h - dh) / 2 + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    /* Nothing slow belongs in here: presenting happens in the GX flush at
-     * a retrace, before the retrace interrupt, and a few milliseconds more
-     * every frame (reading a controller that isn't plugged in, for one)
-     * can leave the game showing every fourth retrace (15 fps). */
     {
         const uint32_t* menu = menu_draw(w, h);
         if (menu) {
@@ -1655,532 +1553,13 @@ static void present_output(int x, int y, int cw, int ch) {
         snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
         dump_bmp(path, w, h);
     }
-    window_present(w, h);
+    dropped = window_present(w, h, may_drop);
     if (sDumpDir && sPresented >= sDumpFrom && sPresented % (unsigned)sDumpEvery == 0 && sChain) {
         char path[512];
         snprintf(path, sizeof(path), "%s/frame_%05u.bmp", sDumpDir, sPresented);
         dump_shared(path);
     }
     sPresented++;
-    {
-        /* Frames per second and the longest frame of the last second, in
-         * the window title and, with RECOMP_FPS=1, on stderr. */
-        static LARGE_INTEGER freq, since, last;
-        static unsigned frames;
-        static double worst;
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        if (!freq.QuadPart) {
-            QueryPerformanceFrequency(&freq);
-            since = last = now;
-        } else {
-            double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
-            if (ms > worst) worst = ms;
-            frames++;
-            last = now;
-        }
-        if (now.QuadPart - since.QuadPart >= freq.QuadPart) {
-            char title[96];
-            double fps = frames * (double)freq.QuadPart / (now.QuadPart - since.QuadPart);
-            const char* e = getenv("RECOMP_FPS");
-            /* The share of the second the game thread was not waiting
-             * for an event: how much headroom is left. */
-            extern uint64_t g_wait_ticks;
-            static uint64_t lastWait;
-            static unsigned lastGameFrames, lastDropped;
-            double secs = (double)(now.QuadPart - since.QuadPart) / freq.QuadPart;
-            double busy = 100.0 * (1.0 - (double)(g_wait_ticks - lastWait) / PPC_TB_HZ / secs);
-            lastWait = g_wait_ticks;
-            snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
-                     worst, busy);
-            SetWindowTextA(sWnd, title);
-            if (e && *e == '1')
-                fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%, game %u, left out %u\n", fps, worst, busy,
-                        sGameFrames - lastGameFrames, sPresentsDropped - lastDropped);
-            lastGameFrames = sGameFrames;
-            lastDropped = sPresentsDropped;
-            if (e && *e == '1') print_gl_stats();
-            since = now;
-            frames = 0;
-            worst = 0;
-        }
-    }
-    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
-    }
-    /* Between frames, so a change doesn't lose the one being drawn. */
-    apply_settings();
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
-}
-
-/* ------------------------------------------------------------------------ */
-/* Frames between the game's
- *
- * Above 60 fps the game still draws 60 frames a second (hle_game.c), and
- * the frames between are drawn here: the newest of the game's frames is
- * recorded (its draws with their state and XF state, clears, EFB copies)
- * and drawn again, each draw's matrices blended from those of the same
- * draw in the frame before, by how far through the frame interval the
- * moment shown is. Shown frames run one game frame behind.
- *
- * A draw is recognized across frames by its key (gx_fifo.c: its display
- * lists and their draws) and, among draws with the same key, by order.
- * Blended are the position, normal and texture matrices, the
- * post-transform matrices, the projection and the lights' position and
- * direction: everything that moves with the camera or the model. A
- * matrix whose rotation or translation changed too much to be the same
- * object moving (draws matched wrongly, a cut) is shown as it is. Draws
- * with no match, and everything else (vertices, textures), are the
- * newest frame's. */
-
-enum { OP_DRAW, OP_CLEAR, OP_COPY, OP_PRESENT };
-
-typedef struct RecOp {
-    int op;
-    GXDrawState st;   /* OP_DRAW (st.xf unused) */
-    int xf;           /* OP_DRAW: its XF state, at words xf of the frame's */
-    int match;        /* OP_DRAW: the last frame's op of the same draw, or -1 */
-    int a[8];         /* the other ops' arguments; OP_DRAW: first vertex, vertices, first index, count */
-} RecOp;
-
-typedef struct Frame {
-    RecOp* ops;
-    int count, cap;
-    uint32_t* xf;
-    int xf_words, xf_cap;
-} Frame;
-
-/* Recording, the newest complete frame and the one before. */
-static Frame sFrames[3];
-static Frame *sRec = &sFrames[0], *sCur = &sFrames[1], *sPrev = &sFrames[2];
-static int sOutputRate = 60, sRecording, sHaveFrame;
-static uint64_t sCurAt, sNextOut, sFramePeriod; /* time base */
-static double sLastT = -1;
-/* Textures freed while a frame was recorded are still drawn by its
- * replays until the next frame is complete. */
-static GLuint sFreeLater[MAX_PENDING_FREES];
-static int sFreeLaterCount;
-
-static RecOp* rec_op(int op) {
-    RecOp* r;
-    if (sRec->count == sRec->cap) {
-        sRec->cap = sRec->cap ? sRec->cap * 2 : 1024;
-        sRec->ops = (RecOp*)realloc(sRec->ops, (size_t)sRec->cap * sizeof(RecOp));
-    }
-    r = &sRec->ops[sRec->count++];
-    r->op = op;
-    r->match = -1;
-    return r;
-}
-
-static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int first_index, int count) {
-    RecOp* r = rec_op(OP_DRAW);
-    r->st = *st;
-    r->st.xf = NULL;
-    if (sRec->xf_words + GX_XF_WORDS > sRec->xf_cap) {
-        sRec->xf_cap = (sRec->xf_words + GX_XF_WORDS) * 2;
-        sRec->xf = (uint32_t*)realloc(sRec->xf, (size_t)sRec->xf_cap * 4);
-    }
-    r->xf = sRec->xf_words;
-    memcpy(sRec->xf + sRec->xf_words, st->xf, GX_XF_WORDS * 4);
-    sRec->xf_words += GX_XF_WORDS;
-    r->a[0] = first_vertex;
-    r->a[1] = vertices;
-    r->a[2] = first_index;
-    r->a[3] = count;
-}
-
-/* How far apart two draws are: the sum of the differences of their
- * position matrices' translations (the first 10 matrices of XF memory),
- * or at least limit. */
-static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) {
-    float d = 0;
-    int i;
-    for (i = 3; i < 120 && d < limit; i += 4) {
-        float x, y;
-        if (a[i] == b[i]) continue;
-        memcpy(&x, &a[i], 4);
-        memcpy(&y, &b[i], 4);
-        if (x == x && y == y) d += fabsf(y - x);
-    }
-    return d;
-}
-
-/* Pairs each draw of sCur with the same draw of sPrev: of the first few
- * not yet taken with the same key, the one nearest. (Draws of one key can
- * change order between frames: the save files screen's panels and the
- * prism piece slots on them do, 28 of those, and taken in order they
- * swapped places.) */
-static void match_draws(void) {
-    enum { CANDIDATES = 48 };
-    enum { SLOTS = 8192 };
-    static uint64_t keys[SLOTS];
-    static uint8_t used[SLOTS];
-    static int head[SLOTS], *next;
-    static int nextCap;
-    int i;
-    memset(used, 0, sizeof(used));
-    if (sPrev->count > nextCap) {
-        nextCap = sPrev->count * 2;
-        next = (int*)realloc(next, (size_t)nextCap * sizeof(int));
-    }
-    /* Chains in frame order: walk backwards, pushing on the front. */
-    for (i = sPrev->count - 1; i >= 0; i--) {
-        uint64_t k = sPrev->ops[i].st.key;
-        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
-        if (sPrev->ops[i].op != OP_DRAW) continue;
-        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
-        if (!used[slot]) {
-            used[slot] = 1;
-            keys[slot] = k;
-            head[slot] = -1;
-        }
-        next[i] = head[slot];
-        head[slot] = i;
-    }
-    for (i = 0; i < sCur->count; i++) {
-        RecOp* r = &sCur->ops[i];
-        uint64_t k = r->st.key;
-        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
-        r->match = -1;
-        if (r->op != OP_DRAW) continue;
-        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
-        if (used[slot] && head[slot] >= 0) {
-            const uint32_t* xf = sCur->xf + r->xf;
-            int* link = &head[slot];
-            int* best = link;
-            float bestD = next[*link] < 0 ? 0 : matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, 1e30f);
-            int n;
-            for (n = 1, link = &next[*link]; n < CANDIDATES && *link >= 0 && bestD > 0; n++, link = &next[*link]) {
-                float d = matrix_distance(sPrev->xf + sPrev->ops[*link].xf, xf, bestD);
-                if (d < bestD) {
-                    bestD = d;
-                    best = link;
-                }
-            }
-            r->match = *best;
-            *best = next[*best];
-        }
-    }
-}
-
-static float wordf(uint32_t w) {
-    float f;
-    memcpy(&f, &w, 4);
-    return f;
-}
-
-static uint32_t fword(float f) {
-    uint32_t w;
-    memcpy(&w, &f, 4);
-    return w;
-}
-
-static void lerp_words(uint32_t* out, const uint32_t* a, const uint32_t* b, int from, int to, float t) {
-    int i;
-    for (i = from; i < to; i++) {
-        if (a[i] != b[i]) out[i] = fword(wordf(a[i]) + (wordf(b[i]) - wordf(a[i])) * t);
-    }
-}
-
-/* Blends the XF state of a draw from prev (the frame before) to cur. */
-static void blend_xf(uint32_t* out, const uint32_t* prev, const uint32_t* cur, float t) {
-    int m, j;
-    memcpy(out, cur, GX_XF_WORDS * 4);
-    /* Position and texture matrices, 3x4, at multiples of 12 words. */
-    for (m = 0; m + 12 <= 0x100; m += 12) {
-        const uint32_t *a = prev + m, *b = cur + m;
-        float scale = 0, rot = 0, dt = 0, tlen = 0;
-        int same = 1;
-        for (j = 0; j < 12; j++) {
-            float x = wordf(a[j]), y = wordf(b[j]);
-            if (a[j] != b[j]) same = 0;
-            if (!(x == x) || !(y == y)) { same = -1; break; } /* not floats */
-            if ((j & 3) == 3) {
-                dt += (y - x) * (y - x);
-                tlen += y * y;
-            } else {
-                if (fabsf(y) > scale) scale = fabsf(y);
-                if (fabsf(y - x) > rot) rot = fabsf(y - x);
-            }
-        }
-        if (same) continue;
-        /* The same object moving turns and moves a little in a frame;
-         * another object (a wrong match, a cut) differs wholesale. */
-        if (rot > 0.3f * scale || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) continue;
-        lerp_words(out, prev, cur, m, m + 12, t);
-    }
-    lerp_words(out, prev, cur, 0x400, 0x460, t); /* normal matrices */
-    lerp_words(out, prev, cur, 0x500, 0x600, t); /* post-transform matrices */
-    for (j = 0; j < 8; j++) lerp_words(out, prev, cur, 0x600 + 16 * j + 10, 0x600 + 16 * j + 16, t); /* lights */
-    if (prev[GX_XF_MEM_WORDS + 0x26] == cur[GX_XF_MEM_WORDS + 0x26]) {
-        lerp_words(out, prev, cur, GX_XF_MEM_WORDS + 0x20, GX_XF_MEM_WORDS + 0x26, t); /* projection */
-    }
-}
-
-/* Sends the words of xf that differ from what the buffer holds. */
-static void upload_xf(const uint32_t* xf) {
-    int lo = 0, hi = GX_XF_WORDS;
-    if (sXfShadowValid) {
-        while (lo < GX_XF_WORDS && xf[lo] == sXfShadow[lo]) lo++;
-        if (lo == GX_XF_WORDS) return;
-        while (hi > lo && xf[hi - 1] == sXfShadow[hi - 1]) hi--;
-    }
-    p_glBufferSubData(GL_UNIFORM_BUFFER, (GLintptr)lo * 4, (GLsizeiptr)(hi - lo) * 4, xf + lo);
-    memcpy(sXfShadow + lo, xf + lo, (size_t)(hi - lo) * 4);
-    sXfShadowValid = 1;
-    sXfStale = 1;
-}
-
-static void present_output(int x, int y, int cw, int ch);
-
-/* Draws sCur, its matrices t of the way from sPrev's. */
-static void render_frame(float t) {
-    static uint32_t xf[GX_XF_WORDS];
-    int i;
-    for (i = 0; i < sCur->count; i++) {
-        const RecOp* r = &sCur->ops[i];
-        switch (r->op) {
-        case OP_DRAW: {
-            const uint32_t* cur = sCur->xf + r->xf;
-            if (r->match >= 0 && t < 1.0f) {
-                blend_xf(xf, sPrev->xf + sPrev->ops[r->match].xf, cur, t);
-                cur = xf;
-            }
-            apply_draw_state(&r->st);
-            upload_xf(cur);
-            p_glDrawElementsBaseVertex(GL_TRIANGLES, r->a[3], GL_UNSIGNED_INT, (void*)((size_t)r->a[2] * 4), r->a[0]);
-            break;
-        }
-        case OP_CLEAR: gxb_clear_gl(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
-        case OP_COPY:
-            copy_draw(&sTargets[r->a[0]], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]);
-            break;
-        default: present_output(r->a[0], r->a[1], r->a[2], r->a[3]); break;
-        }
-    }
-}
-
-static void free_textures(GLuint* list, int* count) {
-    if (*count) {
-        glDeleteTextures(*count, list);
-        *count = 0;
-    }
-}
-
-/* The game finished a frame: it becomes the one shown. */
-static void frame_end(void) {
-    Frame* f = sPrev;
-    uint64_t now = ppc_timebase();
-    sPrev = sCur;
-    sCur = sRec;
-    sRec = f;
-    sRec->count = sRec->xf_words = 0;
-    match_draws();
-    if (sHaveFrame) {
-        /* The game's frame interval, smoothed, within reason. */
-        uint64_t d = now - sCurAt, lo = PPC_TB_HZ / 120, hi = PPC_TB_HZ / 20;
-        if (d < lo) d = lo;
-        if (d > hi) d = hi;
-        sFramePeriod = sFramePeriod ? (sFramePeriod * 7 + d) / 8 : d;
-    } else {
-        sFramePeriod = PPC_TB_HZ / 60;
-        sNextOut = now;
-    }
-    sCurAt = now;
-    sHaveFrame = 1;
-    sLastT = -1;
-    free_textures(sFreeLater, &sFreeLaterCount);
-    memcpy(sFreeLater, sPendingFree, (size_t)sPendingFreeCount * sizeof(GLuint));
-    sFreeLaterCount = sPendingFreeCount;
-    sPendingFreeCount = 0;
-}
-
-static uint64_t frame_due(void) { return sRecording && sHaveFrame ? sNextOut : 0; }
-
-/* The refresh rate of the monitor the window is on (the compositor's own
- * rate is another monitor's when there are several); 0 if unknown. Whole
- * numbers just under a multiple of 10 are the NTSC-style rates (119 is
- * 119.88 Hz). Asked again every few seconds, as the window can move. */
-static double display_hz(void) {
-    static double hz;
-    static DWORD checked;
-    DWORD now = GetTickCount();
-    MONITORINFOEXA mi;
-    DEVMODEA dm;
-    if (checked && now - checked < 3000) return hz;
-    checked = now ? now : 1;
-    hz = 0;
-    mi.cbSize = sizeof(mi);
-    memset(&dm, 0, sizeof(dm));
-    dm.dmSize = sizeof(dm);
-    if (GetMonitorInfoA(MonitorFromWindow(sWnd, MONITOR_DEFAULTTOPRIMARY), (MONITORINFO*)&mi) &&
-        EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) {
-        hz = dm.dmDisplayFrequency;
-        if (dm.dmDisplayFrequency % 10 == 9) hz = (hz + 1) * 1000.0 / 1001.0;
-    }
-    return hz;
-}
-
-/* Frames shown per second: the setting, or the display's refresh rate if
- * lower (more would never be seen). */
-static double output_rate(void) {
-    static int ignore = -1;
-    double hz;
-    if (ignore < 0) ignore = getenv("RECOMP_IGNORE_REFRESH") != NULL; /* for measuring */
-    hz = ignore ? 0 : display_hz();
-    return hz >= 30 && hz < sOutputRate ? hz : (double)sOutputRate;
-}
-
-int gxb_display_hz(void) { return (int)(display_hz() + 0.5); }
-
-static void frame_render(void) {
-    uint64_t now = ppc_timebase(), step = (uint64_t)(PPC_TB_HZ / output_rate());
-    float t = (float)((double)(int64_t)(now - sCurAt) / (double)sFramePeriod);
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    sNextOut += step;
-    if ((int64_t)(now - sNextOut) > (int64_t)step) sNextOut = now + step; /* fell behind: start again from now */
-    if (t == 1.0f && sLastT == 1.0f) return; /* the game is late: nothing new to show */
-    sLastT = t;
-    GL_ENTER();
-    render_frame(t);
-    GL_LEAVE(GLK_PRESENT);
-}
-
-int gxb_recording(void) {
-    int want = sOutputRate > 60;
-    if (sRecording && !want && sHaveFrame) {
-        /* Stopping: show the newest frame as it is. */
-        GL_ENTER();
-        render_frame(1.0f);
-        GL_LEAVE(GLK_PRESENT);
-    }
-    if (want != sRecording) {
-        sRecording = want;
-        sHaveFrame = 0;
-        sRec->count = sRec->xf_words = 0;
-        sCur->count = sCur->xf_words = 0;
-        sPrev->count = sPrev->xf_words = 0;
-        sXfShadowValid = 0;
-        sXfStale = 1;
-    }
-    return sRecording;
-}
-
-void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 360 : fps; }
-
-/* The frame's vertices and indices go to buffers made again each frame at
- * a size that only grows. Made at the frame's own size, a little
- * different every frame (24 MB of vertices in the park), the driver kept
- * the old ones' memory: RAM and GPU memory grew by 24 MB at a time, to
- * gigabytes. */
-static GLsizeiptr sFrameVbSize, sFrameIbSize;
-
-static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, const void* data) {
-    if (bytes > *size) *size = (bytes + bytes / 4 + 0xFFFFF) & ~(GLsizeiptr)0xFFFFF;
-    p_glBufferData(target, *size, NULL, GL_STREAM_DRAW);
-    p_glBufferSubData(target, 0, bytes, data);
-}
-
-void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
-    GL_ENTER();
-    p_glBindVertexArray(sVao);
-    p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize, (GLsizeiptr)vertices * sizeof(GXVertex), v);
-    frame_buffer(GL_ELEMENT_ARRAY_BUFFER, &sFrameIbSize, (GLsizeiptr)count * sizeof(uint32_t), index);
-    GL_LEAVE(GLK_DRAW);
-}
-
-/* ------------------------------------------------------------------------ */
-/* Entry points. Each marks the thread as inside OpenGL, so the sampling
- * profiler (boot.c) doesn't hold it suspended inside the driver. */
-
-volatile long g_in_gl;
-
-uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
-    uint32_t r;
-    GL_ENTER();
-    r = gxb_texture_gl(key, width, height, levels, rgba, mode0);
-    GL_LEAVE(GLK_TEXTURE);
-    return r;
-}
-
-void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
-    GL_ENTER();
-    gxb_texture_update_gl(handle, width, height, levels, rgba);
-    GL_LEAVE(GLK_TEXTURE_UPDATE);
-}
-
-void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
-                        int first_index, int count) {
-    if (sRecording) {
-        rec_draw(st, first_vertex, vertices, first_index, count);
-        return;
-    }
-    GL_ENTER();
-    gxb_draw_triangles_gl(st, v, first_vertex, vertices, index, first_index, count);
-    GL_LEAVE(GLK_DRAW);
-}
-
-void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
-    if (sRecording) {
-        RecOp* r = rec_op(OP_CLEAR);
-        r->a[0] = color;
-        r->a[1] = alpha;
-        r->a[2] = depth;
-        r->a[3] = (int)rgba;
-        r->a[4] = (int)z;
-        return;
-    }
-    GL_ENTER();
-    gxb_clear_gl(color, alpha, depth, rgba, z);
-    GL_LEAVE(GLK_CLEAR);
-}
-
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
-    if (sRecording) {
-        /* The texture is made now, for the draws that follow to name;
-         * the copy into it is drawn with the frame. */
-        CopyTarget* t;
-        RecOp* r;
-        GL_ENTER();
-        t = copy_target(addr, w, h);
-        GL_LEAVE(GLK_COPY);
-        if (!t) return;
-        r = rec_op(OP_COPY);
-        r->a[0] = (int)(t - sTargets);
-        r->a[1] = x;
-        r->a[2] = y;
-        r->a[3] = w;
-        r->a[4] = h;
-        r->a[5] = fmt;
-        r->a[6] = intensity;
-        r->a[7] = efb_alpha;
-        gx_register_copy(addr, t->tex, w, h, fmt);
-        return;
-    }
-    GL_ENTER();
-    gxb_copy_to_texture_gl(addr, x, y, w, h, fmt, intensity, efb_alpha);
-    GL_LEAVE(GLK_COPY);
-}
-
-void gxb_present(int x, int y, int cw, int ch) {
-    sGameFrames++;
-    if (sRecording) {
-        RecOp* r = rec_op(OP_PRESENT);
-        r->a[0] = x;
-        r->a[1] = y;
-        r->a[2] = cw;
-        r->a[3] = ch;
-        GL_ENTER();
-        frame_end();
-        GL_LEAVE(GLK_PRESENT);
-        return;
-    }
-    GL_ENTER();
-    gxb_present_gl(x, y, cw, ch);
-    free_textures(sPendingFree, &sPendingFreeCount);
-    GL_LEAVE(GLK_PRESENT);
+    return dropped;
 }

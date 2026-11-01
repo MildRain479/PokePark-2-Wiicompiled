@@ -329,7 +329,10 @@ runs unchanged.
 - **Textures** (`gx_texture.c`): every GX format (I4, I8, IA4, IA8,
   RGB565, RGB5A3, RGBA8, C4, C8, C14X2, CMPR) and the palette formats,
   cached by address and content hash.
-- **Backend** (`gl_backend.c`, OpenGL 3.3):
+- **Backend**: `gx_frames.c` takes the decoder's calls, records frames
+  and paces the ones between the game's, and hands the drawing to a
+  device (`gx_device.h`) in a window (`window_win32.c`). The one device
+  is `gl_backend.c`, OpenGL 3.3:
   - The EFB is an offscreen framebuffer at the settings' internal
     resolution, multisampled if anti-aliasing is on (resolved before each
     copy reads it).
