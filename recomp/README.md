@@ -173,9 +173,11 @@ in the window captures it again (that click isn't a dash). The mouse
 turns the player camera (moving it down looks down on Pikachu);
 cutscene and dialogue cameras are the game's. Rumble goes to the controller.
 
-**Settings** (`recomp/boot/menu_win32.c`): Backspace, or Back+Start on a
-controller, opens a settings menu over the game, which keeps running but
-gets no input. It has:
+**Settings** (`recomp/boot/menu_win32.c`) are changed in Options in the
+pause menu (`options_win32.c`). Builds other than public ones
+(`build.py --public`) also have a plain settings menu for testing:
+Backspace, or Back+Start on a controller, opens it over the game, which
+keeps running but gets no input. It has:
 - fullscreen (borderless, on the window's monitor; Alt+Enter also
   toggles it). In 16:9 the picture is shown at 16:9, as the game's
   cameras project it, so it fills a 16:9 screen;
@@ -194,13 +196,13 @@ gets no input. It has:
 - camera sensitivity and inverted tilt for the mouse;
 - the bindings above, two keys or mouse buttons and two controller
   buttons for each Wii Remote button (Enter, then press the new one; a
-  key or button bound elsewhere moves).
+  key or button bound elsewhere moves);
+- a minigame to start, from the park.
 
 Up/Down choose, Left/Right change, Enter rebinds, Delete clears; on a
 controller, the d-pad, A, X to clear and B to close. Changes apply at
 once and are saved in `settings.ini` beside `boot.exe`
-(`RECOMP_SETTINGS=<file>` uses another file). The menu is plain for
-now, until there is a proper pause menu.
+(`RECOMP_SETTINGS=<file>` uses another file).
 
 The game's own `OSReport` output, including the SDK banners and the
 heap sizes, is printed to stderr.

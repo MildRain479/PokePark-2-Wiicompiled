@@ -13,6 +13,12 @@ Usage:
                                                  # profile of a run through
                                                  # the park (MSVC): ~8% less
                                                  # time per frame
+    python tools/recomp/build.py --public        # a release build without the
+                                                 # debug settings menu, put
+                                                 # together in Releases/ for
+                                                 # publishing (boot.exe is
+                                                 # the public one until the
+                                                 # next build)
 
 Uses MSVC on Windows (found through vswhere) and cc elsewhere.
 """
@@ -41,7 +47,7 @@ TARGETS = {
                    glob.glob(os.path.join(ROOT, "recomp", "gpu", "*.c"))),
 }
 LIBS = {"boot": ["opengl32.lib", "user32.lib", "gdi32.lib", "ole32.lib", "windowscodecs.lib"]}
-DEFINES = ["RECOMP_TRACE"]
+DEFINES = ["RECOMP_TRACE", "RECOMP_DEBUG_MENU"]
 VULKAN = None  # the Vulkan SDK's folder, if there is one (vulkan_sdk)
 
 
@@ -213,11 +219,15 @@ def main():
     ap.add_argument("--pgo-train", action="store_true", help="with --pgo: make a new profile")
     ap.add_argument("--no-trace", action="store_true",
                     help="without the trace of recent calls (RECOMP_TRACE) kept for crash reports and RECOMP_CALLS")
+    ap.add_argument("--public", action="store_true",
+                    help="release build without the debug settings menu, put together in Releases/")
     ap.add_argument("--dist", action="store_true",
                     help="copy the boot program, as PokePark.exe, and its files to build/recomp/dist")
     ap.add_argument("args", nargs="*", help="extra arguments for --run")
     args = ap.parse_args()
     global OBJ
+    if args.public:
+        args.release = True
     if args.release:
         args.opt = "/O2 /GL" if os.name == "nt" else "-O2 -flto"
     # Objects built with other flags go elsewhere, so switching rebuilds.
@@ -226,6 +236,9 @@ def main():
     if args.no_trace:
         DEFINES.remove("RECOMP_TRACE")
         OBJ += "_notrace"
+    if args.public:
+        DEFINES.remove("RECOMP_DEBUG_MENU")
+        OBJ += "_public"
 
     global VULKAN
     VULKAN = vulkan_sdk()
@@ -269,6 +282,24 @@ def main():
             shutil.copy2(dtk, os.path.join(dist, "tools", "dtk.exe"))
             shutil.copy2(os.path.join(ROOT, "recomp", "assets", "dtk_license.txt"), os.path.join(dist, "tools", "dtk_license.txt"))
         print("dist:", dist)
+    if args.public:
+        # What players download: the program, its icons, the disc reader and
+        # a readme. Nothing of the game's.
+        rel = os.path.join(ROOT, "Releases")
+        os.makedirs(rel, exist_ok=True)
+        for old in ("prompts", "tools"):
+            shutil.rmtree(os.path.join(rel, old), ignore_errors=True)
+        shutil.copy2(os.path.join(OUT, "boot.exe"), os.path.join(rel, "PokePark.exe"))
+        shutil.copytree(os.path.join(ROOT, "recomp", "assets", "prompts"), os.path.join(rel, "prompts"))
+        shutil.copy2(os.path.join(ROOT, "recomp", "assets", "release_readme.txt"), os.path.join(rel, "README.txt"))
+        dtk = os.path.join(ROOT, "build", "tools", "dtk.exe")
+        if os.path.exists(dtk):
+            os.makedirs(os.path.join(rel, "tools"))
+            shutil.copy2(dtk, os.path.join(rel, "tools", "dtk.exe"))
+            shutil.copy2(os.path.join(ROOT, "recomp", "assets", "dtk_license.txt"), os.path.join(rel, "tools", "dtk_license.txt"))
+        else:
+            print("public: no build/tools/dtk.exe; the release can't read disc images without it")
+        print("public:", rel)
     if args.run:
         exe = os.path.join(OUT, args.run + (".exe" if os.name == "nt" else ""))
         sys.exit(subprocess.call([exe, DOL] + args.args))

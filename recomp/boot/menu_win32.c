@@ -1,10 +1,11 @@
-/* Settings (settings.ini) and the settings menu: display, mouse and
- * controls. Backspace, or Back+Start on a controller, opens and closes
- * it; the game keeps running behind it but gets no input. It is drawn
- * with GDI into an image that gl_backend.c lays over the picture: plain,
- * for testing (it can start any minigame). The same settings, but for
- * the debug ones, are in the Options tab of the pause menu
- * (options_win32.c).
+/* Settings (settings.ini), changed in the Options tab of the pause menu
+ * (options_win32.c), and, in builds but public ones (RECOMP_DEBUG_MENU,
+ * tools/recomp/build.py), the settings menu: display, mouse and controls,
+ * plain, for testing (it can start any minigame). Backspace, or
+ * Back+Start on a controller, opens and closes it; the game keeps running
+ * behind it but gets no input. It is drawn with GDI into an image the
+ * device lays over the picture. Public builds go straight to the Options
+ * tab.
  *
  *   Up/Down choose, Left/Right change, Enter rebinds (then press the key,
  *   mouse button or controller button; Esc cancels), Delete clears.
@@ -66,6 +67,7 @@ static void apply_gameplay(void) {
     hle_set_chase_speed(g_settings.chase_speed);
 }
 
+#ifdef RECOMP_DEBUG_MENU
 /* The minigames, by At number, for the Debug section. */
 static const struct {
     int at;
@@ -79,6 +81,7 @@ static const struct {
 };
 #define MINIGAMES ((int)(sizeof(kMinigames) / sizeof(kMinigames[0])))
 static int sMinigame;
+#endif
 #define FOV_MIN 80
 #define FOV_MAX 150
 
@@ -92,10 +95,12 @@ HostSettings g_settings;
 static const char* const kActionIni[ACT_COUNT] = {
     "up", "down", "left", "right", "two", "one", "a", "b", "plus", "minus", "home", "shake", "shake2",
 };
+#ifdef RECOMP_DEBUG_MENU
 static const char* const kActionLabel[ACT_COUNT] = {
     "Move up", "Move down", "Move left", "Move right", "2: jump, talk", "1: dash",
     "A: Thunderbolt", "B: recenter camera", "+", "-", "HOME", "Shake", "Shake 2 (minigames)",
 };
+#endif
 
 void settings_default_controls(void) {
     static const int kKeys[ACT_COUNT][BIND_SLOTS] = {
@@ -205,7 +210,7 @@ void settings_save(void) {
     FILE* f = fopen(settings_path(), "w");
     int i;
     if (!f) return;
-    fprintf(f, "; PokePark recomp settings, also changed in the settings menu (Backspace).\n\n");
+    fprintf(f, "; PokePark recomp settings, also changed in Options in the pause menu.\n\n");
     fprintf(f, "[display]\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "scale = %d ; internal resolution: 0 fits the window, or 1-%d\n", g_settings.scale, MAX_SCALE);
@@ -354,25 +359,6 @@ void settings_load(void) {
     apply_gameplay();
 }
 
-/* ------------------------------------------------------------------------ */
-/* The menu */
-
-enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_FPS, ROW_FOV, ROW_MINIGAME, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
-/* Columns of a binding row: two keyboard/mouse slots, two controller. */
-#define COLS 4
-enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
-
-static int sOpen, sRow, sCol, sCapture;
-
-int menu_is_open(void) { return sOpen || options_is_open(); }
-
-static void set_open(int open) {
-    sOpen = open;
-    sCapture = CAPTURE_NONE;
-}
-
-static void move(int d) { sRow = (sRow + d + ROW_COUNT) % ROW_COUNT; }
-
 void settings_step(int which, int d) {
     static const int kMsaa[] = {1, 2, 4, 8};
     int i;
@@ -444,6 +430,40 @@ void settings_step(int which, int d) {
     settings_save();
 }
 
+void settings_bind(int act, int slot, int vk, uint32_t pad) {
+    int i, k;
+    for (i = 0; i < ACT_COUNT; i++) {
+        for (k = 0; k < BIND_SLOTS; k++) {
+            if (vk && g_settings.key[i][k] == vk) g_settings.key[i][k] = 0;
+            if (pad && g_settings.pad[i][k] == pad) g_settings.pad[i][k] = 0;
+        }
+    }
+    if (vk) g_settings.key[act][slot] = vk;
+    else g_settings.pad[act][slot] = pad;
+    settings_save();
+}
+
+/* ------------------------------------------------------------------------ */
+/* The menu */
+
+#ifdef RECOMP_DEBUG_MENU
+
+enum { ROW_FULLSCREEN, ROW_SCALE, ROW_MSAA, ROW_FPS, ROW_FOV, ROW_MINIGAME, ROW_SENSITIVITY, ROW_INVERT, ROW_BIND, ROW_RESET = ROW_BIND + ACT_COUNT, ROW_COUNT };
+/* Columns of a binding row: two keyboard/mouse slots, two controller. */
+#define COLS 4
+enum { CAPTURE_NONE, CAPTURE_KEY, CAPTURE_PAD };
+
+static int sOpen, sRow, sCol, sCapture;
+
+int menu_is_open(void) { return sOpen || options_is_open(); }
+
+static void set_open(int open) {
+    sOpen = open;
+    sCapture = CAPTURE_NONE;
+}
+
+static void move(int d) { sRow = (sRow + d + ROW_COUNT) % ROW_COUNT; }
+
 static void change(int d) {
     static const int kStep[] = {SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, -1, SET_SENSITIVITY, SET_INVERT};
     if (sRow == ROW_MINIGAME) {
@@ -473,19 +493,6 @@ static void clear(void) {
     if (sRow < ROW_BIND || sRow >= ROW_RESET) return;
     if (sCol < BIND_SLOTS) g_settings.key[sRow - ROW_BIND][sCol] = 0;
     else g_settings.pad[sRow - ROW_BIND][sCol - BIND_SLOTS] = 0;
-    settings_save();
-}
-
-void settings_bind(int act, int slot, int vk, uint32_t pad) {
-    int i, k;
-    for (i = 0; i < ACT_COUNT; i++) {
-        for (k = 0; k < BIND_SLOTS; k++) {
-            if (vk && g_settings.key[i][k] == vk) g_settings.key[i][k] = 0;
-            if (pad && g_settings.pad[i][k] == pad) g_settings.pad[i][k] = 0;
-        }
-    }
-    if (vk) g_settings.key[act][slot] = vk;
-    else g_settings.pad[act][slot] = pad;
     settings_save();
 }
 
@@ -722,3 +729,19 @@ const uint32_t* menu_draw(int w, int h) {
     }
     return sPixels;
 }
+
+#else
+
+/* Without the menu (public builds): the Options tab alone. */
+int menu_is_open(void) { return options_is_open(); }
+
+int menu_window_message(void* wnd, unsigned msg, uintptr_t wp, intptr_t lp) {
+    (void)wnd;
+    return options_window_message(msg, wp, lp);
+}
+
+void menu_controller(uint32_t raw, uint32_t nav) { options_controller(raw, nav); }
+
+const uint32_t* menu_draw(int w, int h) { return options_draw(w, h); }
+
+#endif

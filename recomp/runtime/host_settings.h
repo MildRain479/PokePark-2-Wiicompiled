@@ -1,5 +1,5 @@
 /* User settings, kept in settings.ini beside the program and changed in
- * the settings menu (Backspace, or Back+Start on a controller). For the
+ * Options in the pause menu (and the settings menu, menu_win32.c). For the
  * platform layer (recomp/boot, recomp/gpu); the game patches don't see
  * them. RECOMP_SETTINGS=<file> reads and writes another file instead. */
 #pragma once
@@ -91,7 +91,8 @@ const uint32_t* options_draw(int w, int h);
  * if the tab is open. */
 int options_script(uint32_t held);
 
-/* The settings menu (menu_win32.c). */
+/* The settings menu (menu_win32.c; in public builds, without
+ * RECOMP_DEBUG_MENU, these are the Options tab's alone). */
 int menu_is_open(void);
 /* Takes the window's keyboard and mouse messages while open; returns 1 if
  * it used the message. */
