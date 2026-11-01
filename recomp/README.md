@@ -87,7 +87,7 @@ git-ignored, and is created on first run.
 2. IOS: STM, ES and FS requests are answered.
 3. The game runs six threads.
 4. It loads its data through its own DVD library.
-5. It draws in a window through OpenGL. The wrist strap safety screen
+5. It draws in a window through OpenGL or Vulkan. The wrist strap safety screen
    is cut short and "Hold Wii Remote Horizontally" shown for its usual
    few seconds (see `hle_game.c`), so the title comes up about 7 s after
    start instead of about 28 s.
@@ -264,6 +264,9 @@ Diagnostics:
   with their guest names. `ZwDelayExecution` is idle time.
 - `RECOMP_GL_DEBUG=1` uses a debug GL context and prints the driver's
   messages about errors and misuse as each call makes them.
+- `RECOMP_GPU=vulkan` or `opengl` draws with that, over the Renderer
+  setting; `RECOMP_VK_VALIDATE=1` turns on the Vulkan validation layers
+  (from the Vulkan SDK) and prints what they find.
 - `RECOMP_MINIDUMP=<file>` writes a minidump when the run ends on a
   host fault (`RECOMP_MINIDUMP_FULL=1`: with all memory), for a
   debugger. Host backtraces name the module and offset of each frame,
@@ -331,8 +334,10 @@ runs unchanged.
   cached by address and content hash.
 - **Backend**: `gx_frames.c` takes the decoder's calls, records frames
   and paces the ones between the game's, and hands the drawing to a
-  device (`gx_device.h`) in a window (`window_win32.c`). The one device
-  is `gl_backend.c`, OpenGL 3.3:
+  device (`gx_device.h`) in a window (`window_win32.c`). There are two,
+  picked by the Renderer setting (Options, Display) from the next start;
+  if the one picked can't start, the other draws. The OpenGL one,
+  `gl_backend.c`, OpenGL 3.3:
   - The EFB is an offscreen framebuffer at the settings' internal
     resolution, multisampled if anti-aliasing is on (resolved before each
     copy reads it).
@@ -366,13 +371,29 @@ runs unchanged.
     waits, so at 240 fps their spacing varies (4-12 ms); a render thread
     would even it out.
 
+  The Vulkan one, `vk_backend.c`, Vulkan 1.3, draws the same pictures
+  from the same shaders, ported (`vk_shaders/`, compiled to SPIR-V by
+  the build when the Vulkan SDK is installed; without it the game is
+  built without the device). It loads `vulkan-1.dll` itself:
+  - Textures are places in one array the shaders index, so a draw binds
+    nothing; its XF and TEV state go into the frame's data buffer, only
+    when they changed, and the shaders read them where the push
+    constants say.
+  - Pipelines differ only in blending and color mask; depth, culling,
+    viewport and scissor are set per draw.
+  - Two frames are in flight. The recorded frame's vertices are written
+    straight into video memory where the CPU can write it (resizable
+    BAR), else copied there.
+  - Presenting never waits for the display (immediate, else mailbox).
+  On an RTX 5070, in the park at 240 fps, it runs at about 225 fps
+  where OpenGL runs at about 135, with fewer slow frames.
+
 Not implemented yet:
 - lighting (lit channels use the material color);
 - indirect texturing, fog and logic ops;
 - z-textures;
 - lines and points;
-- copy pixel formats (copies keep RGBA);
-- a Vulkan backend.
+- copy pixel formats (copies keep RGBA).
 
 ## Not done yet
 

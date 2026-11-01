@@ -214,7 +214,9 @@ void settings_save(void) {
             g_settings.frame_rate);
     fprintf(f, "fov = %d ; field of view in the park, percent of the game's: %d-%d\n", g_settings.fov, FOV_MIN,
             FOV_MAX);
-    fprintf(f, "aniso = %d ; anisotropic texture filtering: 1 (off), 2, 4, 8 or 16\n\n", g_settings.aniso);
+    fprintf(f, "aniso = %d ; anisotropic texture filtering: 1 (off), 2, 4, 8 or 16\n", g_settings.aniso);
+    fprintf(f, "renderer = %s ; opengl or vulkan, from the next start\n\n",
+            g_settings.renderer == RENDERER_VULKAN ? "vulkan" : "opengl");
     fprintf(f, "[gameplay]\n");
     fprintf(f, "text_speed = %d ; dialogue: 1 (the game's), 2, 3 times as fast, or 0: a page at once\n",
             g_settings.text_speed);
@@ -287,6 +289,7 @@ void settings_load(void) {
             if (!strcmp(name, "scale")) g_settings.scale = atoi(p) < 0 ? 0 : atoi(p) > MAX_SCALE ? MAX_SCALE : atoi(p);
             if (!strcmp(name, "msaa")) g_settings.msaa = valid_msaa(atoi(p));
             if (!strcmp(name, "aniso")) g_settings.aniso = valid_aniso(atoi(p));
+            if (!strcmp(name, "renderer")) g_settings.renderer = strstr(p, "vulkan") ? RENDERER_VULKAN : RENDERER_OPENGL;
             if (!strcmp(name, "frame_rate")) g_settings.frame_rate = valid_frame_rate(atoi(p));
             if (!strcmp(name, "fov")) {
                 int v = atoi(p) / 5 * 5;
@@ -400,6 +403,7 @@ void settings_step(int which, int d) {
         g_settings.aniso = kAniso[(i + d + 5) % 5];
         break;
     }
+    case SET_RENDERER: g_settings.renderer = !g_settings.renderer; break;
     case SET_RUMBLE:
         g_settings.rumble = (g_settings.rumble + d + 4) % 4;
         input_rumble_preview();

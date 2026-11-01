@@ -30,8 +30,9 @@ int hle_file_select_shown(void);
 const uint32_t* hle_pause_image(const char* name, const char* alpha, int* w, int* h);
 int hle_font_metrics(int* cellW, int* cellH, int* baseline); /* hle_prompts.c */
 int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance);
-int display_scale(void); /* gl_backend.c: as applied */
+int display_scale(void); /* gx_frames.c: as applied */
 int display_msaa(void);
+int display_renderer(void); /* RENDERER_*: the one drawing */
 int gxb_display_hz(void);
 
 /* ------------------------------------------------------------------------ */
@@ -53,6 +54,7 @@ static const Row kDisplay[] = {
     {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"}, {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
     {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
+    {ROW_SETTING, SET_RENDERER, "Renderer"},
     {ROW_CLOSE, 0, "Close game"},
 };
 static const Row kGameplay[] = {
@@ -117,6 +119,10 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case SET_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
     case SET_ANISO: snprintf(out, n, g_settings.aniso == 1 ? "Original" : "%dx", g_settings.aniso); break;
+    case SET_RENDERER:
+        snprintf(out, n, "%s%s", g_settings.renderer == RENDERER_VULKAN ? "Vulkan" : "OpenGL",
+                 g_settings.renderer != display_renderer() ? " (restart)" : "");
+        break;
     case SET_RUMBLE: {
         static const char* const kRumble[4] = {"Off", "Light", "Normal", "Strong"};
         snprintf(out, n, "%s", kRumble[g_settings.rumble & 3]);

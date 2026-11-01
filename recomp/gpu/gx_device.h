@@ -5,7 +5,9 @@
  * shows them in is window_win32.c's.
  *
  * The device's calls are made on the game thread, with g_in_gl set
- * (gx_frames.c), as the sampling profiler wants. */
+ * (gx_frames.c), as the sampling profiler wants. RECOMP_GPU=vulkan picks
+ * the Vulkan device, else OpenGL; if one can't start, the other is
+ * tried. */
 #pragma once
 
 #include <stdint.h>
@@ -15,35 +17,54 @@
 #define EFB_W 640
 #define EFB_H 528
 
-/* Device (gl_backend.c). */
-void gxd_init(void);
-uint32_t gxd_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
-void gxd_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba);
-void gxd_texture_delete(const uint32_t* handles, int n);
-/* A draw as the decoder makes it: its vertices and indices with it, and
- * st->xf (the XF state) with the words changed since the last draw. */
-void gxd_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
-              int first_index, int count);
-/* A recorded frame's vertices and indices, which gxd_draw_recorded draws
- * from until the next frame's. */
-void gxd_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count);
-/* A draw of the recorded frame, with its XF state as xf (GX_XF_WORDS
- * words) gives it. */
-void gxd_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count);
-void gxd_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
-/* The texture copies of a w x h rectangle to addr go to: a number for
- * gxd_copy, made the first time; -1 if there is no room for more. Its
- * texture handle is gxd_copy_texture's. */
-int gxd_copy_target(uint32_t addr, int w, int h);
-uint32_t gxd_copy_texture(int target);
-void gxd_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha);
-/* Shows the EFB rectangle x, y, w x h in the window, with the settings
- * menu over it while it's open; may_drop: when the display isn't ready
- * for it, the frame may be left out rather than waited for (1 returned). */
-int gxd_present(int x, int y, int w, int h, int may_drop);
-/* Takes up the display settings (internal resolution, anti-aliasing), as
- * the window now is; between frames. */
-void gxd_apply_settings(void);
+/* A device: its calls, as GXDevice gives them. gl_backend.c is the
+ * OpenGL one (g_gl_device), vk_backend.c the Vulkan one (g_vk_device). */
+typedef struct GXDevice {
+    const char* name;
+    /* Sets the device up on the window; 0 if it can't be (then another is
+     * tried). */
+    int (*init)(void);
+    uint32_t (*texture)(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
+    void (*texture_update)(uint32_t handle, int width, int height, int levels, const uint8_t* rgba);
+    void (*texture_delete)(const uint32_t* handles, int n);
+    /* A draw as the decoder makes it: its vertices and indices with it,
+     * and st->xf (the XF state) with the words changed since the last
+     * draw. */
+    void (*draw)(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+                 int first_index, int count);
+    /* A recorded frame's vertices and indices, which draw_recorded draws
+     * from until the next frame's. */
+    void (*frame_data)(const GXVertex* v, int vertices, const uint32_t* index, int count);
+    /* A draw of the recorded frame, with its XF state as xf (GX_XF_WORDS
+     * words) gives it. */
+    void (*draw_recorded)(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count);
+    void (*clear)(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
+    /* The texture copies of a w x h rectangle to addr go to: a number for
+     * copy, made the first time; -1 if there is no room for more. Its
+     * texture handle is copy_texture's. */
+    int (*copy_target)(uint32_t addr, int w, int h);
+    uint32_t (*copy_texture)(int target);
+    void (*copy)(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha);
+    /* Shows the EFB rectangle x, y, w x h in the window, with the settings
+     * menu over it while it's open; may_drop: when the display isn't ready
+     * for it, the frame may be left out rather than waited for (1
+     * returned). */
+    int (*present)(int x, int y, int w, int h, int may_drop);
+    /* Takes up the display settings (internal resolution, anti-aliasing),
+     * as the window now is; between frames. */
+    void (*apply_settings)(void);
+    /* The internal resolution and anti-aliasing as applied. */
+    int (*scale)(void);
+    int (*msaa)(void);
+} GXDevice;
+
+extern const GXDevice g_gl_device, g_vk_device;
+
+/* The internal resolution for a client area h pixels tall: RECOMP_GX_SCALE,
+ * else the settings', else the multiple whose picture (456 lines shown)
+ * comes nearest the window, rounding up unless within a quarter step
+ * (gx_frames.c). */
+int gx_wanted_scale(int h);
 
 /* Window (window_win32.c). */
 /* Makes the game's window, shown unless RECOMP_GX_HIDDEN=1, sized for the

@@ -590,21 +590,11 @@ static unsigned sPresented;
 static int sScale, sMsaa = 1, sMaxSamples = 1;
 static float sMaxAniso; /* the most anisotropic filtering this GPU does; 0 if none */
 
-int display_scale(void) { return sScale; }
-int display_msaa(void) {
+static int gl_scale(void) { return sScale; }
+static int gl_msaa(void) {
     int m;
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
     return m;
-}
-
-/* The internal resolution for a client area h pixels tall: RECOMP_GX_SCALE,
- * else the settings', else the multiple whose picture (456 lines shown)
- * comes nearest the window, rounding up unless within a quarter step. */
-static int wanted_scale(int h) {
-    const char* v = getenv("RECOMP_GX_SCALE");
-    int s = v && atoi(v) > 0 ? atoi(v) : g_settings.scale;
-    if (!s) s = (int)ceil(h / 456.0 - 0.25);
-    return s < 1 ? 1 : s > 8 ? 8 : s;
 }
 
 /* (Re)allocates the EFB at the current scale and sample count, and the
@@ -612,11 +602,11 @@ static int wanted_scale(int h) {
  * cache holds them). What they held is lost; the game redraws it. */
 static void alloc_efb(void);
 
-void gxd_apply_settings(void) {
+static void gl_apply_settings(void) {
     int w, h, s, m;
     win_size(&w, &h);
     if (h <= 0) return; /* minimized */
-    s = wanted_scale(h);
+    s = gx_wanted_scale(h);
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
     if (s == sScale && m == sMsaa) return;
     sScale = s;
@@ -929,7 +919,7 @@ static HGLRC debug_context(HGLRC legacy) {
     return rc;
 }
 
-void gxd_init(void) {
+static int gl_init(void) {
     WNDCLASSA wc;
     PIXELFORMATDESCRIPTOR pfd;
     HGLRC rc;
@@ -986,11 +976,12 @@ void gxd_init(void) {
     p_glGenRenderbuffers(1, &sEfbDepth);
     p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     p_glGenFramebuffers(1, &sEfbFbo);
-    gxd_apply_settings();
+    gl_apply_settings();
 
     glGenTextures(1, &sWhite);
     glBindTexture(GL_TEXTURE_2D, sWhite);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+    return 1;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1013,7 +1004,7 @@ static void upload_levels(int fresh, int width, int height, int levels, const ui
  * minification filters (mipmap: none, nearest or linear), and LOD bias.
  * Anisotropic filtering, as the setting says, on what is filtered
  * linearly. */
-uint32_t gxd_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+static uint32_t gl_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
     static const GLenum kMin[2][3] = {{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR},
                                       {GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR}};
     int mip = (mode0 >> 5) & 3, min_linear = (mode0 >> 7) & 1;
@@ -1036,13 +1027,13 @@ uint32_t gxd_texture(int width, int height, int levels, const uint8_t* rgba, uin
     return t;
 }
 
-void gxd_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
+static void gl_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
     gl_forget();
     glBindTexture(GL_TEXTURE_2D, handle);
     upload_levels(0, width, height, levels, rgba);
 }
 
-void gxd_texture_delete(const uint32_t* handles, int n) { glDeleteTextures(n, handles); }
+static void gl_texture_delete(const uint32_t* handles, int n) { glDeleteTextures(n, handles); }
 
 /* ------------------------------------------------------------------------ */
 /* Drawing */
@@ -1283,7 +1274,7 @@ static int sXfStale;
 static uint32_t sXfShadow[GX_XF_WORDS];
 static int sXfShadowValid;
 
-void gxd_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+static void gl_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
               int first_index, int count) {
     apply_draw_state(st);
     if (st->xf && sXfStale) {
@@ -1313,7 +1304,7 @@ static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, cons
     p_glBufferSubData(target, 0, bytes, data);
 }
 
-void gxd_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+static void gl_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
     p_glBindVertexArray(sVao);
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
     frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize, (GLsizeiptr)vertices * sizeof(GXVertex), v);
@@ -1334,13 +1325,13 @@ static void upload_xf(const uint32_t* xf) {
     sXfStale = 1;
 }
 
-void gxd_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count) {
+static void gl_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count) {
     apply_draw_state(st);
     upload_xf(xf);
     p_glDrawElementsBaseVertex(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void*)((size_t)first_index * 4), first_vertex);
 }
 
-void gxd_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
+static void gl_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GLbitfield mask = 0;
     gl_forget();
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
@@ -1366,7 +1357,7 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
-int gxd_copy_target(uint32_t addr, int w, int h) {
+static int gl_copy_target(uint32_t addr, int w, int h) {
     CopyTarget* t;
     int i;
     gl_forget();
@@ -1392,10 +1383,10 @@ int gxd_copy_target(uint32_t addr, int w, int h) {
     return sTargetCount++;
 }
 
-uint32_t gxd_copy_texture(int target) { return sTargets[target].tex; }
+static uint32_t gl_copy_texture(int target) { return sTargets[target].tex; }
 
 /* Draws the EFB rectangle into the copy's texture. */
-void gxd_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
+static void gl_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     CopyTarget* t = &sTargets[target];
     GLint mode[4];
     GLfloat src[4];
@@ -1501,7 +1492,7 @@ static void dump_bmp(const char* path, int w, int h) {
     free(px);
 }
 
-int gxd_present(int x, int y, int cw, int ch, int may_drop) {
+static int gl_present(int x, int y, int cw, int ch, int may_drop) {
     int w, h, dw, dh, dropped;
     double aspect;
     gl_forget();
@@ -1563,3 +1554,9 @@ int gxd_present(int x, int y, int cw, int ch, int may_drop) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
     return dropped;
 }
+
+const GXDevice g_gl_device = {
+    "OpenGL",       gl_init,       gl_texture,     gl_texture_update, gl_texture_delete, gl_draw,
+    gl_frame_data,  gl_draw_recorded, gl_clear,    gl_copy_target,    gl_copy_texture,   gl_copy,
+    gl_present,     gl_apply_settings, gl_scale,   gl_msaa,
+};

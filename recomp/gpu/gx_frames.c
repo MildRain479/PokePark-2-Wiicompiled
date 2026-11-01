@@ -23,6 +23,7 @@
  * newest frame's.
  *
  * Environment:
+ *   RECOMP_GPU=vulkan|opengl   draw with this, over the Renderer setting
  *   RECOMP_FPS=1               the frame rate and time per call, each second, on stderr
  *   RECOMP_IGNORE_REFRESH=1    frames above the display's refresh rate are drawn too (for measuring) */
 #include <math.h>
@@ -68,6 +69,7 @@ static void print_gl_stats(void) {
     }
 }
 
+static const GXDevice* sDev;
 static int sRecording;            /* frames between the game's are drawn */
 static unsigned sGameFrames;      /* the game's frames, for the fps report */
 static unsigned sPresentsDropped; /* frames left out as the display wasn't ready, for the fps report */
@@ -130,12 +132,12 @@ static void show(int x, int y, int w, int h) {
      * display, maybe a slower one's), and once its queue is full a
      * present waits for it, and the game, drawing these frames while it
      * waits, would slow down. Then the frame is left out. */
-    if (gxd_present(x, y, w, h, sRecording)) sPresentsDropped++;
+    if (sDev->present(x, y, w, h, sRecording)) sPresentsDropped++;
     report();
     win_pump();
     /* Between frames, so a change doesn't lose the one being drawn. */
     win_set_fullscreen(g_settings.fullscreen);
-    gxd_apply_settings();
+    sDev->apply_settings();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -153,7 +155,7 @@ static int sPendingFreeCount, sFreeLaterCount;
 
 static void free_textures(uint32_t* list, int* count) {
     if (*count) {
-        gxd_texture_delete(list, *count);
+        sDev->texture_delete(list, *count);
         *count = 0;
     }
 }
@@ -355,11 +357,11 @@ static void render_frame(float t) {
                 blend_xf(xf, sPrev->xf + sPrev->ops[r->match].xf, cur, t);
                 cur = xf;
             }
-            gxd_draw_recorded(&r->st, cur, r->a[0], r->a[2], r->a[3]);
+            sDev->draw_recorded(&r->st, cur, r->a[0], r->a[2], r->a[3]);
             break;
         }
-        case OP_CLEAR: gxd_clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
-        case OP_COPY: gxd_copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]); break;
+        case OP_CLEAR: sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
+        case OP_COPY: sDev->copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]); break;
         default: show(r->a[0], r->a[1], r->a[2], r->a[3]); break;
         }
     }
@@ -428,11 +430,33 @@ void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 36
 /* Entry points */
 
 void gxb_init(void) {
+    const char* v = getenv("RECOMP_GPU");
     win_create();
-    gxd_init();
+    if (v && *v) sDev = strcmp(v, "vulkan") == 0 ? &g_vk_device : &g_gl_device;
+    else sDev = g_settings.renderer == RENDERER_VULKAN ? &g_vk_device : &g_gl_device;
+    if (!sDev->init()) {
+        const GXDevice* other = sDev == &g_gl_device ? &g_vk_device : &g_gl_device;
+        fprintf(stderr, "gpu: no %s, trying %s\n", sDev->name, other->name);
+        sDev = other;
+        if (!sDev->init()) {
+            fprintf(stderr, "gpu: no %s either\n", sDev->name);
+            exit(1);
+        }
+    }
     g_host_frame_due = frame_due;
     g_host_frame_render = frame_render;
 }
+
+int gx_wanted_scale(int h) {
+    const char* v = getenv("RECOMP_GX_SCALE");
+    int s = v && atoi(v) > 0 ? atoi(v) : g_settings.scale;
+    if (!s) s = (int)ceil(h / 456.0 - 0.25);
+    return s < 1 ? 1 : s > 8 ? 8 : s;
+}
+
+int display_scale(void) { return sDev->scale(); }
+int display_msaa(void) { return sDev->msaa(); }
+int display_renderer(void) { return sDev == &g_vk_device ? RENDERER_VULKAN : RENDERER_OPENGL; }
 
 int gxb_recording(void) {
     int want = sOutputRate > 60;
@@ -455,7 +479,7 @@ int gxb_recording(void) {
 
 void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
     GL_ENTER();
-    gxd_frame_data(v, vertices, index, count);
+    sDev->frame_data(v, vertices, index, count);
     GL_LEAVE(GLK_DRAW);
 }
 
@@ -463,14 +487,14 @@ uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint
     uint32_t r;
     GL_ENTER();
     (void)key;
-    r = gxd_texture(width, height, levels, rgba, mode0);
+    r = sDev->texture(width, height, levels, rgba, mode0);
     GL_LEAVE(GLK_TEXTURE);
     return r;
 }
 
 void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
     GL_ENTER();
-    gxd_texture_update(handle, width, height, levels, rgba);
+    sDev->texture_update(handle, width, height, levels, rgba);
     GL_LEAVE(GLK_TEXTURE_UPDATE);
 }
 
@@ -490,7 +514,7 @@ void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vert
         return;
     }
     GL_ENTER();
-    gxd_draw(st, v, first_vertex, vertices, index, first_index, count);
+    sDev->draw(st, v, first_vertex, vertices, index, first_index, count);
     GL_LEAVE(GLK_DRAW);
 }
 
@@ -505,7 +529,7 @@ void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
         return;
     }
     GL_ENTER();
-    gxd_clear(color, alpha, depth, rgba, z);
+    sDev->clear(color, alpha, depth, rgba, z);
     GL_LEAVE(GLK_CLEAR);
 }
 
@@ -514,8 +538,8 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int
 void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     int t;
     GL_ENTER();
-    t = gxd_copy_target(addr, w, h);
-    if (t >= 0 && !sRecording) gxd_copy(t, x, y, w, h, fmt, intensity, efb_alpha);
+    t = sDev->copy_target(addr, w, h);
+    if (t >= 0 && !sRecording) sDev->copy(t, x, y, w, h, fmt, intensity, efb_alpha);
     GL_LEAVE(GLK_COPY);
     if (t < 0) return;
     if (sRecording) {
@@ -531,7 +555,7 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         r->a[6] = intensity;
         r->a[7] = efb_alpha;
     }
-    gx_register_copy(addr, gxd_copy_texture(t), w, h, fmt);
+    gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt);
 }
 
 void gxb_present(int x, int y, int cw, int ch) {

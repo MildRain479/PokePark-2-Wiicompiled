@@ -24,6 +24,7 @@ enum {
 };
 
 #define MAX_SCALE 6
+enum { RENDERER_OPENGL, RENDERER_VULKAN };
 #define MAX_MSAA 8
 
 typedef struct {
@@ -33,6 +34,7 @@ typedef struct {
     int frame_rate;          /* 30 (the game's own), 60, or 120-240 (interpolated) */
     int fov;                 /* field of view, percent of the game's (tangent of half the angle) */
     int aniso;               /* anisotropic filtering: 1 (off), 2, 4, 8 or 16 */
+    int renderer;            /* RENDERER_*: what draws, from the next start */
     int rumble;              /* controller rumble: 0 off, 1 light, 2 normal, 3 strong */
     int text_speed;          /* dialogue: 1 (the game's), 2, 3, or 0 (a page at once) */
     int berries;             /* berries collected, percent of the game's */
@@ -68,7 +70,7 @@ void prompts_init(void);
 /* What settings_step changes. */
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
-       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED };
+       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);
