@@ -149,9 +149,9 @@ instructions ask, from the same keys:
 | Rotom's Spooky Shoot-'em-Up | pointer: mouse | right stick |
 | Bastiodon's Panel Crush | buttons, as on the Wii | |
 
-Steering eases to 2.4 g across (more than tilting alone gives: the
-minigames turn harder for it), and forward/back to 50 degrees; the
-stick tilts in proportion. Directions follow the remote's axes as the
+Tilting eases to 90 degrees (left/right) or 50 (forward/back), and the
+stick tilts in proportion. With both keys of a pair held, the one pressed
+last tilts it. Directions follow the remote's axes as the
 game reads them; `RECOMP_TILT_FLIP=lr`, `fb` or `lrfb` and
 `RECOMP_POINTER_FLIP=y` turn them round, if a minigame turns out to
 expect them the other way. The pointer is calibrated against the game's

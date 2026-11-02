@@ -68,13 +68,12 @@ static const struct {
 
 /* How far the keys and stick tilt the remote, and how quickly it gets
  * there (a share of the way each report: about 30 ms). The minigames'
- * scripts read the accelerometer themselves (FScriptLoader::syscall0x15)
- * and turn harder the more it reads across, past what tilting alone
- * gives: holding right along Gyarados' Aqua Dash, at 0.57 g (35 degrees)
- * and at 1 or 1.6 g Pikachu stayed pinned to the net, and at 2.4 g it
- * followed the course round. So steering reads as a tilt with a jerk to
- * the side on top, as a player gives it, up to STEER_G g. */
-#define STEER_G 2.4f
+ * scripts read the accelerometer themselves (FScriptLoader::syscall0x15);
+ * at 35 degrees their turns were too wide to make, so left and right go
+ * all the way over. They also go by readings of about 1 g alone, as
+ * from a remote held still: at 2.4 g across, Gyarados' Aqua Dash kept
+ * turning right for as long as left was held after it. */
+#define MAX_STEER (90.0f * PI / 180.0f)
 /* Forward and back as far as climbing goes: Pelipper's balloon climbs
  * as fast at 50 degrees as at 70, and at 30 too slowly. */
 #define MAX_PITCH (50.0f * PI / 180.0f)
@@ -116,6 +115,24 @@ static int shake_swing(uint32_t held, uint32_t report) {
     return (int32_t)(swingEnd - report) > 0 ? sign : 0;
 }
 
+/* A pair of opposite keys: +1 for plus, -1 for minus, and with both held
+ * the one pressed last, so rolling from one to the other turns straight
+ * over instead of stopping until the first is let go. */
+typedef struct {
+    uint32_t last;
+    int side;
+} KeyPair;
+
+static float key_pair(KeyPair* k, uint32_t held, uint32_t plus, uint32_t minus) {
+    uint32_t pressed = held & ~k->last;
+    k->last = held;
+    if (!(held & minus)) k->side = held & plus ? 1 : 0;
+    else if (!(held & plus)) k->side = -1;
+    else if (pressed & plus) k->side = 1;
+    else if (pressed & minus) k->side = -1;
+    return (float)k->side;
+}
+
 /* A gesture set off by a press of one of the keys in mask, lasting
  * length reports: the reports since it began, or -1 if none is under way. */
 typedef struct {
@@ -136,6 +153,7 @@ static int gesture(Gesture* g, uint32_t held, uint32_t mask, uint32_t report, in
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]) {
     static float steer, pitch, px, py;
     static Gesture push, bat;
+    static KeyPair leftRight, upDown;
     int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing;
     float lx = 0, ly = 0, rx = 0, ry = 0, x, y, z, wantSteer = 0, wantPitch = 0;
     if (!at) return 0;
@@ -152,15 +170,17 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     if (use & USE_STEER) {
         /* Right lowers the pointer end (to the left, held sideways), as
          * the minigames turn right: lifting it turned them left. */
-        wantSteer = lx != 0 ? -lx : (held & HOST_PAD_SCREEN_LEFT ? 1.0f : 0) - (held & HOST_PAD_SCREEN_RIGHT ? 1.0f : 0);
+        wantSteer = key_pair(&leftRight, held, HOST_PAD_SCREEN_LEFT, HOST_PAD_SCREEN_RIGHT);
+        if (lx != 0) wantSteer = -lx;
         if (flip("RECOMP_TILT_FLIP", "lr")) wantSteer = -wantSteer;
     }
     if (use & USE_PITCH) {
         /* Up climbs: the remote tilted back. */
-        wantPitch = ly != 0 ? -ly : (held & HOST_PAD_SCREEN_DOWN ? 1.0f : 0) - (held & HOST_PAD_SCREEN_UP ? 1.0f : 0);
+        wantPitch = key_pair(&upDown, held, HOST_PAD_SCREEN_DOWN, HOST_PAD_SCREEN_UP);
+        if (ly != 0) wantPitch = -ly;
         if (flip("RECOMP_TILT_FLIP", "fb")) wantPitch = -wantPitch;
     }
-    steer += (wantSteer - steer) * EASE;
+    steer += (wantSteer * MAX_STEER - steer) * EASE;
     pitch += (wantPitch * MAX_PITCH - pitch) * EASE;
 
     /* Gravity, as the accelerometer reads it (up along an axis reads +g on
@@ -169,19 +189,25 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
      * left: a positive steer lifts it (turning left), and tilting forward
      * lifts the edge nearest the player (+x). Upright, the pointer end is up and the face
      * toward the player. Steering and pitch each set their own axis, as
-     * if tilted one way and then the other, so steering hard keeps all of
+     * if tilted one way and then the other, so steering hard keeps most of
      * the climb or dive (a single rotation would take it away); z, out of
-     * the face, makes up the rest of g, if any is left. */
+     * the face, makes up the rest of g. Together they could come to more
+     * than g, which the games would pass over, so then both shrink. */
     if (hold == HOLD_UPRIGHT) {
         x = 0;
         y = (float)G;
         z = 0;
     } else {
-        float rest;
+        float across;
         x = sinf(pitch) * G;
-        y = steer * STEER_G * G;
-        rest = (float)G * G - x * x - y * y;
-        z = rest > 0 ? sqrtf(rest) : 0;
+        y = sinf(steer) * G;
+        across = sqrtf(x * x + y * y);
+        if (across > G) {
+            x = x * G / across;
+            y = y * G / across;
+            across = (float)G;
+        }
+        z = sqrtf((float)G * G - across * across);
     }
 
     /* Bursts of acceleration on top. */
