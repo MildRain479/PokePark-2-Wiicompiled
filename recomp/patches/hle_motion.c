@@ -68,10 +68,13 @@ static const struct {
 
 /* How far the keys and stick tilt the remote, and how quickly it gets
  * there (a share of the way each report: about 30 ms). The minigames'
- * scripts read the accelerometer themselves (FScriptLoader::syscall0x15);
- * at 35 degrees (0.57 g across) their turns were too wide to make, and
- * at 80 Gyarados' Aqua Dash turns visibly sharper. */
-#define MAX_STEER (80.0f * PI / 180.0f)
+ * scripts read the accelerometer themselves (FScriptLoader::syscall0x15)
+ * and turn harder the more it reads across, past what tilting alone
+ * gives: holding right along Gyarados' Aqua Dash, at 0.57 g (35 degrees)
+ * and at 1 or 1.6 g Pikachu stayed pinned to the net, and at 2.4 g it
+ * followed the course round. So steering reads as a tilt with a jerk to
+ * the side on top, as a player gives it, up to STEER_G g. */
+#define STEER_G 2.4f
 /* Forward and back as far as climbing goes: Pelipper's balloon climbs
  * as fast at 50 degrees as at 70, and at 30 too slowly. */
 #define MAX_PITCH (50.0f * PI / 180.0f)
@@ -157,7 +160,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
         wantPitch = ly != 0 ? -ly : (held & HOST_PAD_SCREEN_DOWN ? 1.0f : 0) - (held & HOST_PAD_SCREEN_UP ? 1.0f : 0);
         if (flip("RECOMP_TILT_FLIP", "fb")) wantPitch = -wantPitch;
     }
-    steer += (wantSteer * MAX_STEER - steer) * EASE;
+    steer += (wantSteer - steer) * EASE;
     pitch += (wantPitch * MAX_PITCH - pitch) * EASE;
 
     /* Gravity, as the accelerometer reads it (up along an axis reads +g on
@@ -168,7 +171,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
      * toward the player. Steering and pitch each set their own axis, as
      * if tilted one way and then the other, so steering hard keeps all of
      * the climb or dive (a single rotation would take it away); z, out of
-     * the face, makes up the rest of g. */
+     * the face, makes up the rest of g, if any is left. */
     if (hold == HOLD_UPRIGHT) {
         x = 0;
         y = (float)G;
@@ -176,7 +179,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     } else {
         float rest;
         x = sinf(pitch) * G;
-        y = sinf(steer) * G;
+        y = steer * STEER_G * G;
         rest = (float)G * G - x * x - y * y;
         z = rest > 0 ? sqrtf(rest) : 0;
     }
