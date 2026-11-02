@@ -121,7 +121,9 @@ void f_80025280(ppc_t* c) {
  * aspect, near and far. The park's cameras use 45 degrees (37.8 in some
  * places), 16:9, far plane 9999; close-ups and models in the 2D screens
  * use 20.9 degrees and far plane 1000. The setting widens (or narrows)
- * the world's cameras: while the camera is applied to the scene
+ * the world's cameras in the park, not in minigames (whose cameras are
+ * set for their own courses: at 150% the end of Pelipper's Circle
+ * Circuit looked through the ground): while the camera is applied to the scene
  * (ApplyToG3dCamera) and while its frustum is worked out for culling
  * (FrustumForCamera), so both agree; anything else in the game still
  * reads its own value. */
@@ -137,7 +139,7 @@ void hle_set_fov(int percent) { sFovScale = percent / 100.0f; }
 static uint32_t widen(uint32_t cam) {
     uint32_t own = LD32(cam + CAM_FOVY);
     float fovy = (float)ld_f32(cam + CAM_FOVY), half;
-    if (sFovScale == 1.0f || LD32(cam + CAM_PROJECTION) != 0 || (float)ld_f32(cam + CAM_FAR) < WORLD_FAR) return 0;
+    if (sFovScale == 1.0f || hle_in_minigame() || LD32(cam + CAM_PROJECTION) != 0 || (float)ld_f32(cam + CAM_FAR) < WORLD_FAR) return 0;
     if (!(fovy > 1.0f && fovy < 170.0f)) return 0;
     half = atanf(tanf(fovy * 3.14159265f / 360.0f) * sFovScale);
     st_f32(cam + CAM_FOVY, half * 360.0f / 3.14159265f);
