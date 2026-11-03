@@ -759,6 +759,15 @@ static uint32_t texture_for_map(int map) {
     return e->handle;
 }
 
+/* A fog register's float: 11 bits of mantissa, 8 of exponent and a sign,
+ * a float's top 20 bits. */
+static float fog_float(uint32_t r) {
+    uint32_t bits = ((r >> 19) & 1) << 31 | ((r >> 11) & 0xFF) << 23 | (r & 0x7FF) << 12;
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
 static void build_state(GXDrawState* st) {
     uint32_t genmode = bp[0x00], ac = bp[0xF3], blend = bp[0x41], zmode = bp[0x40];
     int i, k;
@@ -829,6 +838,15 @@ static void build_state(GXDrawState* st) {
     st->z_func = (zmode >> 1) & 7;
     st->z_update = (zmode >> 4) & 1;
     st->efb_alpha = (bp[0x43] & 7) == 1;
+    st->fog_type = (bp[0xF1] >> 21) & 7;
+    st->fog_ortho = (bp[0xF1] >> 20) & 1;
+    st->fog_a = fog_float(bp[0xEE]);
+    st->fog_b_mag = (int)(bp[0xEF] & 0xFFFFFF);
+    st->fog_b_shift = (int)(bp[0xF0] & 31);
+    st->fog_c = fog_float(bp[0xF1]);
+    st->fog_color[0] = ((bp[0xF2] >> 16) & 0xFF) / 255.0f;
+    st->fog_color[1] = ((bp[0xF2] >> 8) & 0xFF) / 255.0f;
+    st->fog_color[2] = (bp[0xF2] & 0xFF) / 255.0f;
     st->cull_mode = (genmode >> 14) & 3;
     {
         float wd = xf_float(0x101A), ht = xf_float(0x101B), zr = xf_float(0x101C);

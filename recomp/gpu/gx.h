@@ -55,6 +55,12 @@ typedef struct GXDrawState {
     float viewport[6];     /* x, y, width, height, near, far in EFB pixels */
     int scissor[4];        /* x0, y0, x1, y1 */
     int efb_alpha;         /* the EFB pixel format has an alpha channel (RGBA6_Z24) */
+    /* Fog (BP 0xEE-0xF2): its kind (0 none, 2 linear, 4 exp, 5 exp2,
+     * 6 backward exp, 7 backward exp2), orthographic or not, and from a
+     * pixel's 24-bit depth z its distance ze, a 2^24 / (b_mag - (z >>
+     * b_shift)) (orthographic: a z / 2^24), whose part past c is fogged. */
+    int fog_type, fog_ortho, fog_b_mag, fog_b_shift;
+    float fog_a, fog_c, fog_color[3];
     /* The matrix indices the vertices carry (bit 0 the position's, bit 1
      * texture coordinates'); the rest are XF's MATINDEX registers' alike
      * for every vertex. */

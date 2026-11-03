@@ -4,11 +4,12 @@
 // buffer at word pc.tev, read as a uniform buffer from there on (a phone's
 // GPU keeps one in its constant registers): header (stages, alpha
 // compare functions and logic), alpha references, registers, konst colors,
-// swap tables, then per stage its color and alpha inputs and operations,
+// swap tables, fog (kind, orthographic, b's magnitude and shift, a, c and
+// the color as RGB8), then per stage its color and alpha inputs and operations,
 // texture map and selections, 24 words each. Textures are pc.tex[map] of
 // all the device's textures.
 
-layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(56 + 24 * 16) / 4]; };
+layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(64 + 24 * 16) / 4]; };
 layout(set = 0, binding = 0) uniform sampler2D textures[16384];
 layout(push_constant) uniform Draw { uint xf, tev; uint tex[8]; } pc;
 
@@ -263,7 +264,7 @@ void main() {
         if (SPEC_STAGES > 15) last = run(S15A, S15B, S15C);
     } else {
         for (int i = 0; i < head.x; i++) {
-            uint s = 56u + 24u * uint(i);
+            uint s = 64u + 24u * uint(i);
             last = stage(ti(s), ti(s + 4), ti(s + 8), ti(s + 12), ti(s + 16), ti(s + 20));
         }
     }
@@ -274,6 +275,22 @@ void main() {
         bool p0 = acmp(head.y, a8, alpha_ref.x), p1 = acmp(head.z, a8, alpha_ref.y);
         bool pass = head.w == 0 ? (p0 && p1) : (head.w == 1 ? (p0 || p1) : (head.w == 2 ? (p0 != p1) : (p0 == p1)));
         if (!pass) discard;
+    }
+    // Fog, as GX does it after the alpha test, from the pixel's 24-bit
+    // depth (stored reversed: 1 is GX's 0).
+    ivec4 fog = ti(56);
+    if (fog.x != 0) {
+        vec4 ff = tf(60);
+        int z = int(clamp((1.0 - gl_FragCoord.z) * 16777216.0, 0.0, 16777215.0));
+        float ze = fog.y == 0 ? ff.x * 16777216.0 / float(fog.z - (z >> fog.w)) : ff.x * float(z) / 16777216.0;
+        float f = clamp(ze - ff.y, 0.0, 1.0);
+        if (fog.x == 4) f = 1.0 - exp2(-8.0 * f);
+        else if (fog.x == 5) f = 1.0 - exp2(-8.0 * f * f);
+        else if (fog.x == 6) f = exp2(-8.0 * (1.0 - f));
+        else if (fog.x == 7) f = exp2(-8.0 * (1.0 - f) * (1.0 - f));
+        uint fc = uint(ti(60).z);
+        vec3 col = vec3(float(fc & 255u), float((fc >> 8) & 255u), float((fc >> 16) & 255u)) / 255.0;
+        last.rgb = mix(last.rgb, col, floor(f * 256.0 + 0.5) / 256.0);
     }
     o_color = last;
 }

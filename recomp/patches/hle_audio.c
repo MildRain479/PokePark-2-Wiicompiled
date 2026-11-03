@@ -13,7 +13,13 @@
  * buffers the game queues, and the DSP takes mail at once and runs each
  * command list in the tick that follows: it mixes the running voices
  * (dsp_run_voices) and sends the result to the host's audio output
- * (host_audio.h). */
+ * (host_audio.h).
+ *
+ * Effects (reverb, chorus, delay) are the game's own code: the DSP mixes
+ * the voices' sends into the aux buses' buffers, AX hands those to the
+ * callbacks the game registered (nw4r's AXFX effects), which process them
+ * in place, and a later frame's command list mixes the processed buffer
+ * back into the output. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,7 +63,9 @@ enum {
     PB_IS_STREAM = 0x12,    /* u16: a stream keeps its ADPCM history on looping */
     PB_MIX_L = 0x14,        /* u16 volumes (0x8000 = 1.0), each followed by a ramp delta */
     PB_MIX_R = 0x18,
+    PB_MIX_AUX_L = 0x1C,    /* aux bus b's left, then right, at + 8 b */
     PB_MIX_S = 0x34,
+    PB_MIX_AUX_S = 0x38,    /* aux bus b's surround at + 4 b */
     PB_VE_VOLUME = 0x6A,    /* u16: the voice's envelope volume */
     PB_LOOP_FLAG = 0x6E,    /* u16 */
     PB_FORMAT = 0x70,       /* u16: 0 ADPCM (nibble addresses), 0x0A PCM16, 0x19 PCM8 */
@@ -91,6 +99,38 @@ static void st32_pair(uint32_t a, uint32_t v) {
 }
 
 static int16_t clamp16(int32_t v) { return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v); }
+
+/* The aux buses A, B and C. Each has three buffers of 96 s32 samples a
+ * channel (left, right, surround, 0x180 bytes apart) that AX turns round
+ * each frame: the DSP mixes the voices' sends into one (its input) while
+ * the game's callback processes the one before, and mixes another (its
+ * output), processed, into the output. AX asks where they are while it
+ * makes the command list (__AXGetAuxAInput and the rest), so the command
+ * list the DSP runs next uses those. A bus without a callback has no
+ * input; its output is then silence. */
+#define AUX_BUSES 3
+#define AUX_CHANNEL 0x180
+static uint32_t sAuxIn[AUX_BUSES], sAuxOut[AUX_BUSES];
+static uint32_t sSda; /* r13, for the return volumes */
+static const int32_t kAuxReturnVolume[AUX_BUSES] = {-0x4964, -0x4966, -0x4968}; /* AXGetAuxAReturnVolume and on */
+typedef struct {
+    int32_t l[AX_FRAME_SAMPLES], r[AX_FRAME_SAMPLES], s[AX_FRAME_SAMPLES];
+} AuxMix;
+
+static void aux_where(ppc_t* c, uint32_t* to, void (*orig)(ppc_t*)) {
+    uint32_t out = c->r[3];
+    sSda = c->r[13];
+    orig(c);
+    *to = LD32(out);
+}
+
+/* void __AXGetAuxAInput(u32* addr) and the rest. */
+void f_8022FA70(ppc_t* c) { aux_where(c, &sAuxIn[0], f_8022FA70_orig); }
+void f_8022FAB0(ppc_t* c) { aux_where(c, &sAuxOut[0], f_8022FAB0_orig); }
+void f_8022FB50(ppc_t* c) { aux_where(c, &sAuxIn[1], f_8022FB50_orig); }
+void f_8022FB90(ppc_t* c) { aux_where(c, &sAuxOut[1], f_8022FB90_orig); }
+void f_8022FC30(ppc_t* c) { aux_where(c, &sAuxIn[2], f_8022FC30_orig); }
+void f_8022FC70(ppc_t* c) { aux_where(c, &sAuxOut[2], f_8022FC70_orig); }
 
 /* One voice's decoder state for the frame, kept in registers and written
  * back to its parameter block at the end. */
@@ -145,17 +185,18 @@ static int32_t read_sample(Voice* v) {
     return s;
 }
 
-/* Mixes one voice's frame into the main left/right buses: decode,
- * sample-rate conversion (linear between the last two input samples),
- * envelope volume, the optional one-pole low-pass filter, and the mixer
- * volumes. Ramps (the deltas) are not applied: AX rewrites the volumes
- * every frame, so a change lands within 3 ms. The aux (effects) buses and
- * the remote speaker are not mixed. */
-static void mix_voice(uint32_t pb, int32_t* outL, int32_t* outR) {
+/* Mixes one voice's frame into the main left/right buses and the aux
+ * buses: decode, sample-rate conversion (linear between the last two
+ * input samples), envelope volume, the optional one-pole low-pass filter,
+ * and the mixer volumes. Ramps (the deltas) are not applied: AX rewrites
+ * the volumes every frame, so a change lands within 3 ms. The remote
+ * speaker is not mixed. */
+static void mix_voice(uint32_t pb, int32_t* outL, int32_t* outR, AuxMix* aux) {
     Voice v;
     uint32_t ratio, frac;
     int32_t last0, last1, ve, volL, volR, lpfOn, lpfY, lpfA, lpfB;
-    int i;
+    int32_t auxL[AUX_BUSES], auxR[AUX_BUSES], auxS[AUX_BUSES];
+    int i, b, sends = 0;
     v.pb = pb;
     v.cur = ld32_pair(pb + PB_CUR_ADDR);
     v.end = ld32_pair(pb + PB_END_ADDR);
@@ -175,6 +216,12 @@ static void mix_voice(uint32_t pb, int32_t* outL, int32_t* outR) {
     /* Surround is folded into both sides at half volume. */
     volL = LD16(pb + PB_MIX_L) + LD16(pb + PB_MIX_S) / 2;
     volR = LD16(pb + PB_MIX_R) + LD16(pb + PB_MIX_S) / 2;
+    for (b = 0; b < AUX_BUSES; b++) {
+        auxL[b] = sAuxIn[b] ? LD16(pb + PB_MIX_AUX_L + 8 * b) : 0;
+        auxR[b] = sAuxIn[b] ? LD16(pb + PB_MIX_AUX_L + 8 * b + 4) : 0;
+        auxS[b] = sAuxIn[b] ? LD16(pb + PB_MIX_AUX_S + 4 * b) : 0;
+        sends |= auxL[b] | auxR[b] | auxS[b];
+    }
     lpfOn = LD16(pb + PB_LPF_ON);
     lpfY = (int16_t)LD16(pb + PB_LPF_YN1);
     lpfA = LD16(pb + PB_LPF_A0);
@@ -185,6 +232,11 @@ static void mix_voice(uint32_t pb, int32_t* outL, int32_t* outR) {
         if (lpfOn) s = lpfY = clamp16((lpfA * s + lpfB * lpfY) >> 15);
         outL[i] += (s * volL) >> 15;
         outR[i] += (s * volR) >> 15;
+        for (b = 0; sends && b < AUX_BUSES; b++) {
+            aux[b].l[i] += (s * auxL[b]) >> 15;
+            aux[b].r[i] += (s * auxR[b]) >> 15;
+            aux[b].s[i] += (s * auxS[b]) >> 15;
+        }
         for (frac += ratio; frac >= 0x10000; frac -= 0x10000) {
             last0 = last1;
             last1 = read_sample(&v);
@@ -251,11 +303,35 @@ static void dsp_run_voices(void) {
     uint32_t pbs = LD32(AX_PBS), count = LD32(AX_MAX_VOICES), i;
     int32_t mixL[AX_FRAME_SAMPLES], mixR[AX_FRAME_SAMPLES];
     int16_t out[AX_FRAME_SAMPLES * 2];
+    AuxMix aux[AUX_BUSES];
+    int b;
     memset(mixL, 0, sizeof(mixL));
     memset(mixR, 0, sizeof(mixR));
+    memset(aux, 0, sizeof(aux));
     for (i = 0; pbs && i < count; i++) {
         uint32_t pb = pbs + i * AX_PB_SIZE;
-        if (LD16(pb + PB_STATE) == 1) mix_voice(pb, mixL, mixR);
+        if (LD16(pb + PB_STATE) == 1) mix_voice(pb, mixL, mixR, aux);
+    }
+    for (b = 0; b < AUX_BUSES; b++) {
+        uint32_t in = sAuxIn[b], from = sAuxOut[b];
+        int32_t ret = sSda ? LD16(sSda + kAuxReturnVolume[b]) : 0;
+        if (in) {
+            for (i = 0; i < AX_FRAME_SAMPLES; i++) {
+                ST32(in + i * 4, (uint32_t)aux[b].l[i]);
+                ST32(in + AUX_CHANNEL + i * 4, (uint32_t)aux[b].r[i]);
+                ST32(in + 2 * AUX_CHANNEL + i * 4, (uint32_t)aux[b].s[i]);
+            }
+        }
+        /* Processed, back into the output (surround folded in as the
+         * voices' is), at the bus's return volume. */
+        if (from && ret) {
+            for (i = 0; i < AX_FRAME_SAMPLES; i++) {
+                int64_t l = (int32_t)LD32(from + i * 4), r = (int32_t)LD32(from + AUX_CHANNEL + i * 4),
+                        sur = (int32_t)LD32(from + 2 * AUX_CHANNEL + i * 4);
+                mixL[i] += (int32_t)(((l + sur / 2) * ret) >> 15);
+                mixR[i] += (int32_t)(((r + sur / 2) * ret) >> 15);
+            }
+        }
     }
     for (i = 0; i < AX_FRAME_SAMPLES; i++) {
         out[i * 2] = clamp16(mixL[i]);

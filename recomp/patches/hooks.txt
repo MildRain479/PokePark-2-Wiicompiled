@@ -26,6 +26,12 @@
 0x8022ECD0 AIInitDMA  # hle_audio.c
 0x8022ED50 AIStartDMA  # hle_audio.c
 0x8022ED70 AIStopDMA  # hle_audio.c
+0x8022FA70 __AXGetAuxAInput  # hle_audio.c: where the DSP mixes the aux buses
+0x8022FAB0 __AXGetAuxAOutput  # hle_audio.c: where the DSP mixes the aux buses
+0x8022FB50 __AXGetAuxBInput  # hle_audio.c: where the DSP mixes the aux buses
+0x8022FB90 __AXGetAuxBOutput  # hle_audio.c: where the DSP mixes the aux buses
+0x8022FC30 __AXGetAuxCInput  # hle_audio.c: where the DSP mixes the aux buses
+0x8022FC70 __AXGetAuxCOutput  # hle_audio.c: where the DSP mixes the aux buses
 0x801741F0 fn_801741F0  # hle_game.c: logs scene changes
 0x80173E10 SceneSpecializerStrap::RunSystem  # hle_game.c: leave as soon as the park has loaded
 0x80247F10 WPADProbe  # hle_wpad.c: remote 0 connected, the rest absent

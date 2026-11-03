@@ -272,6 +272,9 @@ static const char* kFragmentShader =
     "uniform ivec4 u_swap[4];\n"
     "uniform ivec4 u_alpha;\n"
     "uniform vec4 u_alpha_ref;\n"
+    "uniform ivec4 u_fog; /* kind, orthographic, b's magnitude and shift (gx.h) */\n"
+    "uniform vec4 u_fogf; /* a, c */\n"
+    "uniform vec4 u_fog_color;\n"
     "vec4 sample_map(int m, vec2 uv) {\n"
     "  if (m == 0) return texture(u_tex0, uv); if (m == 1) return texture(u_tex1, uv);\n"
     "  if (m == 2) return texture(u_tex2, uv); if (m == 3) return texture(u_tex3, uv);\n"
@@ -357,11 +360,21 @@ static const char* kFragmentShader =
     "  bool p0 = acmp(u_alpha.x, a8, u_alpha_ref.x), p1 = acmp(u_alpha.y, a8, u_alpha_ref.y);\n"
     "  bool pass = u_alpha.z == 0 ? (p0 && p1) : (u_alpha.z == 1 ? (p0 || p1) : (u_alpha.z == 2 ? (p0 != p1) : (p0 == p1)));\n"
     "  if (!pass) discard;\n"
+    "  if (u_fog.x != 0) {\n"
+    "    int z = int(clamp((1.0 - gl_FragCoord.z) * 16777216.0, 0.0, 16777215.0));\n"
+    "    float ze = u_fog.y == 0 ? u_fogf.x * 16777216.0 / float(u_fog.z - (z >> u_fog.w)) : u_fogf.x * float(z) / 16777216.0;\n"
+    "    float f = clamp(ze - u_fogf.y, 0.0, 1.0);\n"
+    "    if (u_fog.x == 4) f = 1.0 - exp2(-8.0 * f);\n"
+    "    else if (u_fog.x == 5) f = 1.0 - exp2(-8.0 * f * f);\n"
+    "    else if (u_fog.x == 6) f = exp2(-8.0 * (1.0 - f));\n"
+    "    else if (u_fog.x == 7) f = exp2(-8.0 * (1.0 - f) * (1.0 - f));\n"
+    "    last.rgb = mix(last.rgb, u_fog_color.rgb, floor(f * 256.0 + 0.5) / 256.0);\n"
+    "  }\n"
     "  o_color = last;\n"
     "}\n";
 
 static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
-static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef;
+static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef, uFog, uFogF, uFogColor;
 
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = p_glCreateShader(type);
@@ -413,6 +426,9 @@ static void build_program(void) {
     uSwap = p_glGetUniformLocation(sProgram, "u_swap");
     uAlpha = p_glGetUniformLocation(sProgram, "u_alpha");
     uAlphaRef = p_glGetUniformLocation(sProgram, "u_alpha_ref");
+    uFog = p_glGetUniformLocation(sProgram, "u_fog");
+    uFogF = p_glGetUniformLocation(sProgram, "u_fogf");
+    uFogColor = p_glGetUniformLocation(sProgram, "u_fog_color");
 
     p_glGenVertexArrays(1, &sVao);
     p_glBindVertexArray(sVao);
@@ -1089,10 +1105,12 @@ static const GLenum kDepthFunc[8] = {GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL, 
 /* Sets everything a draw needs but its XF state and vertices. */
 static void apply_draw_state(const GXDrawState* st) {
     static GLint lcin[64], lain[64], lcop[64], laop[64], lmap[64], lsel[64], lswap[16], lalpha[4];
-    static GLfloat lreg[16], lkonst[16], laref[4];
+    static GLfloat lreg[16], lkonst[16], laref[4], lfogf[4], lfogc[4];
+    static GLint lfog[4];
     static int sUniformsSet, lstages;
     GLint cin[64], ain[64], cop[64], aop[64], map[64], sel[64], swap[16], alpha[4];
-    GLfloat reg[16], konst[16], aref[4];
+    GLfloat reg[16], konst[16], aref[4], fogf[4], fogc[4];
+    GLint fog[4];
     int i, all = !sGl.valid;
     sMsDirty = 1;
     if (all) {
@@ -1142,6 +1160,17 @@ static void apply_draw_state(const GXDrawState* st) {
     aref[0] = (float)st->alpha_ref[0];
     aref[1] = (float)st->alpha_ref[1];
     aref[2] = aref[3] = 0;
+    fog[0] = st->fog_type;
+    fog[1] = st->fog_ortho;
+    fog[2] = st->fog_b_mag;
+    fog[3] = st->fog_b_shift;
+    fogf[0] = st->fog_a;
+    fogf[1] = st->fog_c;
+    fogf[2] = fogf[3] = 0;
+    fogc[0] = st->fog_color[0];
+    fogc[1] = st->fog_color[1];
+    fogc[2] = st->fog_color[2];
+    fogc[3] = 1;
 
     if (!sUniformsSet || lstages != st->num_stages) {
         p_glUniform1i(uNumStages, st->num_stages);
@@ -1159,6 +1188,9 @@ static void apply_draw_state(const GXDrawState* st) {
     UNIFORM_IF_CHANGED(p_glUniform4iv, uSwap, 4, swap, lswap);
     UNIFORM_IF_CHANGED(p_glUniform4iv, uAlpha, 1, alpha, lalpha);
     UNIFORM_IF_CHANGED(p_glUniform4fv, uAlphaRef, 1, aref, laref);
+    UNIFORM_IF_CHANGED(p_glUniform4iv, uFog, 1, fog, lfog);
+    UNIFORM_IF_CHANGED(p_glUniform4fv, uFogF, 1, fogf, lfogf);
+    UNIFORM_IF_CHANGED(p_glUniform4fv, uFogColor, 1, fogc, lfogc);
     sUniformsSet = 1;
 
     for (i = 0; i < 8; i++) {
