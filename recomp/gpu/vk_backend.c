@@ -1157,7 +1157,8 @@ static int sTargetCount;
 static void make_target_image(CopyTarget* t) {
     Tex* x = &sTex[t->handle];
     x->im = make_image(VX(t->w), VY(t->h), 1, VK_FORMAT_R8G8B8A8_UNORM,
-                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_SAMPLE_COUNT_1_BIT);
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                       VK_SAMPLE_COUNT_1_BIT);
     x->sampler = sLinearClamp;
     transition(S->cb, &x->im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     set_texture(t->handle);
@@ -2797,6 +2798,63 @@ static int vk_copy_target(uint32_t addr, int w, int h) {
 
 static uint32_t vk_copy_texture(int target) { return sTargets[target].handle; }
 
+/* The copy's texture read back, after the frames submitted so far: a
+ * batch of its own, waited for (it's rare: gx_frames.c's write backs). */
+static uint8_t* vk_copy_read(int target, int* w, int* h) {
+    static VkCommandPool pool;
+    static VkCommandBuffer cb;
+    static VkFence fence;
+    static Buffer buf;
+    Image* im = &sTex[sTargets[target].handle].im;
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkBufferImageCopy r;
+    VkDeviceSize bytes = (VkDeviceSize)im->w * im->h * 4;
+    uint8_t* out;
+    present_done(); /* (Android presents from another thread: the queue is ours again) */
+    if (!pool) {
+        VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cpi.queueFamilyIndex = sQueueFamily;
+        CHECK(vkCreateCommandPool(sDev, &cpi, NULL, &pool));
+        cai.commandPool = pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        CHECK(vkAllocateCommandBuffers(sDev, &cai, &cb));
+        CHECK(vkCreateFence(sDev, &fci, NULL, &fence));
+    }
+    if (buf.size < bytes) {
+        drop_buffer(&buf);
+        buf = make_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                              VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    CHECK(vkBeginCommandBuffer(cb, &bi));
+    transition(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    memset(&r, 0, sizeof(r));
+    r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    r.imageSubresource.layerCount = 1;
+    r.imageExtent.width = (uint32_t)im->w;
+    r.imageExtent.height = (uint32_t)im->h;
+    r.imageExtent.depth = 1;
+    vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buf, 1, &r);
+    transition(cb, im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    CHECK(vkEndCommandBuffer(cb));
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    CHECK(vkQueueSubmit(sQueue, 1, &si, fence));
+    CHECK(vkWaitForFences(sDev, 1, &fence, VK_TRUE, UINT64_MAX));
+    CHECK(vkResetFences(sDev, 1, &fence));
+    out = (uint8_t*)malloc((size_t)bytes);
+    if (out) memcpy(out, buf.map, (size_t)bytes);
+    *w = im->w;
+    *h = im->h;
+    return out;
+}
+
 /* Draws the EFB rectangle into the copy's texture. */
 static void vk_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     Tex* t = &sTex[sTargets[target].handle];
@@ -3027,7 +3085,7 @@ const GXDevice g_vk_device = {
     "Vulkan",        vk_init,          vk_texture, vk_texture_update, vk_texture_delete, vk_draw,
     vk_frame_data,   vk_draw_recorded, vk_clear,   vk_copy_target,    vk_copy_texture,   vk_copy,
     vk_present,      vk_apply_settings, vk_scale,  vk_msaa,   vk_arena_alloc,    vk_arena_write,    vk_arena_free,
-    vk_texture_pixels,
+    vk_texture_pixels, vk_copy_read,
 };
 
 #endif

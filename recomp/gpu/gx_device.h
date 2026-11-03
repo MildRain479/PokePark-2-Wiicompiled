@@ -64,6 +64,10 @@ typedef struct GXDevice {
     /* The texture layouts it takes besides RGBA8 (gxb_texture_pixels); NULL
      * where there are none. */
     unsigned (*texture_pixels)(void);
+    /* The copy's texture as it now is (once the frame that made it has
+     * been shown): RGBA8, top row first, at the internal resolution
+     * (malloc'd; w and h say its size), or NULL. */
+    uint8_t* (*copy_read)(int target, int* w, int* h);
 } GXDevice;
 
 extern const GXDevice g_gl_device, g_vk_device;

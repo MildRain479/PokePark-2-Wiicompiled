@@ -733,10 +733,53 @@ void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     GL_LEAVE(GLK_CLEAR);
 }
 
-void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt);
+int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt);
+void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba);
 
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
-    int t;
+/* Copies to put in guest memory too (gx_register_copy says which), once
+ * the frame that makes them has been drawn: read back from the GPU, at
+ * the EFB's own size. */
+typedef struct WriteBack {
+    uint32_t addr;
+    int target, w, h, fmt, intensity, stride;
+} WriteBack;
+static WriteBack sWriteBacks[8];
+static int sWriteBackCount;
+
+static void write_back_copies(void) {
+    int i;
+    for (i = 0; i < sWriteBackCount; i++) {
+        WriteBack* b = &sWriteBacks[i];
+        int tw, th, x, y;
+        uint8_t* full = sDev->copy_read ? sDev->copy_read(b->target, &tw, &th) : NULL;
+        uint8_t* px = full ? (uint8_t*)malloc((size_t)b->w * b->h * 4) : NULL;
+        if (px) {
+            /* Each EFB pixel: the average of those it was drawn as. */
+            for (y = 0; y < b->h; y++) {
+                int y0 = y * th / b->h, y1 = (y + 1) * th / b->h;
+                for (x = 0; x < b->w; x++) {
+                    int x0 = x * tw / b->w, x1 = (x + 1) * tw / b->w, sx, sy, k, n = 0;
+                    unsigned sum[4] = {0, 0, 0, 0};
+                    if (y1 <= y0) y1 = y0 + 1;
+                    if (x1 <= x0) x1 = x0 + 1;
+                    for (sy = y0; sy < y1 && sy < th; sy++) {
+                        for (sx = x0; sx < x1 && sx < tw; sx++, n++) {
+                            for (k = 0; k < 4; k++) sum[k] += full[((size_t)sy * tw + sx) * 4 + k];
+                        }
+                    }
+                    for (k = 0; k < 4; k++) px[((size_t)y * b->w + x) * 4 + k] = (uint8_t)(n ? (sum[k] + n / 2) / n : 0);
+                }
+            }
+            gx_copy_write_back(b->addr, b->fmt, b->intensity, b->w, b->h, b->stride, px);
+        }
+        free(px);
+        free(full);
+    }
+    sWriteBackCount = 0;
+}
+
+void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha, int stride) {
+    int t, i;
     GL_ENTER();
     t = sDev->copy_target(addr, w, h);
     if (t >= 0 && !sRecording) sDev->copy(t, x, y, w, h, fmt, intensity, efb_alpha);
@@ -755,7 +798,19 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         r->a[6] = intensity;
         r->a[7] = efb_alpha;
     }
-    gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt);
+    if (!gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt)) return;
+    for (i = 0; i < sWriteBackCount && sWriteBacks[i].addr != addr; i++) {}
+    if (i == sWriteBackCount) {
+        if (sWriteBackCount == 8) return;
+        sWriteBackCount++;
+    }
+    sWriteBacks[i].addr = addr;
+    sWriteBacks[i].target = t;
+    sWriteBacks[i].w = w;
+    sWriteBacks[i].h = h;
+    sWriteBacks[i].fmt = fmt;
+    sWriteBacks[i].intensity = intensity;
+    sWriteBacks[i].stride = stride;
 }
 
 void gxb_present(int x, int y, int cw, int ch) {
@@ -774,11 +829,13 @@ void gxb_present(int x, int y, int cw, int ch) {
         r->a[3] = ch;
         GL_ENTER();
         frame_end();
+        if (sWriteBackCount) write_back_copies();
         GL_LEAVE(GLK_PRESENT);
         return;
     }
     GL_ENTER();
     show(x, y, cw, ch);
     free_textures(sPendingFree, &sPendingFreeCount);
+    if (sWriteBackCount) write_back_copies();
     GL_LEAVE(GLK_PRESENT);
 }

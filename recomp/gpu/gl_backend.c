@@ -1535,6 +1535,21 @@ static int gl_copy_target(uint32_t addr, int w, int h) {
 
 static uint32_t gl_copy_texture(int target) { return sTargets[target].tex; }
 
+/* The copy's texture read back (gx_frames.c's write backs). */
+static uint8_t* gl_copy_read(int target, int* w, int* h) {
+    CopyTarget* t = &sTargets[target];
+    uint8_t* out;
+    gl_forget();
+    *w = GLX(t->w);
+    *h = GLY(t->h);
+    out = (uint8_t*)malloc((size_t)*w * *h * 4);
+    if (!out) return NULL;
+    glBindTexture(GL_TEXTURE_2D, t->tex);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    return out;
+}
+
 /* Draws the EFB rectangle into the copy's texture. */
 static void gl_copy(int target, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha) {
     CopyTarget* t = &sTargets[target];
@@ -1708,5 +1723,6 @@ static int gl_present(int x, int y, int cw, int ch, int may_drop) {
 const GXDevice g_gl_device = {
     "OpenGL",       gl_init,       gl_texture,     gl_texture_update, gl_texture_delete, gl_draw,
     gl_frame_data,  gl_draw_recorded, gl_clear,    gl_copy_target,    gl_copy_texture,   gl_copy,
-    gl_present,     gl_apply_settings, gl_scale,   gl_msaa,
+    gl_present,     gl_apply_settings, gl_scale,   gl_msaa,          NULL,              NULL,
+    NULL,           NULL,          gl_copy_read,
 };

@@ -35,6 +35,64 @@ int gx_texture_size(int fmt, int width, int height) {
 
 static uint16_t be16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
 
+/* An EFB copy's picture (w x h RGBA8, top row first) in guest memory as
+ * the copy format fmt lays it out (GX_CTF_*: R4, R8, RA4, RA8, RGB565,
+ * RGB5A3, RGBA8, A8, R8, G8, B8, RG8, GB8; with intensity, R4 to RA8 and R8
+ * are I4, I8, IA4, IA8 and I8, of the colour's Y). stride: bytes from one
+ * row of blocks to the next. */
+void gx_encode_copy(uint8_t* dst, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba) {
+    static const int kTex[16] = {FMT_I4, FMT_I8, FMT_I8, FMT_IA8, FMT_RGB565, FMT_RGB5A3, FMT_RGBA8, FMT_I8,
+                                 FMT_I8, FMT_I8, FMT_I8, FMT_IA8, FMT_IA8, FMT_I8, FMT_I8, FMT_I8};
+    int tex = kTex[fmt & 15], bw, bh, bytes, bx, by, x, y;
+    block_dims(tex, &bw, &bh, &bytes);
+    if (stride <= 0) stride = (w + bw - 1) / bw * bytes;
+    for (by = 0; by < h; by += bh) {
+        uint8_t* b = dst + (size_t)(by / bh) * stride;
+        for (bx = 0; bx < w; bx += bw, b += bytes) {
+            memset(b, 0, (size_t)bytes);
+            for (y = 0; y < bh; y++) {
+                for (x = 0; x < bw; x++) {
+                    /* Past the edge: the last row and column again. */
+                    int sx = bx + x < w ? bx + x : w - 1, sy = by + y < h ? by + y : h - 1, i = y * bw + x;
+                    const uint8_t* p = rgba + ((size_t)sy * w + sx) * 4;
+                    int r = p[0], g = p[1], bl = p[2], a = p[3];
+                    int lum = (66 * r + 129 * g + 25 * bl + 128) / 256 + 16, v;
+                    if (lum > 255) lum = 255;
+                    if (intensity) r = lum;
+                    switch (fmt & 15) {
+                    case 0: b[i / 2] |= (uint8_t)((r >> 4) << ((i & 1) ? 0 : 4)); break;
+                    case 1: case 8: b[i] = (uint8_t)r; break;
+                    case 2: b[i] = (uint8_t)((a & 0xF0) | (r >> 4)); break;
+                    case 3: b[2 * i] = (uint8_t)a; b[2 * i + 1] = (uint8_t)r; break;
+                    case 4:
+                        v = (r >> 3) << 11 | (g >> 2) << 5 | bl >> 3;
+                        b[2 * i] = (uint8_t)(v >> 8);
+                        b[2 * i + 1] = (uint8_t)v;
+                        break;
+                    case 5:
+                        if (a >= 0xE0) v = 0x8000 | (r >> 3) << 10 | (g >> 3) << 5 | bl >> 3;
+                        else v = (a >> 5) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | bl >> 4;
+                        b[2 * i] = (uint8_t)(v >> 8);
+                        b[2 * i + 1] = (uint8_t)v;
+                        break;
+                    case 6:
+                        b[2 * i] = (uint8_t)a;
+                        b[2 * i + 1] = (uint8_t)r;
+                        b[32 + 2 * i] = (uint8_t)g;
+                        b[32 + 2 * i + 1] = (uint8_t)bl;
+                        break;
+                    case 7: b[i] = (uint8_t)a; break;
+                    case 9: b[i] = (uint8_t)g; break;
+                    case 10: b[i] = (uint8_t)bl; break;
+                    case 11: b[2 * i] = (uint8_t)g; b[2 * i + 1] = (uint8_t)r; break;
+                    case 12: b[2 * i] = (uint8_t)bl; b[2 * i + 1] = (uint8_t)g; break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void put(uint8_t* out, int width, int height, int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     uint8_t* d;
     if (x >= width || y >= height) return;

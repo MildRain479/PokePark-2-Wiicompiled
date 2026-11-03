@@ -547,6 +547,7 @@ typedef struct CopyTex {
     int bytes;        /* size of the copy in guest memory */
     uint32_t mem_hash; /* of that memory when the copy was made */
     uint64_t checked;  /* frame its memory was last checked in, plus 1 */
+    uint64_t made;     /* frame it was last made in, plus 1 */
 } CopyTex;
 static CopyTex sCopies[64];
 static int sCopyCount;
@@ -571,8 +572,12 @@ static int copy_still_valid(CopyTex* t) {
     return 1;
 }
 
-void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt) {
-    int i;
+/* Registers a copy; returns 1 if it should go to guest memory too: when
+ * it wasn't also made the frame before. The game's CPU reads such copies
+ * (a photo, saved as a JPEG); the ones made every frame (reflections,
+ * blur) only the GPU samples, and reading those back would hold it up. */
+int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt) {
+    int i, again;
     if (getenv("RECOMP_GX_COPY_LOG")) {
         static uint32_t seen[256];
         static int nseen;
@@ -587,10 +592,12 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int
     for (i = 0; i < sCopyCount; i++) {
         if (sCopies[i].addr == addr) break;
     }
+    again = i < sCopyCount && sCopies[i].made >= sFrame; /* this frame or the last */
     if (i == sCopyCount) {
         if (sCopyCount == 64) i = 0;
         else sCopyCount++;
     }
+    sCopies[i].made = sFrame + 1;
     sCopies[i].addr = addr;
     sCopies[i].handle = handle;
     sCopies[i].width = width;
@@ -599,6 +606,22 @@ void gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int
     sCopies[i].mem_hash = sCopies[i].bytes > 0 ? hash_bytes(MA(addr), sCopies[i].bytes) : 0;
     sCopies[i].checked = sFrame + 1;
     sStateDirty = 1; /* draws sampling addr now get the copy */
+    return !again;
+}
+
+/* Puts the copy to addr, as read back (w x h RGBA8), into guest memory in
+ * its format, unless the game has written there since it was made (the
+ * memory is something else now). It stays the copy for draws. */
+void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba) {
+    int i;
+    for (i = 0; i < sCopyCount && sCopies[i].addr != addr; i++) {}
+    if (i == sCopyCount || sCopies[i].bytes <= 0) return;
+    if (hash_bytes(MA(addr), sCopies[i].bytes) != sCopies[i].mem_hash) return;
+    gx_encode_copy(MA(addr), fmt, intensity, w, h, stride, rgba);
+    sCopies[i].mem_hash = hash_bytes(MA(addr), sCopies[i].bytes);
+    if (getenv("RECOMP_GX_COPY_LOG"))
+        fprintf(stderr, "gx: EFB copy %08X %dx%d fmt %d written to memory (frame %llu)\n", addr, w, h, fmt,
+                (unsigned long long)sFrame);
 }
 
 /* Saves w x h RGBA pixels as a 32-bit BMP, top row first. */
@@ -1538,7 +1561,7 @@ static void efb_copy(uint32_t exec) {
         sStateDirty = 1; /* textures are checked again each frame */
     } else {
         int fmt = (int)(((exec >> 4) & 7) | (((exec >> 3) & 1) << 3));
-        gxb_copy_to_texture(dst, x, y, w, h, fmt, (exec >> 15) & 1, (bp[0x43] & 7) == 1);
+        gxb_copy_to_texture(dst, x, y, w, h, fmt, (exec >> 15) & 1, (bp[0x43] & 7) == 1, (int)(bp[0x4D] & 0x3FF) * 32);
     }
     if (clear) {
         uint32_t rgba = ((bp[0x4F] & 0xFF) << 24) | (((bp[0x50] >> 8) & 0xFF) << 16) | ((bp[0x50] & 0xFF) << 8) |

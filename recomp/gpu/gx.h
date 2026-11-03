@@ -135,12 +135,13 @@ void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
 /* Copies an EFB rectangle to a texture, converted to copy format `fmt`
  * (exec bits 3-6) and stored as the game reads it back: an I8 copy as
  * intensity in every channel, an RGB565 copy with opaque alpha. */
-void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha);
+void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha, int stride);
 /* Shows the EFB rectangle the game copied to the XFB. */
 void gxb_present(int x, int y, int w, int h);
 
 /* Texture decoding (gx_texture.c). Output is RGBA8, row-major. */
 int gx_texture_size(int fmt, int width, int height);
+void gx_encode_copy(uint8_t* dst, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba);
 void gx_decode_texture(uint8_t* out, const uint8_t* src, int fmt, int width, int height,
                        const uint8_t* tlut, int tlut_fmt);
 /* The smallest of the layouts in `allowed` (bits, 1 << GX_PIX_...) that
