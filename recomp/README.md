@@ -175,6 +175,11 @@ in the window captures it again (that click isn't a dash). The mouse
 turns the player camera (moving it down looks down on Pikachu);
 cutscene and dialogue cameras are the game's. Rumble goes to the controller.
 
+**Updates** (`recomp/boot/update.c`): at start, unless the Updates setting is
+off, a thread asks GitHub for the latest release and compares its tag with
+`recomp/runtime/version.h`; Options shows the answer and opens the release
+page. `RECOMP_UPDATE_VERSION=0.0.9` checks as if this were an older build.
+
 **Settings** (`recomp/boot/settings.c`) are changed in Options in the
 pause menu (`options.c`). Builds other than public ones
 (`build.py --public`) also have a plain settings menu for testing:

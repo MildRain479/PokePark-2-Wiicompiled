@@ -46,6 +46,7 @@ typedef struct {
     int chase_speed;         /* the speed of the Pokémon Pikachu chases, percent of the game's */
     float mouse_sensitivity; /* camera turn per pixel, times the default */
     int invert_tilt;         /* mouse up looks down */
+    int check_updates;       /* ask GitHub for a newer release at start (update.c) */
     int key[ACT_COUNT][BIND_SLOTS];      /* Windows virtual-key codes (mouse buttons too); 0 = none */
     uint32_t pad[ACT_COUNT][BIND_SLOTS]; /* controller buttons (XPAD_*); 0 = none */
 } HostSettings;
@@ -72,7 +73,7 @@ void prompts_init(void);
 /* What settings_step changes. */
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
-       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH };
+       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH, SET_UPDATES };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);
@@ -82,6 +83,16 @@ void settings_bind(int act, int slot, int vk, uint32_t pad);
 /* Names, as the menus show them: "-" for none. */
 void settings_key_name(int vk, char* out, size_t n);
 const char* settings_pad_name(uint32_t b);
+
+/* The update check (update.c): update_check starts it (if the setting is
+ * on and it hasn't found an answer), update_state says how it went, and,
+ * when a newer release is out, update_tag is its version ("v1.2.3") and
+ * update_open opens its page in the browser. */
+enum { UPDATE_OFF, UPDATE_CHECKING, UPDATE_CURRENT, UPDATE_FAILED, UPDATE_NEWER };
+void update_check(void);
+int update_state(void);
+const char* update_tag(void);
+void update_open(void);
 
 /* The Options tab of the pause menu (options.c), as for the settings
  * menu below; used by it while that is closed. */

@@ -220,6 +220,8 @@ void settings_save(void) {
             g_settings.damage_taken);
     fprintf(f, "chase_speed = %d ; the speed of the Pokemon Pikachu chases, percent of the game's: 50, 75, 100, 125 or 150\n\n",
             g_settings.chase_speed);
+    fprintf(f, "[updates]\n");
+    fprintf(f, "check = %d ; 1: at start, ask GitHub whether a newer version is out\n\n", g_settings.check_updates);
 #ifndef __ANDROID__ /* no mouse or keyboard */
     fprintf(f, "[mouse]\n");
     fprintf(f, "sensitivity = %.2f ; camera turn, times the default\n", g_settings.mouse_sensitivity);
@@ -265,6 +267,7 @@ void settings_load(void) {
     g_settings.frame_rate = 30;
     g_settings.fov = 100;
     g_settings.mouse_sensitivity = 1.0f;
+    g_settings.check_updates = 1;
     settings_default_controls();
     f = fopen(settings_path(), "r");
     if (!f) {
@@ -312,6 +315,8 @@ void settings_load(void) {
                 g_settings.mouse_sensitivity = s < 0.1f ? 0.1f : s > 3.0f ? 3.0f : s;
             }
             if (!strcmp(name, "invert_tilt")) g_settings.invert_tilt = atoi(p) != 0;
+        } else if (!strcmp(section, "updates") && !strcmp(name, "check")) {
+            g_settings.check_updates = atoi(p) != 0;
         } else if (!strcmp(section, "controller") && !strcmp(name, "rumble")) {
             g_settings.rumble = atoi(p) < 0 ? 0 : atoi(p) > 3 ? 3 : atoi(p);
         } else if (!strcmp(section, "controller") && !strcmp(name, "touch_controls")) {
@@ -381,6 +386,10 @@ void settings_step(int which, int d) {
         break;
     }
     case SET_INVERT: g_settings.invert_tilt = !g_settings.invert_tilt; break;
+    case SET_UPDATES:
+        g_settings.check_updates = !g_settings.check_updates;
+        update_check();
+        break;
     case SET_ANISO: {
         static const int kAniso[] = {1, 2, 4, 8, 16};
         for (i = 0; i < 5 && kAniso[i] != g_settings.aniso; i++) {}

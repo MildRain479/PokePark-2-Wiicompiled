@@ -71,6 +71,7 @@ static const Row kDisplay[] = {
 #ifndef __ANDROID__
     {ROW_SETTING, SET_RENDERER, "Renderer"},
 #endif
+    {ROW_SETTING, SET_UPDATES, "Updates"},
     {ROW_CLOSE, 0, "Close game"},
 };
 static const Row kGameplay[] = {
@@ -178,6 +179,11 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_CHASE_SPEED:
         snprintf(out, n, g_settings.chase_speed == 100 ? "Original" : "%d%%", g_settings.chase_speed);
         break;
+    case SET_UPDATES:
+        s = update_state();
+        if (s == UPDATE_NEWER) snprintf(out, n, "%s is out", update_tag());
+        else snprintf(out, n, "%s", s == UPDATE_OFF ? "Off" : s == UPDATE_CHECKING ? "Checking" : s == UPDATE_CURRENT ? "Up to date" : "Can't check");
+        break;
     default: *out = 0;
     }
 }
@@ -275,7 +281,9 @@ static void select_(void) {
         return;
     }
     r = row_at(sSection, sRow);
-    if (r.kind == ROW_SETTING) {
+    if (r.kind == ROW_SETTING && r.which == SET_UPDATES && update_state() == UPDATE_NEWER) {
+        update_open(); /* its page, to download it from */
+    } else if (r.kind == ROW_SETTING) {
         settings_step(r.which, 1);
     } else if (r.kind == ROW_BINDING) {
         sCapture = sSection == SEC_CONTROLLER ? CAPTURE_PAD : CAPTURE_KEY;
@@ -606,6 +614,13 @@ static void draw_file_button(void) {
     hasIcon = draw_button_icon(HOST_PAD_MINUS, icon, 0xFF7A2020u);
     draw_text("Options", hasIcon ? (icon.x1 + kFileButton.x1) / 2 : (kFileButton.x0 + kFileButton.x1) / 2, 703, 56,
               ALIGN_CENTRE, 0xFFFFFFFFu, 0xFF7A2020u, 4.0f, 1, hasIcon ? 175 : 220);
+    /* Over it, a newer release's news (Options' Updates row opens its page). */
+    if (update_state() == UPDATE_NEWER) {
+        char news[64];
+        snprintf(news, sizeof(news), "Update: %s", update_tag());
+        draw_text(news, (kFileButton.x0 + kFileButton.x1) / 2, 632, 40, ALIGN_CENTRE, 0xFFFFFFFFu, 0xFF7A2020u, 3.0f,
+                  1, kFileButton.x1 - kFileButton.x0);
+    }
 }
 
 /* The other tab: a piece of the title strip, a little darker, with an
@@ -717,6 +732,11 @@ static void draw_book(void) {
     if (sTop > 0) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP - 8, 9, 1, PURPLE);
     if (sTop + VISIBLE_ROWS < n) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP + VISIBLE_ROWS * ROW_PITCH - 4, 9, -1, PURPLE);
     /* What the keys do here, when it's not plain. */
+    if (sOnRows && row_at(sSection, sRow).kind == ROW_SETTING && row_at(sSection, sRow).which == SET_UPDATES &&
+        update_state() == UPDATE_NEWER) {
+        draw_text("Select: open its download page", (kPage.x0 + kPage.x1) / 2, 752, 28, ALIGN_CENTRE, 0xFF7A6448u, 0,
+                  0, 0, 0);
+    }
     if (sOnRows && row_at(sSection, sRow).kind == ROW_BINDING) {
         draw_text(sCapture != CAPTURE_NONE ? "Esc: cancel" : input_controller_last() ? "Select: rebind    Y: clear"
                                                                                    : "Select: rebind    Delete: clear",
@@ -730,7 +750,7 @@ unsigned options_draws(void) { return sDraws; }
 
 const uint32_t* options_draw(int w, int h) {
     static unsigned drawn = ~0u;
-    static int drawnW, drawnH, drawnWhat, cw;
+    static int drawnW, drawnH, drawnWhat, drawnUpdate, cw;
     int what = sOpen ? 2 : hle_pause_main_page() ? 1 : hle_file_select_shown() ? 3 : 0, y;
     if (sOpen && !shown(sFrom)) { /* what it was opened from went (the scene changed) */
         set_open(0);
@@ -739,7 +759,9 @@ const uint32_t* options_draw(int w, int h) {
     if (!what || w <= 0 || h <= 0 || !hle_font_metrics(&sCellW, &sCellH, &sBaseline) ||
         !hle_pause_image("PmPocketbookL01", NULL, &cw, &cw))
         return NULL;
-    if (what == drawnWhat && drawn == sChanges && w == drawnW && h == drawnH && sPx) return sPx;
+    /* (The update check's answer comes in by itself.) */
+    if (what == drawnWhat && drawn == sChanges && w == drawnW && h == drawnH && drawnUpdate == update_state() && sPx)
+        return sPx;
     if (w != sW || h != sH || !sPx) {
         free(sPx);
         sPx = (uint32_t*)malloc((size_t)w * h * 4);
@@ -752,6 +774,7 @@ const uint32_t* options_draw(int w, int h) {
     drawnW = w;
     drawnH = h;
     drawnWhat = what;
+    drawnUpdate = update_state();
     sScale = (float)w / REF_W < (float)h / REF_H ? (float)w / REF_W : (float)h / REF_H;
     sOffX = (w - REF_W * sScale) / 2;
     sOffY = (h - REF_H * sScale) / 2;
