@@ -652,7 +652,7 @@ static void forget(void) {
  * setup as texgen_program makes it. */
 #define XF_PACKED (0x360 + 8 + 8 * 12)
 /* The TEV state as the fragment shader reads it (gx.frag). */
-#define TEV_WORDS (64 + 24 * 16)
+#define TEV_WORDS (144 + 24 * 16)
 /* Where uniform buffers may start (the device's limit). */
 static VkDeviceSize sUboAlign = 256;
 
@@ -2086,7 +2086,7 @@ static uint32_t write_tev(const GXDrawState* st) {
     uint32_t w[TEV_WORDS];
     int32_t* iw = (int32_t*)w;
     float* fw = (float*)w;
-    int i, k, n = 64 + 24 * st->num_stages;
+    int i, k, n = 144 + 24 * st->num_stages;
     VkDeviceSize off;
     memset(w, 0, (size_t)n * 4);
     iw[0] = st->num_stages;
@@ -2110,9 +2110,31 @@ static uint32_t write_tev(const GXDrawState* st) {
     fw[61] = st->fog_c;
     iw[62] = (int32_t)((uint32_t)(st->fog_color[0] * 255.0f + 0.5f) | (uint32_t)(st->fog_color[1] * 255.0f + 0.5f) << 8 |
                        (uint32_t)(st->fog_color[2] * 255.0f + 0.5f) << 16);
+    if (st->ind_any) {
+        for (i = 0; i < st->num_stages; i++) iw[64 + i] = (int32_t)st->ind_cmd[i];
+        for (i = 0; i < 4; i++) {
+            iw[80 + 4 * i] = st->ind_map[i];
+            iw[81 + 4 * i] = st->ind_coord[i];
+            iw[82 + 4 * i] = st->ind_scale[i][0];
+            iw[83 + 4 * i] = st->ind_scale[i][1];
+        }
+        for (i = 0; i < 3; i++) {
+            for (k = 0; k < 3; k++) {
+                iw[96 + 8 * i + k] = st->ind_mtx[i][0][k];
+                iw[100 + 8 * i + k] = st->ind_mtx[i][1][k];
+            }
+            iw[99 + 8 * i] = iw[103 + 8 * i] = 17 - st->ind_mtx_scale[i];
+        }
+        iw[120] = st->ind_stages;
+        iw[121] = 1;
+        for (i = 0; i < 8; i++) {
+            iw[128 + 2 * i] = st->tc_size[i][0];
+            iw[129 + 2 * i] = st->tc_size[i][1];
+        }
+    }
     for (i = 0; i < st->num_stages; i++) {
         const GXTevStage* s = &st->stage[i];
-        int32_t* o = iw + 64 + 24 * i;
+        int32_t* o = iw + 144 + 24 * i;
         for (k = 0; k < 4; k++) {
             o[k] = s->color_in[k];
             o[4 + k] = s->alpha_in[k];
@@ -2128,7 +2150,8 @@ static uint32_t write_tev(const GXDrawState* st) {
         o[16] = s->texmap;
         o[17] = s->texcoord;
         o[18] = s->tex_enable;
-        o[19] = s->channel == 7 ? 7 : (s->channel & 1);
+        /* (The bump alphas, 5 and 6, with an indirect stage to give them.) */
+        o[19] = s->channel == 7 || (st->ind_any && (s->channel == 5 || s->channel == 6)) ? s->channel : (s->channel & 1);
         o[20] = s->color_dest;
         o[21] = s->alpha_dest;
         o[22] = s->kcolor_sel | (s->kalpha_sel << 5);
@@ -2354,7 +2377,8 @@ static VkPipeline spec_pipeline(const GXDrawState* st, const uint32_t* xf, uint3
     uint32_t w[SPEC_WORDS], v[VS_WORDS], h = 2166136261u;
     int i, n;
     Spec* s;
-    if (!sSpecs) return VK_NULL_HANDLE;
+    /* Indirect texturing is in the general shader only (it's rare). */
+    if (!sSpecs || st->ind_any) return VK_NULL_HANDLE;
     spec_words(st, w);
     vs_words(st, xf, v);
     n = 2 + 3 * (int)w[0];

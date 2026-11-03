@@ -61,6 +61,18 @@ typedef struct GXDrawState {
      * b_shift)) (orthographic: a z / 2^24), whose part past c is fogged. */
     int fog_type, fog_ortho, fog_b_mag, fog_b_shift;
     float fog_a, fog_c, fog_color[3];
+    /* Indirect texturing (BP 0x06-0x27): ind_any if a TEV stage has an
+     * indirect command (ind_cmd, BP 0x10 on, raw). Indirect stage i reads
+     * texture map ind_map[i] at coordinate ind_coord[i], shifted right by
+     * ind_scale[i]; matrix m is two rows of S0.10 ints, scaled by 2 to
+     * the power ind_mtx_scale[m] - 17. Coordinates are in texels with 7
+     * fractional bits, by tc_size (BP 0x30 on: each texture coordinate's
+     * size in texels). */
+    int ind_stages, ind_any;
+    uint32_t ind_cmd[16];
+    int ind_map[4], ind_coord[4], ind_scale[4][2];
+    int ind_mtx[3][2][3], ind_mtx_scale[3];
+    int tc_size[8][2];
     /* The matrix indices the vertices carry (bit 0 the position's, bit 1
      * texture coordinates'); the rest are XF's MATINDEX registers' alike
      * for every vertex. */

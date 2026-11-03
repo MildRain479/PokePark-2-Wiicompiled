@@ -21,10 +21,10 @@ Settings
 - Xbox-style controllers and keyboard and mouse are supported.
 
 This is a beta
-Some things aren't done yet: some graphics effects (fog, indirect
-texturing and others), sound effects such as reverb, and the Wii
-Remote pointer and Nunchuk (the game doesn't need them). It has been
-tested on one PC so far, so problems on other hardware are likely.
+Some things aren't done yet: a few rare graphics effects, the Wii
+Remote speaker, and the Wii Remote pointer and Nunchuk (the game
+doesn't need them). It has been tested on one PC so far, so problems
+on other hardware are likely.
 
 Reporting problems: open an issue on the project's GitHub page. Say
 what you did and what happened, attach a screenshot if you can, and

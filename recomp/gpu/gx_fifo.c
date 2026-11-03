@@ -817,6 +817,34 @@ static void build_state(GXDrawState* st) {
             st->konst[i][k] = tev_konst[i][k] / 255.0f;
         }
     }
+    st->ind_stages = (int)((genmode >> 16) & 7);
+    for (i = 0; i < st->num_stages; i++) {
+        st->ind_cmd[i] = bp[0x10 + i] & 0x1FFFFF;
+        if (st->ind_cmd[i]) st->ind_any = 1;
+    }
+    if (st->ind_any) {
+        for (i = 0; i < 4; i++) {
+            uint32_t ss = bp[0x25 + i / 2] >> ((i & 1) * 8);
+            st->ind_map[i] = (int)((bp[0x27] >> (6 * i)) & 7);
+            st->ind_coord[i] = (int)((bp[0x27] >> (6 * i + 3)) & 7);
+            st->ind_scale[i][0] = (int)(ss & 15);
+            st->ind_scale[i][1] = (int)((ss >> 4) & 15);
+            if (i < st->ind_stages && !st->texture[st->ind_map[i]]) st->texture[st->ind_map[i]] = texture_for_map(st->ind_map[i]);
+        }
+        for (i = 0; i < 3; i++) {
+            uint32_t a = bp[0x06 + 3 * i], b = bp[0x07 + 3 * i], c = bp[0x08 + 3 * i];
+            const uint32_t col[3] = {a, b, c};
+            for (k = 0; k < 3; k++) {
+                st->ind_mtx[i][0][k] = (int)(col[k] << 21) >> 21;
+                st->ind_mtx[i][1][k] = (int)((col[k] >> 11) << 21) >> 21;
+            }
+            st->ind_mtx_scale[i] = (int)(((a >> 22) & 3) | ((b >> 22) & 3) << 2 | ((c >> 22) & 3) << 4);
+        }
+        for (i = 0; i < 8; i++) {
+            st->tc_size[i][0] = (int)(bp[0x30 + 2 * i] & 0xFFFF) + 1;
+            st->tc_size[i][1] = (int)(bp[0x31 + 2 * i] & 0xFFFF) + 1;
+        }
+    }
     for (i = 0; i < st->num_stages; i++) {
         const GXTevStage* s = &st->stage[i];
         if (s->tex_enable && !st->texture[s->texmap]) st->texture[s->texmap] = texture_for_map(s->texmap);

@@ -100,7 +100,8 @@ git-ignored, and is created on first run.
 
 Sound plays through waveOut (`recomp/boot/audio_win32.c`, about 85 ms
 buffered): the title movie's soundtrack, menu music and sound effects.
-There is no reverb or other effects yet, and the Wii Remote speaker is
+The aux buses that feed the game's own effects (such as reverb) are
+mixed, though no area tested so far uses them; the Wii Remote speaker is
 silent.
 
 The title, menus and the movie intro run at a steady 60 fps (the window
@@ -289,7 +290,7 @@ Diagnostics:
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
 | `hle_wpad.c` | The Wii Remote (WPAD). Remote 0, sideways with no extension, connects a second after the game sets its connect callback; a 200 Hz timer stands in for its reports, read from the host's controls (`host_input.h`). KPAD runs unchanged on top. Remotes 1-3 are absent; the speaker is accepted and silent. |
-| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. Volume ramps, the aux (effects) buses and the remote speaker are not mixed. |
+| `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. The aux (effects) buses go out to the game's effect callbacks and come back in at their return volumes. Volume ramps and the remote speaker are not mixed. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
 | `hle_os.c` | `OSReport`/`OSPanic` print to stderr; failed `MEMAllocFromAllocator` calls are logged. |
 | `hle_font.c` | The Wii system font, which `OSInitFont` reads from the boot ROM: `ReadFont` builds the ANSI font from host glyphs (`host_font.h`; GDI's Segoe UI Semibold in `recomp/boot/font_win32.c`), in the ROM font's format, and the SDK expands it as usual. |
@@ -402,8 +403,8 @@ runs unchanged.
   where OpenGL runs at about 135, with fewer slow frames.
 
 Not implemented yet:
-- lighting (lit channels use the material color);
-- indirect texturing, fog and logic ops;
+- fog range adjustment;
+- logic ops;
 - z-textures;
 - lines and points;
 - copy pixel formats (copies keep RGBA).
@@ -474,8 +475,7 @@ What is different from Windows:
 - **Input extras.** No pointer (IR) and no Nunchuk; PokePark is played
   sideways, so neither is needed for the main game. Analog movement
   would need a game-side change, since the game reads the d-pad.
-- **Sound extras.** The aux buses that feed reverb and other effects
-  (AXFX), volume ramps, polyphase resampling (linear is used for all
+- **Sound extras.** Volume ramps, polyphase resampling (linear is used for all
   voices), the biquad filter and the Wii Remote speaker.
 - **Graphics features.** See the list above.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.

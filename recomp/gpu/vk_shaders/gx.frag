@@ -5,11 +5,15 @@
 // GPU keeps one in its constant registers): header (stages, alpha
 // compare functions and logic), alpha references, registers, konst colors,
 // swap tables, fog (kind, orthographic, b's magnitude and shift, a, c and
-// the color as RGB8), then per stage its color and alpha inputs and operations,
-// texture map and selections, 24 words each. Textures are pc.tex[map] of
-// all the device's textures.
+// the color as RGB8), indirect texturing (from word 64: each stage's
+// command; at 80 the indirect stages' maps, coordinates and scales; at 96
+// the matrices' rows, each with its shift; at 120 the indirect stages and
+// whether any stage is indirect; at 128 the coordinates' sizes), then from
+// word 144 per stage its color and alpha inputs and operations, texture
+// map and selections, 24 words each. Textures are pc.tex[map] of all the
+// device's textures.
 
-layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(64 + 24 * 16) / 4]; };
+layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(144 + 24 * 16) / 4]; };
 layout(set = 0, binding = 0) uniform sampler2D textures[16384];
 layout(push_constant) uniform Draw { uint xf, tev; uint tex[8]; } pc;
 
@@ -167,18 +171,44 @@ bool acmp(int f, float a, float r) {
 float q8(float x) { return floor(x * 255.0 + 0.5) / 255.0; }
 vec3 q8(vec3 x) { return floor(x * 255.0 + 0.5) / 255.0; }
 
-vec4 stage(ivec4 ci, ivec4 ai, ivec4 co, ivec4 ao, ivec4 map, ivec4 sel) {
+// A texture map sampled at a coordinate in texels with 7 fractional bits.
+vec4 sample_at(int m, ivec2 c) {
+    return sample_map(m, vec2(c) / (vec2(textureSize(textures[pc.tex[m]], 0)) * 128.0));
+}
+
+// Texture coordinate n in texels with 7 fractional bits, by its size (an
+// indirect stage's or stage's, as GX has them).
+ivec2 fixpoint_uv(int n) {
+#if TEX_IO > 0
+    vec3 tc = v_tex[TEX_IO < 8 ? min(n, TEX_IO - 1) : n];
+    ivec4 sz = ti(128u + 4u * uint(n >> 1));
+    return ivec2(tc.xy / (tc.z == 0.0 ? 1.0 : tc.z) * vec2((n & 1) != 0 ? sz.zw : sz.xy) * 128.0);
+#else
+    return ivec2(0);
+#endif
+}
+
+int wrap(int v, int w) { return w == 0 ? v : (w == 6 ? 0 : v & ((256 >> (w - 1)) * 128 - 1)); }
+
+// ind: the coordinate indirect texturing made (if z isn't 0), and the bump
+// alpha (w).
+vec4 stage(ivec4 ci, ivec4 ai, ivec4 co, ivec4 ao, ivec4 map, ivec4 sel, ivec4 ind) {
     vec4 tex = vec4(1.0);
 #if TEX_IO > 0
     if (map.z != 0) {
-        // (Fewer than all: only stages read none beyond, but the compiler
-        // sees the index in stages left out too.)
-        vec3 tc = v_tex[TEX_IO < 8 ? min(map.y, TEX_IO - 1) : map.y];
-        tex = sample_map(map.x, tc.xy / (tc.z == 0.0 ? 1.0 : tc.z));
+        if (ind.z != 0) tex = sample_at(map.x, ind.xy);
+        else {
+            // (Fewer than all: only stages read none beyond, but the compiler
+            // sees the index in stages left out too.)
+            vec3 tc = v_tex[TEX_IO < 8 ? min(map.y, TEX_IO - 1) : map.y];
+            tex = sample_map(map.x, tc.xy / (tc.z == 0.0 ? 1.0 : tc.z));
+        }
     }
 #endif
     tex = swizzle(tex, sel.w & 3);
     vec4 ras = map.w == 0 ? v_col0 : (map.w == 1 ? v_col1 : vec4(0.0));
+    if (map.w == 5) ras = vec4(0.0, 0.0, 0.0, float(ind.w) / 255.0);
+    else if (map.w == 6) ras = vec4(0.0, 0.0, 0.0, float(ind.w | (ind.w >> 5)) / 255.0);
     ras = swizzle(ras, sel.w >> 2);
     vec3 kc = kcolor(sel.z & 31);
     float ka = kalpha(sel.z >> 5);
@@ -235,7 +265,37 @@ vec4 run(uint a, uint b, uint c) {
     ivec4 ao = ivec4((b >> 16) & 15u, (b >> 20) & 15u, (b >> 24) & 15u, (b >> 28) & 15u);
     ivec4 map = ivec4(c & 15u, (c >> 4) & 15u, (c >> 8) & 1u, (c >> 9) & 15u);
     ivec4 sel = ivec4((c >> 13) & 3u, (c >> 15) & 3u, (c >> 17) & 1023u, (c >> 27) & 15u);
-    return stage(ci, ai, co, ao, map, sel);
+    return stage(ci, ai, co, ao, map, sel, ivec4(0));
+}
+
+// Indirect texturing, as GX does it in integers: per stage, its indirect
+// stage's texel (masked, biased, by a matrix or the coordinate itself)
+// offsets its coordinate, wrapped and maybe added to the last stage's.
+ivec3 ind_tex[4];
+ivec2 ind_coord;
+ivec4 indirect(int i, int cmd, ivec4 map) {
+    int bt = cmd & 3, fmt = (cmd >> 2) & 3, bias = (cmd >> 4) & 7, bs = (cmd >> 7) & 3, mid = (cmd >> 9) & 15;
+    ivec2 uv = fixpoint_uv(map.y), trans = ivec2(0);
+    int bump = 0;
+    if (bt < ti(120).x && (bs != 0 || mid != 0)) {
+        ivec3 crd = ind_tex[bt];
+        if (bs != 0) bump = crd[bs - 1] & (fmt == 1 ? 0xE0 : (fmt == 2 ? 0xF0 : 0xF8));
+        crd &= ivec3(fmt == 0 ? 255 : (fmt == 1 ? 31 : (fmt == 2 ? 15 : 7)));
+        int add = fmt == 0 ? -128 : 1;
+        crd += ivec3((bias & 1) != 0 ? add : 0, (bias & 2) != 0 ? add : 0, (bias & 4) != 0 ? add : 0);
+        int m = (mid & 3) - 1;
+        if (m >= 0) {
+            ivec4 a = ti(96u + 8u * uint(m)), b = ti(100u + 8u * uint(m));
+            if ((mid >> 2) == 0) trans = ivec2(a.x * crd.x + a.y * crd.y + a.z * crd.z, b.x * crd.x + b.y * crd.y + b.z * crd.z) >> 3;
+            else if ((mid >> 2) == 1) trans = (uv * crd.x) >> 8;
+            else trans = (uv * crd.y) >> 8;
+            trans = a.w >= 0 ? trans >> a.w : trans << -a.w;
+        }
+    }
+    ivec2 c = ivec2(wrap(uv.x, (cmd >> 13) & 7), wrap(uv.y, (cmd >> 16) & 7)) + trans;
+    ind_coord = ((cmd >> 20) & 1) != 0 ? ind_coord + c : c;
+    ind_coord = (ind_coord << 8) >> 8;
+    return ivec4(ind_coord, 1, bump);
 }
 
 void main() {
@@ -263,9 +323,19 @@ void main() {
         if (SPEC_STAGES > 14) last = run(S14A, S14B, S14C);
         if (SPEC_STAGES > 15) last = run(S15A, S15B, S15C);
     } else {
+        bool any = ti(120).y != 0;
+        if (any) {
+            ind_coord = ivec2(0);
+            for (int k = 0; k < ti(120).x && k < 4; k++) {
+                ivec4 is = ti(80u + 4u * uint(k));
+                ind_tex[k] = ivec3(floor(sample_at(is.x, fixpoint_uv(is.y) >> is.zw).abg * 255.0 + 0.5));
+            }
+        }
         for (int i = 0; i < head.x; i++) {
-            uint s = 64u + 24u * uint(i);
-            last = stage(ti(s), ti(s + 4), ti(s + 8), ti(s + 12), ti(s + 16), ti(s + 20));
+            uint s = 144u + 24u * uint(i);
+            ivec4 map = ti(s + 16);
+            int cmd = any ? ti(64u + 4u * uint(i >> 2))[i & 3] : 0;
+            last = stage(ti(s), ti(s + 4), ti(s + 8), ti(s + 12), map, ti(s + 20), cmd != 0 ? indirect(i, cmd, map) : ivec4(0));
         }
     }
     last = clamp(last, 0.0, 1.0);
