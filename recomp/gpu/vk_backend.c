@@ -652,7 +652,7 @@ static void forget(void) {
  * setup as texgen_program makes it. */
 #define XF_PACKED (0x360 + 8 + 8 * 12)
 /* The TEV state as the fragment shader reads it (gx.frag). */
-#define TEV_WORDS (144 + 24 * 16)
+#define TEV_WORDS (160 + 24 * 16)
 /* Where uniform buffers may start (the device's limit). */
 static VkDeviceSize sUboAlign = 256;
 
@@ -2086,7 +2086,7 @@ static uint32_t write_tev(const GXDrawState* st) {
     uint32_t w[TEV_WORDS];
     int32_t* iw = (int32_t*)w;
     float* fw = (float*)w;
-    int i, k, n = 144 + 24 * st->num_stages;
+    int i, k, n = 160 + 24 * st->num_stages;
     VkDeviceSize off;
     memset(w, 0, (size_t)n * 4);
     iw[0] = st->num_stages;
@@ -2110,6 +2110,13 @@ static uint32_t write_tev(const GXDrawState* st) {
     fw[61] = st->fog_c;
     iw[62] = (int32_t)((uint32_t)(st->fog_color[0] * 255.0f + 0.5f) | (uint32_t)(st->fog_color[1] * 255.0f + 0.5f) << 8 |
                        (uint32_t)(st->fog_color[2] * 255.0f + 0.5f) << 16);
+    if (st->fog_range) {
+        /* The pixel's offset from the center, in EFB pixels: x a + b. */
+        fw[144] = (float)(1.0 / sScaleX);
+        fw[145] = -st->fog_center;
+        iw[146] = 1;
+        for (i = 0; i < 10; i++) fw[148 + i] = st->fog_k[i];
+    }
     if (st->ind_any) {
         for (i = 0; i < st->num_stages; i++) iw[64 + i] = (int32_t)st->ind_cmd[i];
         for (i = 0; i < 4; i++) {
@@ -2134,7 +2141,7 @@ static uint32_t write_tev(const GXDrawState* st) {
     }
     for (i = 0; i < st->num_stages; i++) {
         const GXTevStage* s = &st->stage[i];
-        int32_t* o = iw + 144 + 24 * i;
+        int32_t* o = iw + 160 + 24 * i;
         for (k = 0; k < 4; k++) {
             o[k] = s->color_in[k];
             o[4 + k] = s->alpha_in[k];

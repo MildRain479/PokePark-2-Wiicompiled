@@ -61,6 +61,11 @@ typedef struct GXDrawState {
      * b_shift)) (orthographic: a z / 2^24), whose part past c is fogged. */
     int fog_type, fog_ortho, fog_b_mag, fog_b_shift;
     float fog_a, fog_c, fog_color[3];
+    /* Fog range adjustment (BP 0xE8-0xED), if fog_range: a pixel |dx| EFB
+     * pixels from column fog_center has its distance divided by fog_k
+     * (cosines) at |dx| / 32 - 1, 1 nearer than 32, linear between. */
+    int fog_range;
+    float fog_center, fog_k[10];
     /* Indirect texturing (BP 0x06-0x27): ind_any if a TEV stage has an
      * indirect command (ind_cmd, BP 0x10 on, raw). Indirect stage i reads
      * texture map ind_map[i] at coordinate ind_coord[i], shifted right by

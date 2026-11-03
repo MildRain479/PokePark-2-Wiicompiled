@@ -875,6 +875,11 @@ static void build_state(GXDrawState* st) {
     st->fog_color[0] = ((bp[0xF2] >> 16) & 0xFF) / 255.0f;
     st->fog_color[1] = ((bp[0xF2] >> 8) & 0xFF) / 255.0f;
     st->fog_color[2] = (bp[0xF2] & 0xFF) / 255.0f;
+    st->fog_range = st->fog_type && ((bp[0xE8] >> 10) & 1);
+    if (st->fog_range) {
+        st->fog_center = (float)(bp[0xE8] & 0x3FF) - 342.0f;
+        for (i = 0; i < 10; i++) st->fog_k[i] = (float)((bp[0xE9 + i / 2] >> (12 * (i & 1))) & 0xFFF) / 256.0f;
+    }
     st->cull_mode = (genmode >> 14) & 3;
     {
         float wd = xf_float(0x101A), ht = xf_float(0x101B), zr = xf_float(0x101C);

@@ -403,7 +403,6 @@ runs unchanged.
   where OpenGL runs at about 135, with fewer slow frames.
 
 Not implemented yet:
-- fog range adjustment;
 - logic ops;
 - z-textures;
 - lines and points;

@@ -275,6 +275,7 @@ static const char* kFragmentShader =
     "uniform ivec4 u_fog; /* kind, orthographic, b's magnitude and shift (gx.h) */\n"
     "uniform vec4 u_fogf; /* a, c */\n"
     "uniform vec4 u_fog_color;\n"
+    "uniform vec4 u_fog_range[4]; /* the offset from the center as x a + b, on; ten cosines */\n"
     "/* Indirect texturing (gx.h): the indirect stages and whether any stage is\n"
     " * indirect; each stage's command; the indirect stages' maps, coordinates\n"
     " * and scales; the matrices' rows, each with its shift; the coordinates'\n"
@@ -417,6 +418,13 @@ static const char* kFragmentShader =
     "  if (u_fog.x != 0) {\n"
     "    int z = int(clamp((1.0 - gl_FragCoord.z) * 16777216.0, 0.0, 16777215.0));\n"
     "    float ze = u_fog.y == 0 ? u_fogf.x * 16777216.0 / float(u_fog.z - (z >> u_fog.w)) : u_fogf.x * float(z) / 16777216.0;\n"
+    "    if (u_fog_range[0].z != 0.0) {\n"
+    "      float t = clamp(abs(gl_FragCoord.x * u_fog_range[0].x + u_fog_range[0].y) / 32.0 - 1.0, -1.0, 9.0);\n"
+    "      int lo = int(floor(t)), hi = min(lo + 1, 9);\n"
+    "      float kl = lo < 0 ? 1.0 : u_fog_range[(lo + 4) >> 2][lo & 3];\n"
+    "      float kh = u_fog_range[(hi + 4) >> 2][hi & 3];\n"
+    "      ze /= max(mix(kl, kh, t - float(lo)), 1.0 / 256.0);\n"
+    "    }\n"
     "    float f = clamp(ze - u_fogf.y, 0.0, 1.0);\n"
     "    if (u_fog.x == 4) f = 1.0 - exp2(-8.0 * f);\n"
     "    else if (u_fog.x == 5) f = 1.0 - exp2(-8.0 * f * f);\n"
@@ -429,7 +437,7 @@ static const char* kFragmentShader =
 
 static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef, uFog, uFogF, uFogColor;
-static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize;
+static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize, uFogRange;
 
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = p_glCreateShader(type);
@@ -489,6 +497,7 @@ static void build_program(void) {
     uIndStage = p_glGetUniformLocation(sProgram, "u_ind_stage");
     uIndMtx = p_glGetUniformLocation(sProgram, "u_ind_mtx");
     uTcSize = p_glGetUniformLocation(sProgram, "u_tc_size");
+    uFogRange = p_glGetUniformLocation(sProgram, "u_fog_range");
 
     p_glGenVertexArrays(1, &sVao);
     p_glBindVertexArray(sVao);
@@ -1252,6 +1261,17 @@ static void apply_draw_state(const GXDrawState* st) {
     UNIFORM_IF_CHANGED(p_glUniform4iv, uFog, 1, fog, lfog);
     UNIFORM_IF_CHANGED(p_glUniform4fv, uFogF, 1, fogf, lfogf);
     UNIFORM_IF_CHANGED(p_glUniform4fv, uFogColor, 1, fogc, lfogc);
+    {
+        static GLfloat lrange[16];
+        GLfloat range[16] = {0};
+        if (st->fog_range) {
+            range[0] = (GLfloat)(1.0 / sScaleX);
+            range[1] = -st->fog_center;
+            range[2] = 1;
+            for (i = 0; i < 10; i++) range[4 + i] = st->fog_k[i];
+        }
+        UNIFORM_IF_CHANGED(p_glUniform4fv, uFogRange, 4, range, lrange);
+    }
     {
         static GLint lind[4], lcmd[16], lstage[16], lmtx[24], lsize[16];
         GLint ind[4] = {0}, cmd[16] = {0}, istage[16] = {0}, mtx[24] = {0}, size[16] = {0};

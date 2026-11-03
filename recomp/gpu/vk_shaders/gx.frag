@@ -8,12 +8,13 @@
 // the color as RGB8), indirect texturing (from word 64: each stage's
 // command; at 80 the indirect stages' maps, coordinates and scales; at 96
 // the matrices' rows, each with its shift; at 120 the indirect stages and
-// whether any stage is indirect; at 128 the coordinates' sizes), then from
-// word 144 per stage its color and alpha inputs and operations, texture
+// whether any stage is indirect; at 128 the coordinates' sizes), fog range
+// adjustment (at 144: the pixel's offset from the center as x a + b, on,
+// and from 148 the ten cosines), then from word 160 per stage its color and alpha inputs and operations, texture
 // map and selections, 24 words each. Textures are pc.tex[map] of all the
 // device's textures.
 
-layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(144 + 24 * 16) / 4]; };
+layout(std140, set = 1, binding = 2) uniform Tev { uvec4 tu[(160 + 24 * 16) / 4]; };
 layout(set = 0, binding = 0) uniform sampler2D textures[16384];
 layout(push_constant) uniform Draw { uint xf, tev; uint tex[8]; } pc;
 
@@ -332,7 +333,7 @@ void main() {
             }
         }
         for (int i = 0; i < head.x; i++) {
-            uint s = 144u + 24u * uint(i);
+            uint s = 160u + 24u * uint(i);
             ivec4 map = ti(s + 16);
             int cmd = any ? ti(64u + 4u * uint(i >> 2))[i & 3] : 0;
             last = stage(ti(s), ti(s + 4), ti(s + 8), ti(s + 12), map, ti(s + 20), cmd != 0 ? indirect(i, cmd, map) : ivec4(0));
@@ -353,6 +354,15 @@ void main() {
         vec4 ff = tf(60);
         int z = int(clamp((1.0 - gl_FragCoord.z) * 16777216.0, 0.0, 16777215.0));
         float ze = fog.y == 0 ? ff.x * 16777216.0 / float(fog.z - (z >> fog.w)) : ff.x * float(z) / 16777216.0;
+        vec4 fr = tf(144);
+        if (floatBitsToInt(fr.z) != 0) {
+            // Range adjustment: farther from the center, a longer way.
+            float t = clamp(abs(gl_FragCoord.x * fr.x + fr.y) / 32.0 - 1.0, -1.0, 9.0);
+            int lo = int(floor(t)), hi = min(lo + 1, 9);
+            float kl = lo < 0 ? 1.0 : tf(148u + uint(lo & ~3))[lo & 3];
+            float kh = tf(148u + uint(hi & ~3))[hi & 3];
+            ze /= max(mix(kl, kh, t - float(lo)), 1.0 / 256.0);
+        }
         float f = clamp(ze - ff.y, 0.0, 1.0);
         if (fog.x == 4) f = 1.0 - exp2(-8.0 * f);
         else if (fog.x == 5) f = 1.0 - exp2(-8.0 * f * f);
