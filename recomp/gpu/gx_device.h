@@ -24,8 +24,8 @@ typedef struct GXDevice {
     /* Sets the device up on the window; 0 if it can't be (then another is
      * tried). */
     int (*init)(void);
-    uint32_t (*texture)(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
-    void (*texture_update)(uint32_t handle, int width, int height, int levels, const uint8_t* rgba);
+    uint32_t (*texture)(int pix, int width, int height, int levels, const uint8_t* pixels, uint32_t mode0);
+    void (*texture_update)(uint32_t handle, int pix, int width, int height, int levels, const uint8_t* pixels);
     void (*texture_delete)(const uint32_t* handles, int n);
     /* A draw as the decoder makes it: its vertices and indices with it,
      * and st->xf (the XF state) with the words changed since the last
@@ -56,6 +56,14 @@ typedef struct GXDevice {
     /* The internal resolution and anti-aliasing as applied. */
     int (*scale)(void);
     int (*msaa)(void);
+    /* The vertex arena (gxb_arena in gx.h); NULL where there is none, and
+     * then draw and frame_data are always given vertices. */
+    int (*arena_alloc)(int n);
+    void (*arena_write)(int first, const GXVertex* v, int n);
+    void (*arena_free)(int first, int n);
+    /* The texture layouts it takes besides RGBA8 (gxb_texture_pixels); NULL
+     * where there are none. */
+    unsigned (*texture_pixels)(void);
 } GXDevice;
 
 extern const GXDevice g_gl_device, g_vk_device;

@@ -11,6 +11,7 @@
  * A font (RFNT) is a header and blocks; its glyphs are cells of 4-bit
  * sheets (TGLP: cell size, baseline, sheet layout, and once loaded a
  * pointer to the sheets), found through its character maps (CMAP). */
+#include <stdlib.h>
 #include <string.h>
 
 #include "hle.h"

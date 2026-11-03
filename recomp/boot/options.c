@@ -1,4 +1,4 @@
-/* The Options tab of the pause menu: the settings (menu_win32.c), in a
+/* The Options tab of the pause menu: the settings (settings.c), in a
  * book like the PokéPark Pad's and drawn with its pictures and the game's
  * font, over the Pad. While the Pad is on its main page an "Options" tab
  * shows beside its title; right opens it (left and right do nothing on
@@ -15,8 +15,10 @@
  * picture (gl_backend.c), only again when something on it changes,
  * leaving the bar at the bottom clear: the game's, which shows the
  * player's keys (hle_prompts.c), shows through. */
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,8 +40,16 @@ int gxb_display_hz(void);
 /* ------------------------------------------------------------------------ */
 /* What's on it */
 
+#ifdef __ANDROID__
+/* No keyboard: its section isn't there. */
+enum { SEC_DISPLAY, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS, SEC_KEYBOARD = -1 };
+static const char* const kSection[SECTIONS] = {"Display", "Controller", "Gameplay"};
+static const int kSectionColor[SECTIONS] = {0, 2, 3}; /* which of the Pad's button colors */
+#else
 enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS };
 static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller", "Gameplay"};
+static const int kSectionColor[SECTIONS] = {0, 1, 2, 3};
+#endif
 
 /* A row: a setting (settings_step), a binding (an action), resetting the
  * controls, or closing the game (selected twice, as unsaved progress is
@@ -50,11 +60,17 @@ typedef struct {
     const char* label;
 } Row;
 
+/* On Android the game fills the screen, and Vulkan always draws. */
 static const Row kDisplay[] = {
-    {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"}, {ROW_SETTING, SET_SCALE, "Resolution"},
+#ifndef __ANDROID__
+    {ROW_SETTING, SET_FULLSCREEN, "Fullscreen"},
+#endif
+    {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
     {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
+#ifndef __ANDROID__
     {ROW_SETTING, SET_RENDERER, "Renderer"},
+#endif
     {ROW_CLOSE, 0, "Close game"},
 };
 static const Row kGameplay[] = {
@@ -70,17 +86,31 @@ static const char* const kAction[ACT_COUNT] = {
     "Shake", "Shake 2",
 };
 
+/* Android's Controller section starts with the touch controls' row, where
+ * a touch reaches it (touches don't scroll). */
+#ifdef __ANDROID__
+#define TOUCH_ROW 1
+#else
+#define TOUCH_ROW 0
+#endif
+
 static int row_count(int sec) {
     return sec == SEC_DISPLAY    ? (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))
            : sec == SEC_GAMEPLAY ? (int)(sizeof(kGameplay) / sizeof(kGameplay[0]))
            : sec == SEC_KEYBOARD ? ACT_COUNT + 3 /* camera speed, invert, reset */
-                                 : ACT_COUNT + 2; /* rumble, reset */
+                                 : TOUCH_ROW + ACT_COUNT + 2; /* (touch controls,) rumble, reset */
 }
 
 static Row row_at(int sec, int i) {
     Row r = {ROW_RESET, 0, "Reset all controls"};
     if (sec == SEC_DISPLAY) return kDisplay[i];
     if (sec == SEC_GAMEPLAY) return kGameplay[i];
+    if (TOUCH_ROW && sec == SEC_CONTROLLER && i-- == 0) {
+        r.kind = ROW_SETTING;
+        r.which = SET_TOUCH;
+        r.label = "Touch controls";
+        return r;
+    }
     if (i < ACT_COUNT) {
         r.kind = ROW_BINDING;
         r.which = i;
@@ -118,6 +148,7 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_FOV: snprintf(out, n, "%d%%", g_settings.fov); break;
     case SET_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case SET_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
+    case SET_TOUCH: snprintf(out, n, g_settings.touch_controls ? "On" : "Off"); break;
     case SET_ANISO: snprintf(out, n, g_settings.aniso == 1 ? "Original" : "%dx", g_settings.aniso); break;
     case SET_RENDERER:
         snprintf(out, n, "%s%s", g_settings.renderer == RENDERER_VULKAN ? "Vulkan" : "OpenGL",
@@ -287,7 +318,7 @@ typedef struct {
 } Rect;
 
 static const Rect kTab = {810, 46, 1046, 120};            /* the other tab, at the right page's top */
-static const Rect kButton[SECTIONS] = {
+static const Rect kButton[4] = {
     {333, 150, 748, 230}, {320, 262, 737, 342}, {328, 374, 746, 454}, {328, 487, 746, 562}};
 static const Rect kPage = {845, 40, 1325, 765};           /* the right page's writing */
 #define ROWS_TOP 140.0f
@@ -608,10 +639,10 @@ static void draw_pages(void) {
 }
 
 static void draw_book(void) {
-    static const Rect kPocket[SECTIONS] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {21, 113, 303, 218}, {27, 223, 297, 327}};
-    static const Rect kPocketAt[SECTIONS] = {
+    static const Rect kPocket[4] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {21, 113, 303, 218}, {27, 223, 297, 327}};
+    static const Rect kPocketAt[4] = {
         {262, 230, 778, 394}, {272, 342, 780, 534}, {272, 454, 780, 646}, {290, 560, 780, 760}};
-    static const Rect kBlue[SECTIONS] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 10, 120, 69}, {8, 170, 120, 229}};
+    static const Rect kBlue[4] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 10, 120, 69}, {8, 170, 120, 229}};
     static const Rect kArrow = {3, 8, 28, 54};
     int i, n = row_count(sSection), aw, ah;
     const uint32_t* arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &aw, &ah);
@@ -621,7 +652,7 @@ static void draw_book(void) {
     /* The sections, as the Pad's buttons: each in its pocket, the chosen
      * one orange. */
     for (i = 0; i < SECTIONS; i++) {
-        Rect src = kBlue[i];
+        Rect src = kBlue[kSectionColor[i]];
         Rect at = kButton[i];
         if (i == sSection) {
             src.x0 += 128;
@@ -693,6 +724,10 @@ static void draw_book(void) {
     }
 }
 
+static unsigned sDraws; /* times the image was drawn again */
+
+unsigned options_draws(void) { return sDraws; }
+
 const uint32_t* options_draw(int w, int h) {
     static unsigned drawn = ~0u;
     static int drawnW, drawnH, drawnWhat, cw;
@@ -712,6 +747,7 @@ const uint32_t* options_draw(int w, int h) {
         sW = w;
         sH = h;
     }
+    sDraws++;
     drawn = sChanges;
     drawnW = w;
     drawnH = h;
@@ -814,6 +850,7 @@ static int click(int mx, int my) {
     return 0;
 }
 
+#ifdef _WIN32
 /* The key a WM_KEYDOWN means, with left and right modifiers told apart. */
 static int key_of(WPARAM wp, LPARAM lp) {
     int extended = (int)((lp >> 24) & 1);
@@ -869,6 +906,32 @@ int options_window_message(unsigned msg, uintptr_t wp, intptr_t lp) {
     else if (vk == VK_DELETE) clear();
     return 1;
 }
+#else
+/* A tap at window pixel (x, y): on the tab or the save file screen's
+ * button, it opens; open, it works as a click. Returns 1 if it was on
+ * something. */
+int options_touch(int x, int y) {
+    float rx, ry;
+    if (sScale <= 0) return sOpen;
+    rx = (x - sOffX) / sScale;
+    ry = (y - sOffY) / sScale;
+    if (sOpen) {
+        /* A touch off the book (the footer's Back among them) closes it:
+         * a phone may have no button to. */
+        if (!click(x, y) && !in(kLeftPage, rx, ry) && !in(kRightPage, rx, ry)) set_open(0);
+        return 1;
+    }
+    if (hle_pause_main_page() && in(kTab, rx, ry)) {
+        open_from(FROM_PAD);
+        return 1;
+    }
+    if (hle_file_select_shown() && in(kFileButton, rx, ry)) {
+        open_from(FROM_FILES);
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 void options_controller(uint32_t raw, uint32_t nav) {
     static uint32_t lastRaw, lastNav;
@@ -894,19 +957,19 @@ void options_controller(uint32_t raw, uint32_t nav) {
     else if (pressed & XPAD_Y) clear();
 }
 
-int options_script(uint32_t held) {
-    static uint32_t last;
-    static int swallow; /* what the tab took stays its until let go */
-    uint32_t p = held & ~last;
-    last = held;
-    if (!held) swallow = 0;
+/* Wii Remote buttons held (HOST_PAD_* bits), from a script or the touch
+ * controls, each with its own last and swallow. */
+static int remote_input(uint32_t held, uint32_t* last, int* swallow) {
+    uint32_t p = held & ~*last;
+    *last = held;
+    if (!held) *swallow = 0;
     if (!sOpen) {
         if ((p & HOST_PAD_SCREEN_RIGHT) && hle_pause_main_page()) open_from(FROM_PAD);
         else if ((p & HOST_PAD_MINUS) && hle_file_select_shown()) open_from(FROM_FILES);
-        if (sOpen) swallow = 1;
-        return swallow;
+        if (sOpen) *swallow = 1;
+        return *swallow; /* what the tab took stays its until let go */
     }
-    swallow = 1;
+    *swallow = 1;
     if (p & HOST_PAD_SCREEN_UP) up_down(-1);
     if (p & HOST_PAD_SCREEN_DOWN) up_down(1);
     if (p & HOST_PAD_SCREEN_LEFT) left_right(-1);
@@ -915,4 +978,16 @@ int options_script(uint32_t held) {
     if (p & HOST_PAD_1) back();
     if (p & HOST_PAD_MINUS) clear();
     return 1;
+}
+
+int options_script(uint32_t held) {
+    static uint32_t last;
+    static int swallow;
+    return remote_input(held, &last, &swallow);
+}
+
+int options_touch_buttons(uint32_t held) {
+    static uint32_t last;
+    static int swallow;
+    return remote_input(held, &last, &swallow);
 }

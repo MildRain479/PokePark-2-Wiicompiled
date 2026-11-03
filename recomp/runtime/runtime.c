@@ -79,6 +79,20 @@ int ppc_load_dol(const char* path, uint32_t* entry) {
     return 0;
 }
 
+int ppc_load_dol_mem(const uint8_t* dol, size_t len, uint32_t* entry) {
+    int i;
+    if (len < 0x100) return -1;
+    memset(MA(be32(dol + 0xD8)), 0, be32(dol + 0xDC)); /* as above */
+    for (i = 0; i < 18; i++) {
+        uint32_t off = be32(dol + 4 * i), addr = be32(dol + 0x48 + 4 * i), size = be32(dol + 0x90 + 4 * i);
+        if (!size) continue;
+        if ((uint64_t)off + size > len) return -1;
+        memcpy(MA(addr), dol + off, size);
+    }
+    if (entry) *entry = be32(dol + 0xE0);
+    return 0;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Indirect calls */
 
@@ -291,6 +305,10 @@ static int invariant_tsc(void) {
 }
 #endif
 
+#ifndef _WIN32
+static uint64_t sPausedTicks;
+#endif
+
 uint64_t ppc_timebase(void) {
     uint64_t ticks;
 #ifdef _WIN32
@@ -324,10 +342,24 @@ uint64_t ppc_timebase(void) {
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    ticks = (uint64_t)ts.tv_sec * 60750000ull + (uint64_t)ts.tv_nsec * 60750000ull / 1000000000ull;
+    ticks = (uint64_t)ts.tv_sec * 60750000ull + (uint64_t)ts.tv_nsec * 60750000ull / 1000000000ull - sPausedTicks;
 #endif
     return ticks;
 }
+
+#ifndef _WIN32
+/* Stops and restarts the time base, so time spent away (an Android app
+ * in the background) isn't caught up on when the game carries on. */
+void ppc_timebase_pause(int paused) {
+    static uint64_t since;
+    if (paused && !since) {
+        since = ppc_timebase() + 1;
+    } else if (!paused && since) {
+        sPausedTicks += ppc_timebase() + 1 - since;
+        since = 0;
+    }
+}
+#endif
 
 uint32_t ppc_mftb(ppc_t* c, int tbr) {
     uint64_t ticks = ppc_timebase();

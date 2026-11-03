@@ -9,6 +9,7 @@
  * and files/ as extracted by dtk (see recomp/README.md). */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "gx.h"
 #include "recomp_funcs.h"
@@ -417,6 +418,145 @@ static int find_game(char* out, size_t n) {
     return 0;
 }
 
+#ifdef __ANDROID__
+int disc_image_active(void); /* disc_image_android.c */
+const uint8_t* disc_image_dol(size_t* len);
+int disc_image_dvd_init(void);
+#define main boot_main /* started by the Android layer (window_android.c), on a thread of its own */
+
+/* RECOMP_PROFILE=<seconds>: from that many seconds in, for 20 seconds,
+ * samples where the game's thread is about once a millisecond (a timer
+ * signal to that thread), then logs the functions it was in most
+ * (recompiled guest functions are f_<address>). */
+#include <dlfcn.h>
+#include <pthread.h>
+#include <signal.h>
+#include <time.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#define MAX_SAMPLES 100000
+#define DEPTH 8 /* callers kept per sample */
+static uintptr_t gSamples[MAX_SAMPLES], gCallers[MAX_SAMPLES][DEPTH];
+static uintptr_t gStackLo, gStackHi; /* the game thread's stack */
+static volatile int gSampleCount;
+static timer_t gProfileTimer;
+
+static void on_sample(int sig, siginfo_t* si, void* uc) {
+    int n = gSampleCount;
+    (void)sig;
+    (void)si;
+    if (n < MAX_SAMPLES) {
+        gSamples[n] = (uintptr_t)((ucontext_t*)uc)->uc_mcontext.pc;
+        /* The link register (right for a leaf function such as memcpy),
+         * then the frame records the frame pointer chains together. */
+        uintptr_t fp = (uintptr_t)((ucontext_t*)uc)->uc_mcontext.regs[29];
+        uintptr_t sp = (uintptr_t)((ucontext_t*)uc)->uc_mcontext.sp, lo = sp;
+        int d;
+        /* On the thread's stack, or on a guest thread's fiber (8 MB,
+         * hle_thread.c): frames only go up from the stack pointer. */
+        uintptr_t hi = sp >= gStackLo && sp < gStackHi ? gStackHi : sp + (8u << 20) - 4096;
+        gCallers[n][0] = (uintptr_t)((ucontext_t*)uc)->uc_mcontext.regs[30];
+        for (d = 1; d < DEPTH; d++) {
+            if (fp < lo || fp + 16 > hi || (fp & 7)) break;
+            lo = fp + 16;
+            gCallers[n][d] = ((uintptr_t*)fp)[1];
+            fp = ((uintptr_t*)fp)[0];
+        }
+        for (; d < DEPTH; d++) gCallers[n][d] = 0;
+        gSampleCount = n + 1;
+    }
+}
+
+typedef struct {
+    const char* name;
+    unsigned count;
+} ProfileEntry;
+
+static int by_count(const void* a, const void* b) {
+    unsigned x = ((const ProfileEntry*)a)->count, y = ((const ProfileEntry*)b)->count;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void* profiler(void* arg) {
+    static ProfileEntry e[4096];
+    struct itimerspec on = {{0, 1000000}, {0, 1000000}}, off = {{0, 0}, {0, 0}};
+    int n = 0, i, k, total;
+    sleep((unsigned)(uintptr_t)arg);
+    fprintf(stderr, "profile: sampling for 20 s\n");
+    timer_settime(gProfileTimer, 0, &on, NULL);
+    sleep(20);
+    timer_settime(gProfileTimer, 0, &off, NULL);
+    total = gSampleCount;
+    {
+        /* Every sample and its caller (the link register, right for a
+         * leaf function such as memcpy), as library and offset, for
+         * llvm-symbolizer: profile.txt beside the saves. */
+        char path[1100];
+        FILE* f;
+        snprintf(path, sizeof(path), "%s/profile.txt", getenv("RECOMP_SHARED") ? getenv("RECOMP_SHARED") : ".");
+        if ((f = fopen(path, "w"))) {
+            for (i = 0; i < total; i++) {
+                for (k = 0; k <= DEPTH; k++) {
+                    uintptr_t a = k ? gCallers[i][k - 1] : gSamples[i];
+                    Dl_info info;
+                    const char* end = k == DEPTH ? "\n" : " ";
+                    if (a && dladdr((void*)a, &info) && info.dli_fname)
+                        fprintf(f, "%s 0x%lx%s", strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname,
+                                (unsigned long)(a - (uintptr_t)info.dli_fbase), end);
+                    else
+                        fprintf(f, "? 0x%lx%s", (unsigned long)a, end);
+                }
+            }
+            fclose(f);
+        }
+    }
+    for (i = 0; i < total; i++) {
+        Dl_info info;
+        const char* name = "?";
+        if (dladdr((void*)gSamples[i], &info)) {
+            if (info.dli_sname) name = info.dli_sname;
+            else if (info.dli_fname) name = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
+        }
+        for (k = 0; k < n && strcmp(e[k].name, name); k++) {}
+        if (k == n && n < 4096) e[n++] = (ProfileEntry){name, 0};
+        if (k < n) e[k].count++;
+    }
+    qsort(e, n, sizeof(e[0]), by_count);
+    fprintf(stderr, "profile: %d samples\n", total);
+    for (i = 0; i < n && i < 60; i++)
+        fprintf(stderr, "profile: %5.1f%% %s\n", 100.0 * e[i].count / (total ? total : 1), e[i].name);
+    return NULL;
+}
+
+/* On the game's thread. */
+static void start_profiler(int after) {
+    struct sigaction sa;
+    struct sigevent ev;
+    pthread_t t;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_sample;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIGPROF, &sa, NULL);
+    memset(&ev, 0, sizeof(ev));
+    ev.sigev_notify = SIGEV_THREAD_ID;
+    ev.sigev_signo = SIGPROF;
+    ev.sigev_notify_thread_id = gettid();
+    {
+        pthread_attr_t attr;
+        void* lo;
+        size_t size;
+        if (pthread_getattr_np(pthread_self(), &attr) == 0 && pthread_attr_getstack(&attr, &lo, &size) == 0) {
+            gStackLo = (uintptr_t)lo;
+            gStackHi = (uintptr_t)lo + size;
+        }
+    }
+    if (timer_create(CLOCK_MONOTONIC, &ev, &gProfileTimer) != 0) return;
+    pthread_create(&t, NULL, profiler, (void*)(uintptr_t)after);
+    pthread_detach(t);
+}
+#endif
+
 int main(int argc, char** argv) {
     ppc_t* c;
     uint32_t entry;
@@ -463,6 +603,19 @@ int main(int argc, char** argv) {
         CreateThread(NULL, 0, profiler, (LPVOID)(uintptr_t)atoi(getenv("RECOMP_PROFILE")), 0, NULL);
     }
 #endif
+#ifdef __ANDROID__
+    if (getenv("RECOMP_PROFILE")) start_profiler(atoi(getenv("RECOMP_PROFILE")));
+    if (disc_image_active()) {
+        /* The disc image the player chose (disc_image_android.c); argv[1]
+         * is still where its main.dol would be extracted, for the saves. */
+        size_t len;
+        const uint8_t* dol = disc_image_dol(&len);
+        if (ppc_mem_init() != 0 || ppc_load_dol_mem(dol, len, &entry) != 0) {
+            fprintf(stderr, "could not load the disc image's main.dol\n");
+            return 2;
+        }
+    } else
+#endif
     if (ppc_mem_init() != 0 || ppc_load_dol(argv[1], &entry) != 0) {
         fprintf(stderr, "could not load %s\n", argv[1]);
         return 2;
@@ -483,7 +636,11 @@ int main(int argc, char** argv) {
         slash = strrchr(root, '/');
         if (slash) strcpy(slash + 1, "disc");
         else strcpy(root, "disc");
+#ifdef __ANDROID__
+        if (disc_image_active() ? disc_image_dvd_init() == 0 : hle_dvd_init(root) == 0) {
+#else
         if (hle_dvd_init(root) == 0) {
+#endif
             hle_dvd_boot_setup();
             hle_text_boot_setup();
         }
@@ -492,6 +649,7 @@ int main(int argc, char** argv) {
         strcpy(root + strlen(root) - 4, "nand");
         hle_nand_set_root(getenv("RECOMP_NAND") ? getenv("RECOMP_NAND") : root);
     }
+#ifdef _WIN32
     {
         /* RECOMP_WATCH=<guest address>[,<length>]: stop on the first write
          * to that range, with a trace (for finding memory corruption). */
@@ -506,7 +664,6 @@ int main(int argc, char** argv) {
             VirtualProtect(gWatchPage, 0x1000, PAGE_READONLY, &old);
         }
     }
-#ifdef _WIN32
     /* The whole game runs on this thread and sleeps between retraces;
      * above-normal priority gets it woken on time when other programs
      * keep the CPU busy. */

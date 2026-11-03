@@ -1,5 +1,5 @@
 /* The PokéPark Pad (the pause menu in the park) and the save file screen,
- * for the Options tab drawn over them (options_win32.c): whether the Pad
+ * for the Options tab drawn over them (options.c): whether the Pad
  * is open on its main page or the save file screen is up, and their
  * pictures, to draw the tab in.
  *

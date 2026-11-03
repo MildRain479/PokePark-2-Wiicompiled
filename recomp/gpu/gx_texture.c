@@ -110,6 +110,101 @@ static void decode_cmpr_sub(uint8_t* out, int width, int height, int x0, int y0,
     }
 }
 
+/* Whether a CMPR level is opaque: no sub-block with a transparent texel
+ * (index 3 where the first color isn't the larger). Then it is BC1 as it
+ * is, in another order; a transparent texel isn't, as BC1 makes it black
+ * where the Wii keeps the two colors' average. */
+static int cmpr_opaque(const uint8_t* src, int width, int height) {
+    int n = ((width + 7) / 8) * ((height + 7) / 8) * 4, i, y;
+    for (i = 0; i < n; i++, src += 8) {
+        if (be16(src) > be16(src + 2)) continue;
+        for (y = 0; y < 4; y++) {
+            uint8_t b = src[4 + y];
+            if ((b & 0xC0) == 0xC0 || (b & 0x30) == 0x30 || (b & 0x0C) == 0x0C || (b & 0x03) == 0x03) return 0;
+        }
+    }
+    return 1;
+}
+
+int gx_texture_pix(int fmt, const uint8_t* src, int width, int height, int levels, unsigned allowed) {
+    int l;
+    switch (fmt) {
+    case FMT_I4: case FMT_I8:
+        return allowed & (1u << GX_PIX_I8) ? GX_PIX_I8 : GX_PIX_RGBA8;
+    case FMT_IA4: case FMT_IA8:
+        return allowed & (1u << GX_PIX_IA8) ? GX_PIX_IA8 : GX_PIX_RGBA8;
+    case FMT_CMPR:
+        if (!(allowed & (1u << GX_PIX_BC1))) return GX_PIX_RGBA8;
+        for (l = 0; l < levels; l++) {
+            if (!cmpr_opaque(src, width, height)) return GX_PIX_RGBA8;
+            src += gx_texture_size(fmt, width, height);
+            width = width > 1 ? width / 2 : 1;
+            height = height > 1 ? height / 2 : 1;
+        }
+        return GX_PIX_BC1;
+    }
+    return GX_PIX_RGBA8;
+}
+
+size_t gx_pix_size(int pix, int width, int height) {
+    switch (pix) {
+    case GX_PIX_I8: return (size_t)width * height;
+    case GX_PIX_IA8: return (size_t)width * height * 2;
+    case GX_PIX_BC1: return (size_t)((width + 3) / 4) * ((height + 3) / 4) * 8;
+    }
+    return (size_t)width * height * 4;
+}
+
+void gx_decode_texture_pix(uint8_t* out, const uint8_t* src, int fmt, int width, int height, int pix) {
+    int bw, bh, bytes, bx, by, x, y;
+    if (pix == GX_PIX_BC1) {
+        /* Each 4x4 block, from sub-block (X & 1) + 2 (Y & 1) of 8x8 tile
+         * (X / 2, Y / 2): colors little-endian, and each row's indices
+         * first texel lowest. */
+        int nx = (width + 3) / 4, ny = (height + 3) / 4, tiles = (width + 7) / 8;
+        for (y = 0; y < ny; y++) {
+            for (x = 0; x < nx; x++) {
+                const uint8_t* b = src + ((y / 2) * tiles + x / 2) * 32 + ((y & 1) * 2 + (x & 1)) * 8;
+                int r;
+                out[0] = b[1];
+                out[1] = b[0];
+                out[2] = b[3];
+                out[3] = b[2];
+                for (r = 0; r < 4; r++) {
+                    uint8_t v = b[4 + r];
+                    out[4 + r] = (uint8_t)((v >> 6) | ((v >> 2) & 0x0C) | ((v << 2) & 0x30) | (v << 6));
+                }
+                out += 8;
+            }
+        }
+        return;
+    }
+    block_dims(fmt, &bw, &bh, &bytes);
+    for (by = 0; by < height; by += bh) {
+        for (bx = 0; bx < width; bx += bw) {
+            const uint8_t* b = src;
+            src += bytes;
+            for (y = 0; y < bh && by + y < height; y++) {
+                for (x = 0; x < bw && bx + x < width; x++) {
+                    size_t at = (size_t)(by + y) * width + bx + x;
+                    switch (fmt) {
+                    case FMT_I4: out[at] = (uint8_t)(((b[y * 4 + x / 2] >> ((x & 1) ? 0 : 4)) & 15) * 17); break;
+                    case FMT_I8: out[at] = b[y * 8 + x]; break;
+                    case FMT_IA4:
+                        out[2 * at] = (uint8_t)((b[y * 8 + x] & 15) * 17);
+                        out[2 * at + 1] = (uint8_t)((b[y * 8 + x] >> 4) * 17);
+                        break;
+                    case FMT_IA8:
+                        out[2 * at] = b[(y * 4 + x) * 2 + 1];
+                        out[2 * at + 1] = b[(y * 4 + x) * 2];
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 void gx_decode_texture(uint8_t* out, const uint8_t* src, int fmt, int width, int height,
                        const uint8_t* tlut, int tlut_fmt) {
     int bw, bh, bytes, bx, by, x, y;

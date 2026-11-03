@@ -247,6 +247,8 @@ uint32_t ppc_mftb(ppc_t* c, int tbr);
 
 /* Guest time base (60.75 MHz) and the decrementer deadline. */
 uint64_t ppc_timebase(void);
+/* Stops (1) and restarts (0) the time base (not on Windows). */
+void ppc_timebase_pause(int paused);
 int ppc_dec_deadline(uint64_t* deadline);
 void ppc_dec_disarm(void);
 #define PPC_TB_HZ 60750000ull
@@ -261,6 +263,7 @@ void ppc_rfi(ppc_t* c);
 /* Runtime setup. */
 int ppc_mem_init(void);
 int ppc_load_dol(const char* path, uint32_t* entry);
+int ppc_load_dol_mem(const uint8_t* dol, size_t len, uint32_t* entry); /* a DOL already in memory */
 ppc_func ppc_lookup(uint32_t addr);
 
 /* Optional host overrides: when set, ppc_icall and the generated stubs

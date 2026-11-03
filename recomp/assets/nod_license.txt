@@ -1,0 +1,41 @@
+The Android app reads the player's disc image with nod
+(https://github.com/encounter/nod), by Luke Street and its contributors,
+built into libpokepark.so. It is licensed under either of the MIT license
+or the Apache License, Version 2.0, at your option; the full texts are in
+its repository (LICENSE-MIT, LICENSE-APACHE). The MIT license follows.
+
+It is built with these libraries, each under the license given, all
+permissive (their texts are in their own repositories):
+
+  zstd 1.5.7 (Meta) .................... BSD-3-Clause
+  liblzma (XZ Utils) ................... 0BSD
+  bzip2 1.0.8 (Julian Seward) .......... bzip2 license (BSD-style)
+  zlib ................................. Zlib
+  Rust crates: aes, cbc, cipher, md-5, sha1, digest, crc32fast, adler2,
+  crossbeam, hashbrown, foldhash, lru, itertools, either, encoding_rs,
+  zerocopy, xxhash-rust, tracing, bytes, thiserror, libc, num-traits,
+  once_cell, dyn-clone, simple_moving_average, polonius-the-crab and
+  others ............................... MIT, Apache-2.0, BSD, Zlib or
+                                         BSL-1.0 (each crate's own)
+
+MIT License
+
+Copyright 2021 Luke Street.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

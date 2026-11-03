@@ -428,6 +428,7 @@ typedef struct TexEntry {
     uint64_t key;
     uint32_t handle, hash;
     uint32_t image_hash; /* of the texture's memory alone, without its palette */
+    int pix;             /* its layout (GX_PIX_...) */
     uint64_t checked, hashed; /* the frames it was last looked at, and hashed */
 } TexEntry;
 
@@ -506,11 +507,11 @@ static uint64_t mix64(uint64_t k) {
 /* Hashes every byte: textures are checked for changes on every frame they
  * are used. Four independent lanes of eight bytes, so the multiplies
  * overlap instead of each waiting for the last. */
-static uint32_t hash_bytes(const uint8_t* p, int n) {
+static uint64_t hash_bytes64(const uint8_t* p, size_t n) {
     const uint64_t m = 0xFF51AFD7ED558CCDull;
     uint64_t h0 = 0x9E3779B97F4A7C15ull ^ (uint64_t)n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull,
              h3 = 0x27D4EB2F165667C5ull, h;
-    int i;
+    size_t i;
     for (i = 0; i + 32 <= n; i += 32) {
         uint64_t w[4];
         memcpy(w, p + i, 32);
@@ -531,8 +532,12 @@ static uint32_t hash_bytes(const uint8_t* p, int n) {
         h ^= h >> 29;
     }
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
-    h ^= h >> 32;
-    return (uint32_t)h;
+    return h;
+}
+
+static uint32_t hash_bytes(const uint8_t* p, int n) {
+    uint64_t h = hash_bytes64(p, (size_t)n);
+    return (uint32_t)(h ^ (h >> 32));
 }
 
 /* EFB copies made to textures, looked up before main memory. */
@@ -694,26 +699,30 @@ static uint32_t texture_for_map(int map) {
     if (fmt >= 8 && fmt <= 10) h ^= hash_bytes(&tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], fmt == 8 ? 32 : 512);
     if (e->key != key || e->hash != h || !e->handle) {
         uint8_t* rgba = (uint8_t*)malloc((size_t)width * height * 8); /* the levels below take a third more */
+        /* RECOMP_GX_DUMP_TEX=<address>: save that texture, as decoded, to
+         * tex_<address>.bmp (once). RECOMP_GX_DUMP_TEXTURES=<dir>: save
+         * every texture, as decoded, to <dir>/<hash>_<width>x<height>_
+         * <format>.bmp, once each: the hash is the one a replacement would
+         * be found by. Saved ones are decoded to RGBA8; the rest to the
+         * smallest layout that holds them. */
+        const char* want = getenv("RECOMP_GX_DUMP_TEX");
+        const char* dir = getenv("RECOMP_GX_DUMP_TEXTURES");
+        int pix = want || (dir && *dir) ? GX_PIX_RGBA8 : gx_texture_pix(fmt, MA(addr), width, height, levels, gxb_texture_pixels());
         {
             int lw = width, lh = height, l;
             uint32_t from = addr;
             uint8_t* to = rgba;
             for (l = 0; l < levels; l++) {
-                gx_decode_texture(to, MA(from), fmt, lw, lh, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
+                if (pix == GX_PIX_RGBA8)
+                    gx_decode_texture(to, MA(from), fmt, lw, lh, &tmem[((tlut & 0x3FF) << 9) & 0xFFFFF], (tlut >> 10) & 3);
+                else gx_decode_texture_pix(to, MA(from), fmt, lw, lh, pix);
                 from += (uint32_t)gx_texture_size(fmt, lw, lh);
-                to += (size_t)lw * lh * 4;
+                to += gx_pix_size(pix, lw, lh);
                 lw = lw > 1 ? lw / 2 : 1;
                 lh = lh > 1 ? lh / 2 : 1;
             }
         }
-        {
-            /* RECOMP_GX_DUMP_TEX=<address>: save that texture, as decoded,
-             * to tex_<address>.bmp (once). RECOMP_GX_DUMP_TEXTURES=<dir>:
-             * save every texture, as decoded, to <dir>/<hash>_<width>x
-             * <height>_<format>.bmp, once each: the hash is the one a
-             * replacement would be found by. */
-            const char* want = getenv("RECOMP_GX_DUMP_TEX");
-            const char* dir = getenv("RECOMP_GX_DUMP_TEXTURES");
+        if (pix == GX_PIX_RGBA8) {
             static int dumped;
             char path[512];
             if (want && !dumped && (strtoul(want, NULL, 16) & 0x3FFFFFFF) == (addr & 0x3FFFFFFF)) {
@@ -729,19 +738,20 @@ static uint32_t texture_for_map(int map) {
                 else save_bmp(path, rgba, width, height);
             }
         }
-        if (e->handle && e->key == key) {
+        if (e->handle && e->key == key && e->pix == pix) {
             /* Same texture, new contents (a movie frame, say): the key
              * covers size and sampling, so update it in place. */
             flush_batch();
-            gxb_texture_update(e->handle, width, height, levels, rgba);
+            gxb_texture_update(e->handle, pix, width, height, levels, rgba);
         } else {
             /* The way goes to another texture. The old one is freed (or
              * GPU memory grows without bound) once the frame is
              * presented: draws made this frame may still use it. */
             if (e->handle) gxb_texture_free(e->handle);
-            e->handle = gxb_texture(key, width, height, levels, rgba, mode0);
+            e->handle = gxb_texture(key, pix, width, height, levels, rgba, mode0);
         }
         free(rgba);
+        e->pix = pix;
         e->key = key;
         e->hash = h;
     }
@@ -933,11 +943,16 @@ static int sBatchFirst, sIndexFirst, sKeepFrame;
 /* The display list being run (0 outside one) and the draws made in it
  * so far: a draw's identity from frame to frame. */
 static uint32_t sDisplayList, sListDraws;
+/* Vertices go to the device's arena (gxb_arena), display lists' kept
+ * there from frame to frame (list_begin). */
+static int sArena;
 
 static void flush_batch(void) {
     if (sIndexCount == sIndexFirst) return;
-    gxb_draw_triangles(&sBatchState, sBatch, sBatchFirst, sBatchVerts - sBatchFirst, sIndex, sIndexFirst,
-                       sIndexCount - sIndexFirst);
+    if (sArena) gxb_draw_triangles(&sBatchState, NULL, 0, 0, sIndex, sIndexFirst, sIndexCount - sIndexFirst);
+    else
+        gxb_draw_triangles(&sBatchState, sBatch, sBatchFirst, sBatchVerts - sBatchFirst, sIndex, sIndexFirst,
+                           sIndexCount - sIndexFirst);
     if (sKeepFrame) {
         sBatchFirst = sBatchVerts;
         sIndexFirst = sIndexCount;
@@ -948,11 +963,15 @@ static void flush_batch(void) {
 
 /* Makes the batch one drawn with the current state, drawing the pending
  * one first if its state differs. */
-static void use_current_state(void) {
+static void use_current_state(int mtx_per_vertex) {
     int rebuilt = sStateDirty;
     if (rebuilt) {
         build_state(&sState); /* may draw the pending batch, if a texture changes */
         sStateDirty = 0;
+    }
+    if (sState.mtx_per_vertex != mtx_per_vertex) {
+        sState.mtx_per_vertex = mtx_per_vertex;
+        rebuilt = 1;
     }
     /* Everything but the XF fields, which build_state leaves zero. A
      * pending batch already has the current state unless it was rebuilt. */
@@ -968,13 +987,328 @@ static void use_current_state(void) {
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/* Display lists, decoded once
+ *
+ * Where the device keeps vertices in video memory (gxb_arena), a display
+ * list's vertices are decoded the first time it is called and kept there;
+ * later calls draw them from there, while the list's bytes, the vertex
+ * formats and array registers it starts with, and the parts of the arrays
+ * its vertices index are as they were. The park's display lists are
+ * nearly all its vertices (221,000 a frame), and decoding them and copying
+ * them to the GPU every frame was a third of the game thread's time.
+ * Draws outside display lists go to spans of the arena used for a frame. */
+
+/* Arena spans let go of once no recorded frame draws from them: a frame
+ * is drawn again until the next two are made. */
+typedef struct LateFree {
+    uint64_t frame;
+    int first, n;
+} LateFree;
+static LateFree* sLate;
+static int sLateCount, sLateCap;
+
+static void arena_free_later(int first, int n) {
+    if (n <= 0) return;
+    if (sLateCount == sLateCap) {
+        sLateCap = sLateCap ? sLateCap * 2 : 256;
+        sLate = (LateFree*)realloc(sLate, (size_t)sLateCap * sizeof(LateFree));
+    }
+    sLate[sLateCount].frame = sFrame;
+    sLate[sLateCount].first = first;
+    sLate[sLateCount].n = n;
+    sLateCount++;
+}
+
+/* A part of an array the list's vertices index, and its bytes' hash. */
+typedef struct ListRange {
+    uint32_t addr, len;
+    uint64_t hash;
+} ListRange;
+
+typedef struct ListEntry {
+    uint32_t addr, size; /* 0 size: unused */
+    uint64_t state;      /* list_state as it was called */
+    uint64_t hash;       /* of the list's bytes */
+    int first, verts;    /* its vertices in the arena; first -1 for none */
+    int valid;           /* decoded, and its vertices kept */
+    ListRange* ranges;
+    int nranges, rangecap;
+    uint64_t used;       /* the last frame it was called in */
+    int changed;         /* calls in a row it was different */
+} ListEntry;
+
+#define LIST_SETS 4096
+#define LIST_WAYS 4
+/* Calls in a row a list was different, after which it's only checked
+ * every 64 frames; and the count for one that can't be kept. */
+#define LIST_CHANGING 4
+#define LIST_UNCACHED 1000000
+static ListEntry sLists[LIST_SETS * LIST_WAYS];
+
+/* The list running: drawn from its entry's vertices (sListBuild 0), or
+ * decoded into sListVerts for it; sListAt vertices so far, of sListMax
+ * made room for. */
+static ListEntry* sList;
+static int sListBuild, sListAt, sListMax;
+static GXVertex* sListVerts;
+static int sListVertsCap;
+static ListRange* sRanges;
+static int sRangeCount, sRangeCap;
+/* Spans for draws outside display lists: the rest of this frame's. */
+static int sTransNext, sTransLeft;
+
+/* What a list's vertices depend on besides its bytes and the arrays: the
+ * vertex descriptors and formats, the array registers, and the default
+ * matrix indices. */
+static uint64_t list_state(void) {
+    uint64_t h = 0x243F6A8885A308D3ull;
+    int i;
+    h = mix64(h ^ cp[0x50] ^ ((uint64_t)cp[0x60] << 32));
+    for (i = 0; i < 8; i++) h = mix64(h ^ cp[0x70 + i] ^ ((uint64_t)cp[0x80 + i] << 32) ^ ((uint64_t)cp[0x90 + i] << 16));
+    for (i = 0; i < 12; i++) h = mix64(h ^ cp[0xA0 + i] ^ ((uint64_t)cp[0xB0 + i] << 32));
+    return mix64(h ^ xf[0x1018] ^ ((uint64_t)xf[0x1019] << 32));
+}
+
+/* The vertices of the draws in list p[0..len), as run would draw them;
+ * -1 if implausibly many. */
+static int list_vertex_count(const uint8_t* p, uint32_t len) {
+    uint32_t saved[0x98 - 0x50];
+    uint32_t pos = 0;
+    int64_t total = 0;
+    memcpy(saved, cp + 0x50, sizeof(saved));
+    while (pos < len) {
+        uint32_t left = len - pos;
+        uint8_t op = p[pos];
+        if (op == 0x08) {
+            if (left < 6) break;
+            if (p[pos + 1] >= 0x50 && p[pos + 1] < 0x98) cp[p[pos + 1]] = rd32(p + pos + 2);
+            pos += 6;
+        } else if (op == 0x10) {
+            if (left < 5) break;
+            pos += 5 + 4 * (((rd32(p + pos + 1) >> 16) & 15) + 1);
+        } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38 || op == 0x61) {
+            pos += 5;
+        } else if (op == 0x40) {
+            pos += 9;
+        } else if (op >= 0x80 && op < 0xC0) {
+            const VtxFormat* f;
+            int count;
+            if (left < 3) break;
+            f = format(op & 7);
+            count = rd16(p + pos + 1);
+            if (left < 3 + (uint32_t)count * (uint32_t)f->size) break;
+            total += count;
+            pos += 3 + (uint32_t)count * (uint32_t)f->size;
+        } else {
+            pos++;
+        }
+    }
+    memcpy(cp + 0x50, saved, sizeof(saved));
+    return total > (1 << 22) ? -1 : (int)total;
+}
+
+/* Notes the parts of the arrays the draw's count vertices at p index. */
+static void list_note_arrays(const uint8_t* p, const VtxFormat* f, int count) {
+    int a, i;
+    for (a = 0; a < 12; a++) {
+        int type, off, elem;
+        uint32_t lo = 0xFFFF, hi = 0, base, stride;
+        if (a == 0) type = f->pos, off = f->off_pos, elem = f->pos_cs * f->pos_n;
+        else if (a == 1) type = f->nrm, off = f->off_nrm, elem = f->nrm_cs * 3;
+        else if (a < 4) type = f->col[a - 2], off = f->off_col[a - 2], elem = color_size(f->col_fmt[a - 2]);
+        else type = f->tex[a - 4], off = f->off_tex[a - 4], elem = f->tex_cs[a - 4] * f->tex_n[a - 4];
+        if (type < ATTR_INDEX8) continue;
+        for (i = 0; i < count; i++) {
+            const uint8_t* q = p + (size_t)i * f->size + off;
+            uint32_t k = type == ATTR_INDEX8 ? q[0] : rd16(q);
+            if (k < lo) lo = k;
+            if (k > hi) hi = k;
+        }
+        base = cp[0xA0 + a] & 0x3FFFFFFF;
+        stride = cp[0xB0 + a] & 0xFF;
+        if (sRangeCount == sRangeCap) {
+            sRangeCap = sRangeCap ? sRangeCap * 2 : 64;
+            sRanges = (ListRange*)realloc(sRanges, (size_t)sRangeCap * sizeof(ListRange));
+        }
+        sRanges[sRangeCount].addr = base + lo * stride;
+        sRanges[sRangeCount].len = (hi - lo) * stride + (uint32_t)elem;
+        sRangeCount++;
+    }
+}
+
+static int range_order(const void* a, const void* b) {
+    uint32_t x = ((const ListRange*)a)->addr, y = ((const ListRange*)b)->addr;
+    return x < y ? -1 : x > y;
+}
+
+static int list_ranges_same(const ListEntry* e) {
+    int i;
+    for (i = 0; i < e->nranges; i++) {
+        if (hash_bytes64(MA(e->ranges[i].addr), e->ranges[i].len) != e->ranges[i].hash) return 0;
+    }
+    return 1;
+}
+
+static void list_drop_vertices(ListEntry* e) {
+    if (e->first >= 0) arena_free_later(e->first, e->verts);
+    e->first = -1;
+    e->verts = 0;
+    e->valid = 0;
+}
+
+/* Before list addr (size bytes) runs: its entry drawn from, or decoded
+ * into; neither (sList NULL) for a list that changes from call to call,
+ * whose draws go to this frame's spans. */
+static void list_begin(uint32_t addr, uint32_t size) {
+    uint64_t state, key, hash = 0;
+    ListEntry *set, *e = NULL;
+    int i, count;
+    sList = NULL;
+    if (!sArena || (long)sFrame == sDebugFrame) return;
+    state = list_state();
+    key = mix64(state ^ ((uint64_t)addr << 32) ^ size);
+    set = &sLists[(key % LIST_SETS) * LIST_WAYS];
+    for (i = 0; i < LIST_WAYS && !e; i++) {
+        if (set[i].size == size && set[i].addr == addr && set[i].state == state) e = &set[i];
+    }
+    if (e) {
+        e->used = sFrame;
+        /* One that has kept changing is only checked now and then. */
+        if (e->changed >= LIST_CHANGING && (sFrame & 63) != 0) return;
+        hash = hash_bytes64(MA(addr), size);
+        if (e->valid && hash == e->hash && list_ranges_same(e)) {
+            e->changed = 0;
+            sList = e;
+            sListBuild = 0;
+            sListAt = 0;
+            return;
+        }
+        e->changed++;
+        list_drop_vertices(e);
+    } else {
+        e = &set[0];
+        for (i = 1; i < LIST_WAYS; i++) {
+            if (!set[i].size) {
+                e = &set[i];
+                break;
+            }
+            if (set[i].used < e->used) e = &set[i];
+        }
+        if (e->size) list_drop_vertices(e);
+        e->addr = addr;
+        e->size = size;
+        e->state = state;
+        e->first = -1;
+        e->verts = 0;
+        e->valid = 0;
+        e->changed = 0;
+        e->used = sFrame;
+        hash = hash_bytes64(MA(addr), size);
+    }
+    count = list_vertex_count(MA(addr), size);
+    if (count < 0) {
+        e->changed = LIST_UNCACHED;
+        return;
+    }
+    e->hash = hash;
+    e->first = count ? gxb_arena_alloc(count) : -1;
+    e->verts = count;
+    if (count > sListVertsCap) {
+        sListVertsCap = count * 2;
+        sListVerts = (GXVertex*)realloc(sListVerts, (size_t)sListVertsCap * sizeof(GXVertex));
+    }
+    sList = e;
+    sListBuild = 1;
+    sListAt = 0;
+    sListMax = count;
+    sRangeCount = 0;
+}
+
+/* After the list runs: a decoded one's vertices written to the arena,
+ * and the parts of arrays it read noted. */
+static void list_end(void) {
+    ListEntry* e = sList;
+    int i, n = 0, bad = 0;
+    sList = NULL;
+    if (!e || !sListBuild) return;
+    if (sListAt) gxb_arena_write(e->first, sListVerts, sListAt);
+    if (sListAt < sListMax) {
+        /* Never drawn from: free at once. */
+        gxb_arena_free(e->first + sListAt, sListMax - sListAt);
+        e->verts = sListAt;
+        if (!sListAt) e->first = -1;
+    }
+    if (sRangeCount > 1) qsort(sRanges, (size_t)sRangeCount, sizeof(ListRange), range_order);
+    for (i = 0; i < sRangeCount; i++) {
+        if (n && sRanges[i].addr <= sRanges[n - 1].addr + sRanges[n - 1].len + 64) {
+            uint32_t end = sRanges[i].addr + sRanges[i].len;
+            if (end > sRanges[n - 1].addr + sRanges[n - 1].len) sRanges[n - 1].len = end - sRanges[n - 1].addr;
+        } else {
+            sRanges[n++] = sRanges[i];
+        }
+    }
+    if (n > e->rangecap) {
+        e->rangecap = n;
+        e->ranges = (ListRange*)realloc(e->ranges, (size_t)n * sizeof(ListRange));
+    }
+    e->nranges = n;
+    for (i = 0; i < n; i++) {
+        e->ranges[i] = sRanges[i];
+        /* A range that big is likely an index of 0xFFFF, not an array. */
+        if (sRanges[i].len > (4u << 20)) bad = 1;
+        else e->ranges[i].hash = hash_bytes64(MA(sRanges[i].addr), sRanges[i].len);
+    }
+    if (bad) {
+        e->changed = LIST_UNCACHED;
+        list_drop_vertices(e);
+    } else {
+        e->valid = 1;
+    }
+}
+
+/* An arena span of n vertices for this frame alone. */
+static int transient(int n) {
+    if (n > sTransLeft) {
+        int size = n > 16384 ? n : 16384;
+        sTransNext = gxb_arena_alloc(size);
+        sTransLeft = size;
+        arena_free_later(sTransNext, size);
+    }
+    sTransNext += n;
+    sTransLeft -= n;
+    return sTransNext - n;
+}
+
+/* At the end of a frame: spans no recorded frame draws from any more let
+ * go of, and lists not called for a while forgotten. */
+static void list_frame_end(void) {
+    static int sweep;
+    int i;
+    for (i = 0; i < sLateCount;) {
+        if (sLate[i].frame + 3 <= sFrame) {
+            gxb_arena_free(sLate[i].first, sLate[i].n);
+            sLate[i] = sLate[--sLateCount];
+        } else i++;
+    }
+    for (i = 0; i < 64; i++) {
+        ListEntry* e = &sLists[sweep];
+        sweep = (sweep + 1) % (LIST_SETS * LIST_WAYS);
+        if (e->size && e->used + 600 < sFrame) {
+            list_drop_vertices(e);
+            e->size = 0;
+        }
+    }
+    sTransLeft = 0;
+}
+
 /* Draws count vertices of format f from p as primitive prim. */
 static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int vat) {
     static int skipLo = -2, skipHi = -1;
     GXVertex tpl, *v;
     uint32_t* ix;
     uint32_t base;
-    int tris, i;
+    int tris, i, own = 0;
     switch (prim) {
     case 0x80: /* quads */
     case 0x88: /* quads (alternate encoding) */
@@ -1000,9 +1334,9 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
         sDrawCount++;
         return;
     }
-    use_current_state();
-    if (sBatchVerts + count > sBatchCap) {
-        sBatchCap = (sBatchVerts + count) * 2;
+    use_current_state(f->pnmtx | (f->texmtx_mask ? 2 : 0));
+    if ((sArena ? 0 : sBatchVerts) + count > sBatchCap) {
+        sBatchCap = ((sArena ? 0 : sBatchVerts) + count) * 2;
         sBatch = (GXVertex*)realloc(sBatch, (size_t)sBatchCap * sizeof(GXVertex));
     }
     if (sIndexCount + 3 * tris > sIndexCap) {
@@ -1017,12 +1351,27 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
                                         ((uint64_t)vat << 20) ^ (uint64_t)count;
         sBatchState.key = mix64(sBatchState.key ^ k);
     }
-    v = sBatch + sBatchVerts;
-    base = (uint32_t)(sBatchVerts - sBatchFirst);
-    vertex_template(&tpl);
-    for (i = 0; i < count; i++) v[i] = tpl;
-    read_vertices(p, f, v, count);
-    if ((long)sFrame == sDebugFrame) debug_draw(&sBatchState, v, count);
+    if (!sArena) {
+        v = sBatch + sBatchVerts;
+        base = (uint32_t)(sBatchVerts - sBatchFirst);
+    } else if (sList && sListAt + count <= sList->verts) {
+        /* The list's, in the arena: decoded now (sListBuild), or before. */
+        v = sListBuild ? sListVerts + sListAt : NULL;
+        base = (uint32_t)(sList->first + sListAt);
+        sListAt += count;
+        if (sListBuild) list_note_arrays(p, f, count);
+    } else {
+        v = sBatch;
+        base = (uint32_t)transient(count);
+        own = 1;
+    }
+    if (v) {
+        vertex_template(&tpl);
+        for (i = 0; i < count; i++) v[i] = tpl;
+        read_vertices(p, f, v, count);
+        if ((long)sFrame == sDebugFrame) debug_draw(&sBatchState, v, count);
+        if (own) gxb_arena_write((int)base, v, count);
+    }
     ix = sIndex + sIndexCount;
     switch (prim) {
     case 0x80:
@@ -1049,7 +1398,7 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
         }
         break;
     }
-    sBatchVerts += count;
+    if (!sArena) sBatchVerts += count;
     sIndexCount = (int)(ix - sIndex);
     sDrawCount++;
 }
@@ -1115,7 +1464,8 @@ static void efb_copy(uint32_t exec) {
     if (to_xfb) {
         LOG("frame %llu: copy to XFB %dx%d at (%d,%d), %u draws, %u vertices", (unsigned long long)sFrame, w, h, x, y,
             sDrawCount, sVertexCount);
-        if (sKeepFrame) gxb_frame_data(sBatch, sBatchVerts, sIndex, sIndexCount);
+        if (sKeepFrame) gxb_frame_data(sArena ? NULL : sBatch, sBatchVerts, sIndex, sIndexCount);
+        if (sArena) list_frame_end();
         gxb_present(x, y, w, h);
         sBatchVerts = sIndexCount = sBatchFirst = sIndexFirst = 0;
         sKeepFrame = gxb_recording();
@@ -1210,7 +1560,9 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
                 uint32_t list = sDisplayList, draws = sListDraws;
                 sDisplayList = addr;
                 sListDraws = 0;
+                list_begin(addr, size);
                 run(MA(addr), size, 1, &dl_need);
+                list_end();
                 sDisplayList = list;
                 sListDraws = draws;
             }
@@ -1261,6 +1613,10 @@ void gx_init(void) {
     if ((v = getenv("RECOMP_GX_DEBUG_FRAME"))) sDebugFrame = atol(v);
     bp[0x41] = 0x18; /* color and alpha updates on */
     gxb_init();
+    /* RECOMP_GX_LISTS=0: display lists decoded every time they're called,
+     * and every draw's vertices sent with it. */
+    v = getenv("RECOMP_GX_LISTS");
+    sArena = gxb_arena() && !(v && *v == '0') && !getenv("RECOMP_GX_SKIP");
     g_wgpipe_write = fifo_append;
     g_gx_flush = gx_flush;
     sReady = 1;

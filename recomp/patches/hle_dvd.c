@@ -1,11 +1,18 @@
 /* The disc, served from files extracted from the user's own copy (see
  * recomp/README.md). The game's DVD library is left as is: it reads the
  * data partition through /dev/di (hle_ios.c), and those reads are mapped
- * back to files through the disc's file table (FST). */
+ * back to files through the disc's file table (FST). On Android the disc
+ * can instead be read straight from the user's disc image (disc_image.c),
+ * whose data partition is read at the same offsets. */
 #include <stdlib.h>
 #include <string.h>
 
 #include "hle.h"
+
+#ifndef _WIN32
+#define _strdup strdup
+#define _fseeki64 fseeko
+#endif
 
 typedef struct Region {
     uint64_t offset, size; /* in the data partition */
@@ -18,6 +25,10 @@ static int sRegionCount, sRegionCap;
 static uint8_t sBootBin[0x440];
 static uint8_t* sFst;
 static uint32_t sFstSize;
+/* A disc image's partition, read at an offset, and its TMD. */
+static int (*sImageRead)(uint64_t offset, void* out, uint32_t len);
+static uint8_t* sTmd;
+static uint32_t sTmdSize;
 
 static uint32_t be32(const uint8_t* p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -111,6 +122,22 @@ int hle_dvd_init(const char* root) {
     return 0;
 }
 
+int hle_dvd_init_image(const uint8_t* boot, const uint8_t* fst, uint32_t fstSize, const uint8_t* tmd,
+                       uint32_t tmdSize, int (*read)(uint64_t offset, void* out, uint32_t len)) {
+    memcpy(sBootBin, boot, sizeof(sBootBin));
+    sFst = (uint8_t*)malloc(fstSize);
+    memcpy(sFst, fst, fstSize);
+    sFstSize = fstSize;
+    if (tmd && tmdSize) {
+        sTmd = (uint8_t*)malloc(tmdSize);
+        memcpy(sTmd, tmd, tmdSize);
+        sTmdSize = tmdSize;
+    }
+    sImageRead = read;
+    HLE_LOG("disc: from a disc image, %u files", be32(sFst + 8));
+    return 0;
+}
+
 /* What the apploader leaves in memory: the disc header at 0x80000000 and
  * the FST at the top of MEM1, just below the arena. */
 void hle_dvd_boot_setup(void) {
@@ -129,6 +156,13 @@ void hle_dvd_boot_setup(void) {
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
     uint64_t end = offset + len;
     int i, ok = 1;
+    if (sImageRead) {
+        HLE_LOG("disc read %08llX+%X", (unsigned long long)offset, (unsigned)len);
+        if (sImageRead(offset, MA(dst), len)) return 1;
+        memset(MA(dst), 0, len);
+        HLE_WARN("disc read %08llX+%X failed", (unsigned long long)offset, (unsigned)len);
+        return 0;
+    }
     memset(MA(dst), 0, len);
     for (i = 0; i < sRegionCount; i++) {
         const Region* r = &sRegions[i];
@@ -155,6 +189,11 @@ uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max) {
     char path[600];
     uint32_t size;
     uint8_t* tmd;
+    if (sTmd) {
+        size = sTmdSize < max ? sTmdSize : max;
+        memcpy(MA(dst), sTmd, size);
+        return size;
+    }
     snprintf(path, sizeof(path), "%s/tmd.bin", sRoot);
     tmd = read_file(path, &size);
     if (!tmd) return 0;

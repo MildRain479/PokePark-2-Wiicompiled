@@ -69,8 +69,12 @@ int hle_in_interrupt(void);
 uint32_t hle_call(ppc_t* c, uint32_t fn, uint32_t r3, uint32_t r4);
 
 /* The disc (hle_dvd.c). hle_dvd_init takes the directory holding sys/
- * and files/ extracted from the disc. */
+ * and files/ extracted from the disc; hle_dvd_init_image, a disc image's
+ * data partition instead (disc_image.c): its boot.bin, FST and TMD, and
+ * read, which reads the partition at an offset (0 on failure). */
 int hle_dvd_init(const char* root);
+int hle_dvd_init_image(const uint8_t* boot, const uint8_t* fst, uint32_t fstSize, const uint8_t* tmd,
+                       uint32_t tmdSize, int (*read)(uint64_t offset, void* out, uint32_t len));
 void hle_dvd_boot_setup(void);
 void hle_text_boot_setup(void);
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst);

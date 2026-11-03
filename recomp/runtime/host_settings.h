@@ -1,5 +1,6 @@
 /* User settings, kept in settings.ini beside the program and changed in
- * Options in the pause menu (and the settings menu, menu_win32.c). For the
+ * Options in the pause menu (and the settings menu, menu_win32.c;
+ * settings.c reads and writes them). For the
  * platform layer (recomp/boot, recomp/gpu); the game patches don't see
  * them. RECOMP_SETTINGS=<file> reads and writes another file instead. */
 #pragma once
@@ -36,6 +37,7 @@ typedef struct {
     int aniso;               /* anisotropic filtering: 1 (off), 2, 4, 8 or 16 */
     int renderer;            /* RENDERER_*: what draws, from the next start */
     int rumble;              /* controller rumble: 0 off, 1 light, 2 normal, 3 strong */
+    int touch_controls;      /* Android: the touch screen's controls, shown while it was used last; 0 never */
     int text_speed;          /* dialogue: 1 (the game's), 2, 3, or 0 (a page at once) */
     int berries;             /* berries collected, percent of the game's */
     int prices;              /* berries spent, percent of the game's */
@@ -64,13 +66,13 @@ uint32_t settings_generation(void);
 int input_controller_last(void);
 /* A short buzz at the rumble setting's strength (input_win32.c). */
 void input_rumble_preview(void);
-/* Sets up the button prompt icons (prompts_win32.c). */
+/* Sets up the button prompt icons (prompts.c). */
 void prompts_init(void);
 
 /* What settings_step changes. */
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
-       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER };
+       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);
@@ -81,15 +83,22 @@ void settings_bind(int act, int slot, int vk, uint32_t pad);
 void settings_key_name(int vk, char* out, size_t n);
 const char* settings_pad_name(uint32_t b);
 
-/* The Options tab of the pause menu (options_win32.c), as for the settings
+/* The Options tab of the pause menu (options.c), as for the settings
  * menu below; used by it while that is closed. */
 int options_is_open(void);
 int options_window_message(unsigned msg, uintptr_t wp, intptr_t lp);
 void options_controller(uint32_t buttons, uint32_t nav);
 const uint32_t* options_draw(int w, int h);
+/* How many times options_draw has drawn its image again (it returns the
+ * same buffer while nothing changed). */
+unsigned options_draws(void);
+/* Android: a tap at window pixel (x, y); returns 1 if the tab used it. */
+int options_touch(int x, int y);
 /* Scripted presses (HOST_PAD_* bits held), as the controller's; returns 1
  * if the tab is open. */
 int options_script(uint32_t held);
+/* Android: the touch controls' buttons held, as for options_script. */
+int options_touch_buttons(uint32_t held);
 
 /* The settings menu (menu_win32.c; in public builds, without
  * RECOMP_DEBUG_MENU, these are the Options tab's alone). */
@@ -104,3 +113,6 @@ void menu_controller(uint32_t buttons, uint32_t nav);
 /* The menu as a w x h BGRA image with alpha, top row first, to lay over
  * the picture; NULL when closed. */
 const uint32_t* menu_draw(int w, int h);
+/* Android: changes whenever menu_draw's image may have, so a device can
+ * leave an unchanged one where it is (input_android.c). */
+unsigned menu_generation(void);

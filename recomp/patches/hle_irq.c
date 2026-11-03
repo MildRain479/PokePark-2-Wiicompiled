@@ -12,6 +12,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <time.h>
 #endif
 
 #define QUEUE_SIZE 64
@@ -270,8 +272,18 @@ static void sleep_until_inner(uint64_t deadline, int precise) {
         }
     }
 #else
-    (void)precise;
-    while ((int64_t)(deadline - ppc_timebase()) > 0) {}
+    for (;;) {
+        int64_t left = (int64_t)(deadline - ppc_timebase()), early = precise ? (int64_t)SPIN_TICKS : 0;
+        if (left <= 0) return;
+        if (left > early) {
+            int64_t ns = (left - early) * 1000000000 / (int64_t)PPC_TB_HZ;
+            struct timespec ts;
+            ts.tv_sec = (time_t)(ns / 1000000000);
+            ts.tv_nsec = (long)(ns % 1000000000);
+            nanosleep(&ts, NULL);
+            if (!precise) return;
+        }
+    }
 #endif
 }
 

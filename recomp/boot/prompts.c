@@ -1,12 +1,20 @@
 /* Button prompt icons (hle_prompts.c): which icon shows a Wii Remote
  * button, from what the player has bound to it on the device used last,
- * and the icon itself, a PNG from the prompts folder beside the program
- * (recomp/assets/prompts), decoded by Windows (WIC) and scaled to the
- * glyph it replaces. */
+ * and the icon itself, a PNG from recomp/assets/prompts scaled to the
+ * glyph it replaces. On Windows the PNGs are in a prompts folder beside
+ * the program, decoded by WIC; on Android they are in the APK's assets,
+ * decoded by AImageDecoder (window_android.c sets the asset manager). */
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
 #include <wincodec.h>
+#endif
+#ifdef __ANDROID__
+#include <android/asset_manager.h>
+#include <android/imagedecoder.h>
+AAssetManager* g_android_assets;
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,13 +22,16 @@
 #include "host_input.h"
 #include "host_settings.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#endif
 
 /* ------------------------------------------------------------------------ */
 /* Which icon */
 
 static const char* key_icon(int vk) {
+#ifdef _WIN32
     static char name[32];
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '1' && vk <= '9')) {
         snprintf(name, sizeof(name), "key_%c", (char)(vk >= 'A' ? vk - 'A' + 'a' : vk));
@@ -53,6 +64,8 @@ static const char* key_icon(int vk) {
     case VK_RBUTTON: return "mouse_right";
     case VK_MBUTTON: return "mouse_middle";
     }
+#endif
+    (void)vk;
     return NULL;
 }
 
@@ -103,12 +116,14 @@ typedef struct {
 static Icon sIcons[96];
 static int sIconCount;
 
-static int decode_png(const char* path, Icon* icon) {
+#ifdef _WIN32
+static int decode_png(const char* name, Icon* icon) {
     static IWICImagingFactory* factory;
     IWICBitmapDecoder* dec = NULL;
     IWICBitmapFrameDecode* frame = NULL;
     IWICFormatConverter* conv = NULL;
     WCHAR wpath[MAX_PATH];
+    char path[MAX_PATH], *slash;
     UINT w = 0, h = 0;
     uint8_t* bgra;
     int ok = 0, i;
@@ -118,6 +133,9 @@ static int decode_png(const char* path, Icon* icon) {
                                     (void**)&factory)))
             return 0;
     }
+    GetModuleFileNameA(NULL, path, sizeof(path) - 64);
+    slash = strrchr(path, '\\');
+    snprintf(slash ? slash + 1 : path, 64, "prompts\\%s.png", name);
     MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
     if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(factory, wpath, NULL, GENERIC_READ,
                                                                WICDecodeMetadataCacheOnDemand, &dec)) &&
@@ -141,9 +159,45 @@ static int decode_png(const char* path, Icon* icon) {
     if (dec) IWICBitmapDecoder_Release(dec);
     return ok;
 }
+#elif defined(__ANDROID__)
+static int decode_png(const char* name, Icon* icon) {
+    char path[64];
+    AAsset* a;
+    AImageDecoder* dec = NULL;
+    const AImageDecoderHeaderInfo* info;
+    uint8_t* rgba = NULL;
+    int ok = 0, w, h, i;
+    snprintf(path, sizeof(path), "prompts/%s.png", name);
+    if (!g_android_assets || !(a = AAssetManager_open(g_android_assets, path, AASSET_MODE_STREAMING))) return 0;
+    if (AImageDecoder_createFromAAsset(a, &dec) == ANDROID_IMAGE_DECODER_SUCCESS &&
+        AImageDecoder_setAndroidBitmapFormat(dec, ANDROID_BITMAP_FORMAT_RGBA_8888) == ANDROID_IMAGE_DECODER_SUCCESS &&
+        AImageDecoder_setUnpremultipliedRequired(dec, 1) == ANDROID_IMAGE_DECODER_SUCCESS) {
+        info = AImageDecoder_getHeaderInfo(dec);
+        w = AImageDecoderHeaderInfo_getWidth(info);
+        h = AImageDecoderHeaderInfo_getHeight(info);
+        if (w > 0 && h > 0 && w <= 1024 && h <= 1024 && (rgba = (uint8_t*)malloc((size_t)w * h * 4)) &&
+            AImageDecoder_decodeImage(dec, rgba, (size_t)w * 4, (size_t)w * h * 4) == ANDROID_IMAGE_DECODER_SUCCESS) {
+            icon->alpha = (uint8_t*)malloc((size_t)w * h);
+            for (i = 0; i < w * h; i++) icon->alpha[i] = rgba[4 * i + 3];
+            icon->w = w;
+            icon->h = h;
+            ok = 1;
+        }
+    }
+    free(rgba);
+    if (dec) AImageDecoder_delete(dec);
+    AAsset_close(a);
+    return ok;
+}
+#else
+static int decode_png(const char* name, Icon* icon) {
+    (void)name;
+    (void)icon;
+    return 0;
+}
+#endif
 
 static Icon* load_icon(const char* name) {
-    char path[MAX_PATH], *slash;
     int i;
     for (i = 0; i < sIconCount; i++) {
         if (!strcmp(sIcons[i].name, name)) return sIcons[i].ok ? &sIcons[i] : NULL;
@@ -151,10 +205,7 @@ static Icon* load_icon(const char* name) {
     if (sIconCount == (int)(sizeof(sIcons) / sizeof(sIcons[0]))) return NULL;
     Icon* icon = &sIcons[sIconCount++];
     snprintf(icon->name, sizeof(icon->name), "%s", name);
-    GetModuleFileNameA(NULL, path, sizeof(path) - 64);
-    slash = strrchr(path, '\\');
-    snprintf(slash ? slash + 1 : path, 64, "prompts\\%s.png", name);
-    icon->ok = decode_png(path, icon);
+    icon->ok = decode_png(name, icon);
     return icon->ok ? icon : NULL;
 }
 

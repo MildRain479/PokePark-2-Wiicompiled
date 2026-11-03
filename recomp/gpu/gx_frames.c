@@ -32,8 +32,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <time.h>
+/* The performance counter, from the monotonic clock in nanoseconds. */
+typedef long long LONGLONG;
+typedef struct {
+    LONGLONG QuadPart;
+} LARGE_INTEGER;
+static void QueryPerformanceCounter(LARGE_INTEGER* t) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    t->QuadPart = (LONGLONG)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+static void QueryPerformanceFrequency(LARGE_INTEGER* f) { f->QuadPart = 1000000000; }
+#endif
 
 #include "gx_device.h"
 #include "host_settings.h"
@@ -576,6 +591,15 @@ void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 36
 void gxb_init(void) {
     const char* v = getenv("RECOMP_GPU");
     win_create();
+#ifdef __ANDROID__
+    /* Vulkan alone: there is no OpenGL ES device. */
+    (void)v;
+    sDev = &g_vk_device;
+    if (!sDev->init()) {
+        fprintf(stderr, "gpu: no Vulkan 1.3 with what the game needs\n");
+        exit(1);
+    }
+#else
     if (v && *v) sDev = strcmp(v, "vulkan") == 0 ? &g_vk_device : &g_gl_device;
     else sDev = g_settings.renderer == RENDERER_VULKAN ? &g_vk_device : &g_gl_device;
     if (!sDev->init()) {
@@ -587,6 +611,7 @@ void gxb_init(void) {
             exit(1);
         }
     }
+#endif
     g_host_frame_due = frame_due;
     g_host_frame_render = frame_render;
 }
@@ -594,7 +619,14 @@ void gxb_init(void) {
 int gx_wanted_scale(int h) {
     const char* v = getenv("RECOMP_GX_SCALE");
     int s = v && atoi(v) > 0 ? atoi(v) : g_settings.scale;
-    if (!s) s = (int)ceil(h / 456.0 - 0.25);
+    if (!s) {
+        s = (int)ceil(h / 456.0 - 0.25);
+#ifdef __ANDROID__
+        /* A phone's screen is small enough that more doesn't show, and
+         * its GPU and battery pay for every pixel. */
+        if (s > 2) s = 2;
+#endif
+    }
     return s < 1 ? 1 : s > 8 ? 8 : s;
 }
 
@@ -627,20 +659,44 @@ void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int 
     GL_LEAVE(GLK_DRAW);
 }
 
-uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+int gxb_arena(void) { return sDev->arena_alloc != NULL; }
+
+int gxb_arena_alloc(int n) {
+    int r;
+    GL_ENTER();
+    r = sDev->arena_alloc(n);
+    GL_LEAVE(GLK_DRAW);
+    return r;
+}
+
+void gxb_arena_write(int first, const GXVertex* v, int n) {
+    GL_ENTER();
+    sDev->arena_write(first, v, n);
+    GL_LEAVE(GLK_DRAW);
+}
+
+void gxb_arena_free(int first, int n) {
+    GL_ENTER();
+    sDev->arena_free(first, n);
+    GL_LEAVE(GLK_DRAW);
+}
+
+uint32_t gxb_texture(uint64_t key, int pix, int width, int height, int levels, const uint8_t* pixels, uint32_t mode0) {
     uint32_t r;
     GL_ENTER();
     (void)key;
-    r = sDev->texture(width, height, levels, rgba, mode0);
+    r = sDev->texture(pix, width, height, levels, pixels, mode0);
     GL_LEAVE(GLK_TEXTURE);
     return r;
 }
 
-void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
+void gxb_texture_update(uint32_t handle, int pix, int width, int height, int levels, const uint8_t* pixels) {
     GL_ENTER();
-    sDev->texture_update(handle, width, height, levels, rgba);
+    sDev->texture_update(handle, pix, width, height, levels, pixels);
     GL_LEAVE(GLK_TEXTURE_UPDATE);
 }
+
+unsigned gxb_texture_pixels(void) { return sDev->texture_pixels ? sDev->texture_pixels() : 0; }
 
 void gxb_texture_free(uint32_t handle) {
     if (sPendingFreeCount == MAX_PENDING_FREES) {
@@ -704,6 +760,12 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
 
 void gxb_present(int x, int y, int cw, int ch) {
     sGameFrames++;
+#ifdef __ANDROID__
+    {
+        void android_frame_done(void); /* window_android.c: the CPU's clocks kept up */
+        android_frame_done();
+    }
+#endif
     if (sRecording) {
         RecOp* r = rec_op(OP_PRESENT);
         r->a[0] = x;

@@ -129,7 +129,7 @@ static void write_all(void) {
         {"[left]", HOST_PAD_SCREEN_LEFT}, {"[right]", HOST_PAD_SCREEN_RIGHT},
     };
     char shake[64], one[24], two[24];
-    /* The generation's low bit: the controller was used last (prompts_win32.c). */
+    /* The generation's low bit: the controller was used last (prompts.c). */
     int pad = g_host_prompt_generation ? (int)(g_host_prompt_generation() & 1) : 0, i;
     uint32_t at = sBase, end = sBase + TEXT_SIZE;
     button_name(HOST_PAD_SHAKE, one, sizeof(one));

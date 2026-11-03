@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher icon's front layer: a leaf and a sparkle, inside the
+     middle 66 of 108 that every launcher's mask keeps. Also the themed
+     (monochrome) icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#2E7D32" android:fillAlpha="0.25"
+        android:pathData="M41,76C37,56 51,40 75,40C75,62 61,76 41,76z" />
+    <path android:fillColor="#9BE15D" android:pathData="M38,73C34,53 48,37 72,37C72,59 58,73 38,73z" />
+    <path android:fillColor="#C8F59A" android:pathData="M42,66C42,52 52,43 66,41C58,46 48,54 42,66z" />
+    <path android:strokeColor="#2E7D32" android:strokeWidth="2.2" android:strokeLineCap="round"
+        android:pathData="M33,78L40,71M40,71C48,61 56,52 66,43M50,59l-1,-7M56,52l7,1" />
+    <path android:fillColor="#FFD83B" android:strokeColor="#E0A800" android:strokeWidth="0.8"
+        android:pathData="M72,62Q73,69 80,70Q73,71 72,78Q71,71 64,70Q71,69 72,62z" />
+    <path android:fillColor="#FFF4B0" android:pathData="M62,30Q62.5,33 66,33.5Q62.5,34 62,37Q61.5,34 58,33.5Q61.5,33 62,30z" />
+</vector>

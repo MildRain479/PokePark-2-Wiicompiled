@@ -1004,11 +1004,13 @@ static void upload_levels(int fresh, int width, int height, int levels, const ui
  * minification filters (mipmap: none, nearest or linear), and LOD bias.
  * Anisotropic filtering, as the setting says, on what is filtered
  * linearly. */
-static uint32_t gl_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+/* Textures are RGBA8 alone here (no texture_pixels). */
+static uint32_t gl_texture(int pix, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
     static const GLenum kMin[2][3] = {{GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR},
                                       {GL_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR}};
     int mip = (mode0 >> 5) & 3, min_linear = (mode0 >> 7) & 1;
     GLuint t;
+    (void)pix;
     gl_forget();
     if (mip > 2) mip = 2;
     if (levels <= 1) mip = 0;
@@ -1027,7 +1029,8 @@ static uint32_t gl_texture(int width, int height, int levels, const uint8_t* rgb
     return t;
 }
 
-static void gl_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
+static void gl_texture_update(uint32_t handle, int pix, int width, int height, int levels, const uint8_t* rgba) {
+    (void)pix;
     gl_forget();
     glBindTexture(GL_TEXTURE_2D, handle);
     upload_levels(0, width, height, levels, rgba);

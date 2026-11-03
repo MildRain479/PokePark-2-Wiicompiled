@@ -157,7 +157,7 @@ game reads them; `RECOMP_TILT_FLIP=lr`, `fb` or `lrfb` and
 expect them the other way. The pointer is calibrated against the game's
 own (KPAD's) pointer position.
 
-**Button prompts** (`hle_prompts.c`, `boot/prompts_win32.c`): the game's
+**Button prompts** (`hle_prompts.c`, `boot/prompts.c`): the game's
 text shows Wii Remote buttons as glyphs of its font (U+E040 + n: the
 d-pad, A, B, HOME, +, -, 1, 2). Those glyphs are redrawn in the font as
 icons of what is bound to each button, on the keyboard and mouse or the
@@ -174,8 +174,8 @@ in the window captures it again (that click isn't a dash). The mouse
 turns the player camera (moving it down looks down on Pikachu);
 cutscene and dialogue cameras are the game's. Rumble goes to the controller.
 
-**Settings** (`recomp/boot/menu_win32.c`) are changed in Options in the
-pause menu (`options_win32.c`). Builds other than public ones
+**Settings** (`recomp/boot/settings.c`) are changed in Options in the
+pause menu (`options.c`). Builds other than public ones
 (`build.py --public`) also have a plain settings menu for testing:
 Backspace, or Back+Start on a controller, opens it over the game, which
 keeps running but gets no input. It has:
@@ -269,7 +269,8 @@ Diagnostics:
   messages about errors and misuse as each call makes them.
 - `RECOMP_GPU=vulkan` or `opengl` draws with that, over the Renderer
   setting; `RECOMP_VK_VALIDATE=1` turns on the Vulkan validation layers
-  (from the Vulkan SDK) and prints what they find.
+  (from the Vulkan SDK) and prints what they find; `RECOMP_VK_GENERAL=1`
+  draws with only the general TEV shader, none made for a setup.
 - `RECOMP_MINIDUMP=<file>` writes a minidump when the run ends on a
   host fault (`RECOMP_MINIDUMP_FULL=1`: with all memory), for a
   debugger. Host backtraces name the module and offset of each frame,
@@ -385,8 +386,14 @@ runs unchanged.
     nothing; its XF and TEV state go into the frame's data buffer, only
     when they changed, and the shaders read them where the push
     constants say.
-  - Pipelines differ only in blending and color mask; depth, culling,
-    viewport and scissor are set per draw.
+  - Pipelines differ in blending, color mask and whether there is an
+    alpha test; depth, culling, viewport and scissor are set per draw.
+  - TEV's shader is general, but each TEV setup also gets a pipeline of
+    its own, the shader specialized for it (its stages and choices as
+    specialization constants, so the driver leaves out the rest). They
+    are made on a thread of their own while the general one draws, and
+    kept in `vk_pipelines.bin` beside `settings.ini` for the next start.
+    On a phone the general shader took 5 times the GPU time.
   - Two frames are in flight. The recorded frame's vertices are written
     straight into video memory where the CPU can write it (resizable
     BAR), else copied there.
@@ -401,16 +408,75 @@ Not implemented yet:
 - lines and points;
 - copy pixel formats (copies keep RGBA).
 
+## Android
+
+```
+python tools/recomp/build.py --android            # build/recomp/android/PokePark.apk
+python tools/recomp/build.py --android --install  # ...and install it with adb
+```
+
+The same recompiled game, built for arm64 phones with the NDK's clang
+(NDK r30 and the SDK's build tools; no Gradle) and packaged as a
+NativeActivity with one small Java class (`recomp/android/java`), which
+asks for the disc image (`recomp/android/AndroidManifest.xml`). It needs
+Android 11 and a GPU with Vulkan 1.3. The build also needs Rust (cargo and
+rustup): it fetches [nod](https://github.com/encounter/nod) at a pinned
+commit into `build/recomp/nod` and builds its C library for arm64 once.
+
+The game is the player's own. On first start the app asks for it, a disc
+image (RVZ, ISO, WBFS, CISO, WIA, ...) chosen with Android's file picker,
+and plays straight from it: nod reads the data partition, decrypted and
+decompressed, at the offsets the game's DVD reads ask for
+(`boot/disc_image_android.c`, `hle_dvd_init_image`), and main.dol comes
+from the partition's header, so nothing is extracted. The app keeps
+permission to read the file and remembers it; if it is moved, the app asks
+again. nod's license and its libraries' are in
+`recomp/assets/nod_license.txt`, also in the APK (`assets/licenses`).
+
+An extracted game, as for Windows, in the app's folder on shared storage
+is used instead when it is there:
+
+```
+adb push orig/R8AE01/sys /sdcard/Android/data/io.github.pokeparkrecomp/files/R8AE01/sys
+adb push orig/R8AE01/disc /sdcard/Android/data/io.github.pokeparkrecomp/files/R8AE01/disc
+```
+
+(or `R8AE01/disc/sys/main.dol`, as dtk extracts a disc). Saves go in
+`R8AE01/nand` beside it, settings in the app's private files. Output goes
+to logcat (`adb logcat -s PokePark`). From a disc image the saves go in
+the same place.
+
+What is different from Windows:
+- **Platform layer:** `gpu/window_android.c` (the activity, the window,
+  the game's thread), `boot/disc_image_android.c` (the disc image), `boot/input_android.c`, `boot/audio_android.c`
+  (AAudio) and `boot/font_android.c` (the system font, drawn by
+  android.graphics through JNI). Threads are fibers of the recompiler's
+  own (a stack each and a small assembly switch, `hle_thread.c`), as
+  Android has no ucontext.
+- **Vulkan only**, so there is no Renderer setting; the game always fills
+  the screen, so there is no Fullscreen setting; and there is no keyboard,
+  so no Keyboard section in Options.
+- **Controls:** a controller, bound in Options as on Windows, or controls
+  on the touch screen, drawn over the game while it was touched last: a
+  stick on the left, 2, 1, A, B, Shake and Shake 2 on the right, - and +
+  at the top left (no HOME); dragging elsewhere turns the camera. A tap on the Pad's Options tab, or the save file screen's
+  Options button (or -, there), opens Options, which taps then work; a
+  tap off the book closes it. Touch controls (first in Controller) off
+  never shows them, for a controller alone; taps still work Options.
+- **In the background** the game stops, and the time base with it, so it
+  carries on where it was.
+- Not yet: rumble, the debug settings menu, the RECOMP_* environment
+  variables (Android has no way to set them), the crash reports and
+  watchdog of `boot.c`.
+
 ## Not done yet
 
 - **Input extras.** No pointer (IR) and no Nunchuk; PokePark is played
-  sideways, so neither is needed for the main game. Only Windows input
-  so far. Analog movement would need a game-side change, since the game
-  reads the d-pad.
+  sideways, so neither is needed for the main game. Analog movement
+  would need a game-side change, since the game reads the d-pad.
 - **Sound extras.** The aux buses that feed reverb and other effects
   (AXFX), volume ramps, polyphase resampling (linear is used for all
-  voices), the biquad filter and the Wii Remote speaker. Only Windows
-  output so far.
+  voices), the biquad filter and the Wii Remote speaker.
 - **Graphics features.** See the list above.
 - **`setjmp`/`longjmp`.** Not supported across recompiled frames.
 - **FPU fidelity.**

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Android app: a NativeActivity running libpokepark.so (window_android.c),
+     with a little Java of its own to ask for the disc image (java/.../PokeParkActivity.java).
+     Built by tools/recomp/build.py (its android option). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.pokeparkrecomp"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="34" />
+
+    <!-- Vulkan 1.3 draws; nothing else can. -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <application
+        android:label="PokePark"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:isGame="true"
+        android:appCategory="game"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name=".PokeParkActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <meta-data android:name="android.app.lib_name" android:value="pokepark" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

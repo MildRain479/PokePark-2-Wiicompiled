@@ -55,6 +55,10 @@ typedef struct GXDrawState {
     float viewport[6];     /* x, y, width, height, near, far in EFB pixels */
     int scissor[4];        /* x0, y0, x1, y1 */
     int efb_alpha;         /* the EFB pixel format has an alpha channel (RGBA6_Z24) */
+    /* The matrix indices the vertices carry (bit 0 the position's, bit 1
+     * texture coordinates'); the rest are XF's MATINDEX registers' alike
+     * for every vertex. */
+    int mtx_per_vertex;
     const uint32_t* xf;    /* GX_XF_WORDS words, laid out as above */
     int xf_dirty_lo, xf_dirty_hi; /* words changed since the last draw (lo >= hi: none) */
     /* What the batch draws, the same from frame to frame (its display
@@ -62,14 +66,24 @@ typedef struct GXDrawState {
     uint64_t key;
 } GXDrawState;
 
+/* How a texture's pixels are laid out: RGBA8 (gx_decode_texture's), or
+ * one of the smaller layouts that hold some formats exactly, read as
+ * RGBA all the same (gx_decode_texture_pix's): GX_PIX_I8, an intensity
+ * byte a texel, read as (I, I, I, I); GX_PIX_IA8, intensity and alpha
+ * bytes, read as (I, I, I, A); GX_PIX_BC1, 4x4 texel blocks of 8 bytes,
+ * opaque. The GPU reads a smaller one in less time. */
+enum { GX_PIX_RGBA8, GX_PIX_I8, GX_PIX_IA8, GX_PIX_BC1 };
+
 /* Backend interface. */
 void gxb_init(void);
 /* A texture of levels mipmap levels, each half the last's size (at least
- * 1), one after another in rgba; sampled as TX_SETMODE0 mode0 says (wrap,
- * filtering, LOD bias). */
-uint32_t gxb_texture(uint64_t key, int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
-/* Replaces a texture's contents (same size and levels). */
-void gxb_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba);
+ * 1), one after another in pixels, laid out as pix says; sampled as
+ * TX_SETMODE0 mode0 says (wrap, filtering, LOD bias). */
+uint32_t gxb_texture(uint64_t key, int pix, int width, int height, int levels, const uint8_t* pixels, uint32_t mode0);
+/* Replaces a texture's contents (same layout, size and levels). */
+void gxb_texture_update(uint32_t handle, int pix, int width, int height, int levels, const uint8_t* pixels);
+/* The layouts textures may have besides RGBA8, a bit (1 << pix) each. */
+unsigned gxb_texture_pixels(void);
 /* Changes when textures should be made again (the filtering setting
  * changed). */
 int gxb_texture_generation(void);
@@ -84,6 +98,16 @@ void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vert
  * frame is presented. Asked at the start of each frame. */
 int gxb_recording(void);
 void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count);
+/* The vertex arena, where the device has one (gxb_arena): vertices kept
+ * in video memory from frame to frame. Draws and frame data given no
+ * vertices (v NULL) index it from its start. A span is allocated (its
+ * first vertex returned), written, and freed; once freed, it may be used
+ * again as soon as the GPU no longer draws from it, so it is freed only
+ * when no recorded frame draws from it either. */
+int gxb_arena(void);
+int gxb_arena_alloc(int n);
+void gxb_arena_write(int first, const GXVertex* v, int n);
+void gxb_arena_free(int first, int n);
 void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
 /* Copies an EFB rectangle to a texture, converted to copy format `fmt`
  * (exec bits 3-6) and stored as the game reads it back: an I8 copy as
@@ -96,6 +120,13 @@ void gxb_present(int x, int y, int w, int h);
 int gx_texture_size(int fmt, int width, int height);
 void gx_decode_texture(uint8_t* out, const uint8_t* src, int fmt, int width, int height,
                        const uint8_t* tlut, int tlut_fmt);
+/* The smallest of the layouts in `allowed` (bits, 1 << GX_PIX_...) that
+ * holds the texture at src (levels of them) exactly; GX_PIX_RGBA8 if none. */
+int gx_texture_pix(int fmt, const uint8_t* src, int width, int height, int levels, unsigned allowed);
+/* A level's size in layout pix, and the level decoded to it (pix not RGBA8,
+ * and one gx_texture_pix gives for the format). */
+size_t gx_pix_size(int pix, int width, int height);
+void gx_decode_texture_pix(uint8_t* out, const uint8_t* src, int fmt, int width, int height, int pix);
 
 /* FIFO entry points (gx_fifo.c). */
 void gx_init(void);

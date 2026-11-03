@@ -18,9 +18,12 @@
  *   state go into the frame's data buffer, written only when they differ
  *   from the last draw's; the shaders read them at the offsets the push
  *   constants give.
- * - Pipelines differ only in blending and color mask (made the first time
- *   each is needed); depth, culling, viewport and scissor are set per
- *   draw.
+ * - Pipelines differ in blending, color mask and whether there is an
+ *   alpha test (made the first time each is needed); depth, culling,
+ *   viewport and scissor are set per draw. Each TEV setup also gets a
+ *   pipeline of its own (gx.frag specialized for it), made on a thread of
+ *   its own while the general one draws; they are kept on disk
+ *   (vk_pipelines.bin, beside settings.ini) for the next start.
  * - The EFB is kept with its top row first, as GX has it: the viewport is
  *   flipped, so copies and presenting read it as it is.
  * - Two frames are in flight. Uploads (textures, the recorded frame's
@@ -29,7 +32,8 @@
  *   changed in the frame's own commands instead, in order.
  *
  * Environment:
- *   RECOMP_VK_VALIDATE=1       the validation layers (Vulkan SDK), printing what they find */
+ *   RECOMP_VK_VALIDATE=1       the validation layers (Vulkan SDK), printing what they find
+ *   RECOMP_VK_GENERAL=1        only the general TEV shader, none made for a setup */
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -48,10 +52,21 @@ const GXDevice g_vk_device = {"Vulkan", vk_unavailable};
 
 #else
 
+#define VK_NO_PROTOTYPES
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR
+#define SURFACE_EXTENSION VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+#define SURFACE_FUNCS(X) X(vkCreateWin32SurfaceKHR)
+#else
+#include <dlfcn.h>
+#include <pthread.h>
+#include <android/native_window.h>
+#define VK_USE_PLATFORM_ANDROID_KHR
+#define SURFACE_EXTENSION VK_KHR_ANDROID_SURFACE_EXTENSION_NAME
+#define SURFACE_FUNCS(X) X(vkCreateAndroidSurfaceKHR)
+#endif
 #include <vulkan/vulkan.h>
 
 #include "host_settings.h"
@@ -70,10 +85,11 @@ const GXDevice g_vk_device = {"Vulkan", vk_unavailable};
     X(vkGetPhysicalDeviceProperties)             \
     X(vkGetPhysicalDeviceFeatures2)              \
     X(vkGetPhysicalDeviceQueueFamilyProperties)  \
-    X(vkGetPhysicalDeviceMemoryProperties)       \
+    X(vkGetPhysicalDeviceMemoryProperties)           X(vkEnumerateDeviceExtensionProperties)      \
     X(vkCreateDevice)                            \
     X(vkGetDeviceProcAddr)                       \
-    X(vkCreateWin32SurfaceKHR)                   \
+    SURFACE_FUNCS(X)                             \
+    X(vkDestroySurfaceKHR)                       \
     X(vkGetPhysicalDeviceSurfaceSupportKHR)      \
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR)      \
@@ -118,7 +134,7 @@ const GXDevice g_vk_device = {"Vulkan", vk_unavailable};
     X(vkAllocateDescriptorSets)         \
     X(vkUpdateDescriptorSets)           \
     X(vkCreateShaderModule)             \
-    X(vkCreateGraphicsPipelines)        \
+    X(vkCreateGraphicsPipelines)            X(vkCreatePipelineCache)                X(vkGetPipelineCacheData)           \
     X(vkCmdBeginRendering)              \
     X(vkCmdEndRendering)                \
     X(vkCmdBindPipeline)                \
@@ -137,7 +153,7 @@ const GXDevice g_vk_device = {"Vulkan", vk_unavailable};
     X(vkCmdSetDepthCompareOp)           \
     X(vkCmdPipelineBarrier2)            \
     X(vkCmdCopyBufferToImage)           \
-    X(vkCmdCopyBuffer)                  \
+    X(vkCmdCopyBuffer)                      X(vkCreateQueryPool)                    X(vkCmdResetQueryPool)                  X(vkCmdWriteTimestamp)                  X(vkGetQueryPoolResults)            \
     X(vkCmdBlitImage)                   \
     X(vkCmdCopyImageToBuffer)           \
     X(vkCmdClearColorImage)             \
@@ -158,7 +174,11 @@ static uint32_t sQueueFamily;
 static VkSurfaceKHR sSurface;
 static VkPhysicalDeviceMemoryProperties sMemProps;
 static VkPhysicalDeviceLimits sLimits;
-
+/* With RECOMP_FPS=1, the GPU's time for each frame, from timestamps at
+ * the start and end of its batch (two queries a slot). */
+static VkQueryPool sTimes;
+static double sTimeTotal, sTimeWorst;
+static unsigned sTimeFrames, sTimeSlow;
 #define CHECK(call)                                                                                 \
     do {                                                                                            \
         VkResult r_ = (call);                                                                       \
@@ -384,7 +404,9 @@ static void drop_buffer(Buffer* b) {
     memset(b, 0, sizeof(*b));
 }
 
-static Image make_image(int w, int h, int levels, VkFormat fmt, VkImageUsageFlags usage, VkSampleCountFlagBits samples) {
+/* An image whose view reads its channels as map says. */
+static Image make_image_mapped(int w, int h, int levels, VkFormat fmt, VkImageUsageFlags usage,
+                               VkSampleCountFlagBits samples, VkComponentMapping map) {
     Image im;
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -409,6 +431,7 @@ static Image make_image(int w, int h, int levels, VkFormat fmt, VkImageUsageFlag
     vi.image = im.img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = fmt;
+    vi.components = map;
     vi.subresourceRange.aspectMask = im.aspect;
     vi.subresourceRange.levelCount = (uint32_t)levels;
     vi.subresourceRange.layerCount = 1;
@@ -419,6 +442,12 @@ static Image make_image(int w, int h, int levels, VkFormat fmt, VkImageUsageFlag
     im.h = (int)ci.extent.height;
     im.levels = levels;
     return im;
+}
+
+static Image make_image(int w, int h, int levels, VkFormat fmt, VkImageUsageFlags usage, VkSampleCountFlagBits samples) {
+    VkComponentMapping same = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    return make_image_mapped(w, h, levels, fmt, usage, samples, same);
 }
 
 static void drop_image(Image* im) {
@@ -474,6 +503,7 @@ enum { TEX_WHITE, TEX_EFB, TEX_MENU, TEX_FIRST };
 
 typedef struct Tex {
     Image im;
+    int pix; /* the layout of its pixels (GX_PIX_...) */
     VkSampler sampler;
     uint64_t used; /* the frame that last drew with it */
 } Tex;
@@ -520,6 +550,7 @@ static struct {
 } sSamplers[256];
 static int sSamplerCount;
 static float sMaxAniso;
+static VkBool32 sBc; /* whether BC1 textures can be made (vk_texture_pixels) */
 
 static VkSamplerAddressMode wrap_mode(int w) {
     return w == 0 ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
@@ -569,11 +600,19 @@ static VkSampler sLinearClamp;
 /* ------------------------------------------------------------------------ */
 /* Frames in flight */
 
+/* On Android two frames are let be in flight, not one: with one, the CPU
+ * and GPU took turns, the GPU never looked busy enough for its clock to be
+ * raised, and the game's thread waited for it a fifth of the time at 120
+ * fps (90 fps where 120 now holds, on an Adreno 830). */
+#ifdef __ANDROID__
+#define SLOTS 3
+#else
 #define SLOTS 2
+#endif
 #define STAGING_SIZE ((VkDeviceSize)4 << 20)
 typedef struct Slot {
     VkCommandPool pool;
-    VkCommandBuffer up, cb; /* uploads, then the frame */
+    VkCommandBuffer up, cb, out; /* uploads, then the frame, then its copy to the swapchain's image */
     VkFence fence;
     VkSemaphore acquired;
     uint64_t serial; /* the frame last submitted from here */
@@ -608,36 +647,69 @@ static void forget(void) {
     sCmd.cull = sCmd.dtest = sCmd.dwrite = sCmd.dfunc = -1;
 }
 
+/* The XF state as the vertex shader reads it (gx.vert): memory 0x000-0x0FF,
+ * 0x400-0x47F, 0x500-0x67F, the registers, then the texture coordinates'
+ * setup as texgen_program makes it. */
+#define XF_PACKED (0x360 + 8 + 8 * 12)
+/* The TEV state as the fragment shader reads it (gx.frag). */
+#define TEV_WORDS (56 + 24 * 16)
+/* Where uniform buffers may start (the device's limit). */
+static VkDeviceSize sUboAlign = 256;
+
+/* The frame's data buffer, as the shaders read it: whole, and from each
+ * draw's XF and TEV states on, as uniform buffers: the shaders read those
+ * for every vertex and pixel, which a phone's GPU does far faster from a
+ * uniform buffer (kept in its constant registers) than from a storage one. */
 static void data_set(void) {
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    VkDescriptorBufferInfo bi;
-    VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    VkDescriptorBufferInfo bi, ui, ti;
+    VkWriteDescriptorSet w[3] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET},
+                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
     ai.descriptorPool = sPool;
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &sDataLayout;
     CHECK(vkAllocateDescriptorSets(sDev, &ai, &S->set));
-    bi.buffer = S->data.buf;
-    bi.offset = 0;
+    bi.buffer = ui.buffer = ti.buffer = S->data.buf;
+    bi.offset = ui.offset = ti.offset = 0;
     bi.range = VK_WHOLE_SIZE;
-    w.dstSet = S->set;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w.pBufferInfo = &bi;
-    vkUpdateDescriptorSets(sDev, 1, &w, 0, NULL);
-}
-
-static void bind_sets(void) {
-    VkDescriptorSet sets[2];
-    sets[0] = sTexSet;
-    sets[1] = S->set;
-    vkCmdBindDescriptorSets(S->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sLayout, 0, 2, sets, 0, NULL);
+    ui.range = XF_PACKED * 4;
+    ti.range = TEV_WORDS * 4;
+    w[0].dstSet = w[1].dstSet = w[2].dstSet = S->set;
+    w[0].descriptorCount = w[1].descriptorCount = w[2].descriptorCount = 1;
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[0].pBufferInfo = &bi;
+    w[1].dstBinding = 1;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    w[1].pBufferInfo = &ui;
+    w[2].dstBinding = 2;
+    w[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    w[2].pBufferInfo = &ti;
+    vkUpdateDescriptorSets(sDev, 3, w, 0, NULL);
 }
 
 static int64_t sXfAt = -1, sTevAt = -1; /* where the last draw's XF and TEV state were written, in words */
+static VkDeviceSize sBound[2]; /* the XF and TEV states' offsets the data set is bound with, in bytes */
+
+static void bind_sets(void) {
+    VkDescriptorSet sets[2];
+    uint32_t off[2] = {(uint32_t)sBound[0], (uint32_t)sBound[1]};
+    sets[0] = sTexSet;
+    sets[1] = S->set;
+    vkCmdBindDescriptorSets(S->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sLayout, 0, 2, sets, 2, off);
+}
+
+/* The data set bound with the XF and TEV states at byte offsets xf and tev. */
+static void bind_data(VkDeviceSize xf, VkDeviceSize tev) {
+    uint32_t o[2] = {(uint32_t)xf, (uint32_t)tev};
+    if (xf == sBound[0] && tev == sBound[1]) return;
+    sBound[0] = xf;
+    sBound[1] = tev;
+    vkCmdBindDescriptorSets(S->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sLayout, 1, 1, &S->set, 2, o);
+}
 
 static void* ring(int which, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* off) {
     static const VkBufferUsageFlags kUsage[4] = {
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
     Buffer* b = which == RING_DATA ? &S->data : which == RING_VERTS ? &S->verts : which == RING_IDX ? &S->idx : &S->staging;
     VkDeviceSize* used = which == RING_DATA     ? &S->data_used
@@ -656,6 +728,7 @@ static void* ring(int which, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSiz
         at = 0;
         if (which == RING_DATA) {
             data_set();
+            sBound[0] = sBound[1] = 0;
             bind_sets();
             sXfAt = sTevAt = -1;
         } else if (which == RING_VERTS) sCmd.vb = VK_NULL_HANDLE;
@@ -690,7 +763,8 @@ static void* staging(VkDeviceSize bytes, VkBuffer* buf, VkDeviceSize* off) {
 /* ------------------------------------------------------------------------ */
 /* Pipelines */
 
-static VkShaderModule sGxVert, sGxFrag, sQuadVert, sFillFrag, sCopyFrag, sBlitFrag;
+/* gx.vert and gx.frag by TEX_IO. */
+static VkShaderModule sGxVert[9], sGxFrag[9], sQuadVert, sFillFrag, sCopyFrag, sBlitFrag;
 static VkPipelineCache sCache = VK_NULL_HANDLE;
 
 enum { PK_GX, PK_FILL, PK_COPY, PK_BLIT };
@@ -703,6 +777,19 @@ typedef struct Pipe {
 } Pipe;
 static Pipe* sPipes;
 static int sPipeCount, sPipeCap;
+
+/* A TEV setup as gx.frag's SPEC_ constants: stages, swap tables, then
+ * three words a stage (spec_words). */
+#define SPEC_WORDS (2 + 3 * 16)
+/* A transform setup as gx.vert's VS_ constants (vs_words): whether it is
+ * one, the four lighting channel controls, which matrix indices the
+ * vertices carry and whether texgen_program's setup holds; then the
+ * texture coordinates passed to gx.frag (its and gx.vert's TEX_IO, of
+ * the shaders' builds). */
+#define VS_WORDS 8
+#define VS_TEX_IO 7
+#define VS_CONST 64 /* gx.vert's first */
+static volatile int sCacheDirty; /* pipelines made since vk_pipelines.bin was written */
 
 /* The push constants of quads (clears, copies, presenting). */
 typedef struct Quad {
@@ -725,12 +812,14 @@ static VkShaderModule shader(const uint32_t* code, size_t bytes) {
 /* GX keys: color mask (bits 0-3, R G B A), blending (4), source and
  * destination factors (5-9, 10-14), reverse subtract (15). Fill keys:
  * the color mask. Blit keys: blending (alpha over). */
-static VkPipeline pipeline(int kind, uint32_t key) {
+/* Makes a pipeline; spec, for PK_GX, a TEV setup's words (spec_words),
+ * or NULL for the general shader. Called on the pipeline thread too. */
+static VkPipeline make_pipeline(int kind, uint32_t key, int samples, const uint32_t* spec, const uint32_t* vs) {
     static const VkDynamicState kDynamic[] = {
         VK_DYNAMIC_STATE_VIEWPORT,          VK_DYNAMIC_STATE_SCISSOR,           VK_DYNAMIC_STATE_CULL_MODE,
         VK_DYNAMIC_STATE_FRONT_FACE,        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
         VK_DYNAMIC_STATE_DEPTH_COMPARE_OP};
-    int samples = kind == PK_GX || kind == PK_FILL ? sMsaa : 1, i;
+    int i;
     VkPipelineShaderStageCreateInfo st[2];
     VkVertexInputBindingDescription bind;
     VkVertexInputAttributeDescription attr[11];
@@ -746,9 +835,25 @@ static VkPipeline pipeline(int kind, uint32_t key) {
     VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     VkFormat color = VK_FORMAT_R8G8B8A8_UNORM;
-    Pipe* p;
-    for (i = 0; i < sPipeCount; i++) {
-        if (sPipes[i].kind == kind && sPipes[i].key == key && sPipes[i].samples == samples) return sPipes[i].p;
+    /* gx.frag's constants: ALPHA_TEST, then the setup's (SPEC_STAGES on). */
+    uint32_t consts[1 + SPEC_WORDS];
+    VkSpecializationMapEntry entries[1 + SPEC_WORDS];
+    VkSpecializationInfo si = {1, entries, sizeof(uint32_t), consts};
+    VkSpecializationMapEntry ventries[VS_WORDS];
+    VkSpecializationInfo vsi = {VS_TEX_IO, ventries, VS_TEX_IO * sizeof(uint32_t), vs};
+    /* All the coordinates for the general shaders. */
+    int io = spec && vs ? (int)vs[VS_TEX_IO] : 8;
+    VkPipeline out;
+    consts[0] = !(key & (1u << 16));
+    if (spec) {
+        memcpy(consts + 1, spec, SPEC_WORDS * sizeof(uint32_t));
+        si.mapEntryCount = 3 + 3 * spec[0];
+        si.dataSize = si.mapEntryCount * sizeof(uint32_t);
+    }
+    for (i = 0; i < (int)si.mapEntryCount; i++) {
+        entries[i].constantID = (uint32_t)i;
+        entries[i].offset = (uint32_t)(i * sizeof(uint32_t));
+        entries[i].size = sizeof(uint32_t);
     }
     memset(st, 0, sizeof(st));
     for (i = 0; i < 2; i++) {
@@ -757,9 +862,18 @@ static VkPipeline pipeline(int kind, uint32_t key) {
     }
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    st[0].module = kind == PK_GX ? sGxVert : sQuadVert;
-    st[1].module = kind == PK_GX ? sGxFrag : kind == PK_FILL ? sFillFrag : kind == PK_COPY ? sCopyFrag : sBlitFrag;
+    st[0].module = kind == PK_GX ? sGxVert[io] : sQuadVert;
+    st[1].module = kind == PK_GX ? sGxFrag[io] : kind == PK_FILL ? sFillFrag : kind == PK_COPY ? sCopyFrag : sBlitFrag;
     if (kind == PK_GX) {
+        st[1].pSpecializationInfo = &si;
+        if (vs) {
+            for (i = 0; i < VS_TEX_IO; i++) {
+                ventries[i].constantID = (uint32_t)(VS_CONST + i);
+                ventries[i].offset = (uint32_t)(i * sizeof(uint32_t));
+                ventries[i].size = sizeof(uint32_t);
+            }
+            st[0].pSpecializationInfo = &vsi;
+        }
         bind.binding = 0;
         bind.stride = sizeof(GXVertex);
         bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
@@ -822,6 +936,16 @@ static VkPipeline pipeline(int kind, uint32_t key) {
     ci.pColorBlendState = &cb;
     ci.pDynamicState = &dyn;
     ci.layout = sLayout;
+    CHECK(vkCreateGraphicsPipelines(sDev, sCache, 1, &ci, NULL, &out));
+    return out;
+}
+
+static VkPipeline pipeline(int kind, uint32_t key) {
+    int samples = kind == PK_GX || kind == PK_FILL ? sMsaa : 1, i;
+    Pipe* p;
+    for (i = 0; i < sPipeCount; i++) {
+        if (sPipes[i].kind == kind && sPipes[i].key == key && sPipes[i].samples == samples) return sPipes[i].p;
+    }
     if (sPipeCount == sPipeCap) {
         sPipeCap = sPipeCap ? sPipeCap * 2 : 64;
         sPipes = (Pipe*)realloc(sPipes, (size_t)sPipeCap * sizeof(Pipe));
@@ -830,7 +954,8 @@ static VkPipeline pipeline(int kind, uint32_t key) {
     p->kind = kind;
     p->key = key;
     p->samples = samples;
-    CHECK(vkCreateGraphicsPipelines(sDev, sCache, 1, &ci, NULL, &p->p));
+    p->p = make_pipeline(kind, key, samples, NULL, NULL);
+    sCacheDirty = 1;
     return p->p;
 }
 
@@ -908,17 +1033,46 @@ static int sScale, sRendering;
 #define VX(x) ((int)floor((x) * sScaleX + 0.5))
 #define VY(y) ((int)floor((y) * sScaleY + 0.5))
 
-static void begin_efb(void) {
+/* Clears not made yet (vk_clear): made as the next drawing starts, as its
+ * tiles are set up, rather than drawn or loaded from memory and drawn over
+ * (with anti-aliasing several times the picture's size to read); and on
+ * the resolved picture alone (efb_settle) for a copy or presenting before
+ * that. */
+static int sClearColor, sClearDepth;
+static VkClearColorValue sClearColorTo;
+static float sClearDepthTo;
+static int sClearShown; /* sEfb shows the color clear */
+
+/* Whether the drawing has the depth buffer: a drawing started after a copy
+ * leaves it in memory, untouched, until a draw tests depth (most drawn
+ * there, as a rule, are the picture's 2D parts); reading it in costs as
+ * much as a fifth of the frame on a phone. Without VK_EXT_load_store_op_none
+ * it is always read in. */
+static int sDepthIn, sLoadNone;
+
+static void begin_pass(int depth_used) {
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingAttachmentInfo da = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
-    if (sRendering) return;
     if (sEfb.layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
         transition(S->cb, &sEfb, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    ca.imageLayout = da.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     ca.loadOp = da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     ca.storeOp = da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    if (sClearColor) {
+        ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ca.clearValue.color = sClearColorTo;
+    }
+    if (sClearDepth) {
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        da.clearValue.depthStencil.depth = sClearDepthTo;
+    } else if (!depth_used && sLoadNone) {
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_NONE_EXT;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+    }
+    sDepthIn = da.loadOp != VK_ATTACHMENT_LOAD_OP_NONE_EXT;
+    sClearColor = sClearDepth = sClearShown = 0;
     if (sMsaa > 1) {
         /* Resolved into sEfb as the drawing ends, for copies and presenting. */
         ca.imageView = sMsColor.view;
@@ -938,6 +1092,31 @@ static void begin_efb(void) {
     ri.pDepthAttachment = &da;
     vkCmdBeginRendering(S->cb, &ri);
     sRendering = 1;
+}
+
+static void end_efb(void);
+
+/* Draws to the EFB from here on, with its depth buffer if depth_used. */
+static void begin_efb(int depth_used) {
+    if (sRendering) {
+        if (!depth_used || sDepthIn) return;
+        end_efb(); /* and again, with it */
+    }
+    begin_pass(depth_used);
+}
+
+/* The resolved picture (sEfb) as the EFB is, with a color clear not made
+ * yet: for copying or presenting it. Outside drawing. */
+static void efb_settle(void) {
+    VkImageSubresourceRange r;
+    if (!sClearColor || sClearShown) return;
+    memset(&r, 0, sizeof(r));
+    r.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    r.levelCount = 1;
+    r.layerCount = 1;
+    transition(S->cb, &sEfb, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdClearColorImage(S->cb, sEfb.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &sClearColorTo, 1, &r);
+    sClearShown = 1;
 }
 
 static void end_efb(void) {
@@ -992,6 +1171,7 @@ static void alloc_efb(void) {
     VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     end_efb();
+    sClearColor = sClearDepth = 0;
     drop_image(&sEfb);
     drop_image(&sEfbDepth);
     drop_image(&sMsColor);
@@ -1032,6 +1212,81 @@ static VkImage sChainImages[8];
 static VkSemaphore sRendered[8];
 static uint32_t sChainCount;
 static int sChainW, sChainH, sChainStale;
+
+/* On Android the swapchain is made unrotated and the compositor turns it
+ * for a landscape window (make_swapchain), and every acquire and present
+ * then says VK_SUBOPTIMAL_KHR: the picture isn't pre-rotated. Remaking
+ * the swapchain for that, as elsewhere, remade it every frame (a wait for
+ * the GPU to go idle and calls to the compositor each time), a third of
+ * the game's thread at 120 fps; there it's remade only when out of date
+ * or the window's size changes. */
+#ifdef __ANDROID__
+#define SUBOPTIMAL_IS_EXPECTED 1
+#else
+#define SUBOPTIMAL_IS_EXPECTED 0
+#endif
+
+/* On Android vkQueuePresentKHR waits a while in the driver (2 to 3 ms a
+ * frame on an Adreno 830, a fifth of the game's thread at 120 fps), so
+ * there it's called on a thread of its own. The queue and the swapchain
+ * are used by one thread at a time: the game's waits for the last present
+ * to be done (present_done) before it uses either again, which by then
+ * it nearly always is. */
+#ifdef __ANDROID__
+static pthread_mutex_t sPresentLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sPresentWake = PTHREAD_COND_INITIALIZER;
+static int sPresentStarted, sPresentPending;
+static uint32_t sPresentImage;
+
+static void* present_thread(void* arg) {
+    (void)arg;
+    pthread_mutex_lock(&sPresentLock);
+    for (;;) {
+        VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        VkResult r;
+        while (!sPresentPending) pthread_cond_wait(&sPresentWake, &sPresentLock);
+        pthread_mutex_unlock(&sPresentLock);
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &sRendered[sPresentImage];
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &sChain;
+        pi.pImageIndices = &sPresentImage;
+        r = vkQueuePresentKHR(sQueue, &pi);
+        pthread_mutex_lock(&sPresentLock);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) sChainStale = 1;
+        sPresentPending = 0;
+        pthread_cond_broadcast(&sPresentWake);
+    }
+    return NULL;
+}
+
+static void present_done(void) {
+    pthread_mutex_lock(&sPresentLock);
+    while (sPresentPending) pthread_cond_wait(&sPresentWake, &sPresentLock);
+    pthread_mutex_unlock(&sPresentLock);
+}
+
+static void present_later(uint32_t image) {
+    if (!sPresentStarted) {
+        pthread_t t;
+        pthread_create(&t, NULL, present_thread, NULL);
+        pthread_detach(t);
+        sPresentStarted = 1;
+    }
+    pthread_mutex_lock(&sPresentLock);
+    sPresentImage = image;
+    sPresentPending = 1;
+    pthread_cond_broadcast(&sPresentWake);
+    pthread_mutex_unlock(&sPresentLock);
+}
+#else
+static void present_done(void) {}
+#endif
+
+static void wait_idle(void) {
+    present_done();
+    vkDeviceWaitIdle(sDev);
+}
 static VkPresentModeKHR sPresentMode;
 static Buffer sReadback; /* RECOMP_GX_DUMP */
 static const char* sDumpDir;
@@ -1045,7 +1300,7 @@ static void make_swapchain(int w, int h) {
     VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     VkSwapchainKHR old = sChain;
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    vkDeviceWaitIdle(sDev);
+    wait_idle();
     CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(sGpu, sSurface, &caps));
     vkGetPhysicalDeviceSurfaceFormatsKHR(sGpu, sSurface, &nf, formats);
     ci.surface = sSurface;
@@ -1062,13 +1317,33 @@ static void make_swapchain(int w, int h) {
             break;
         }
     }
+#ifdef __ANDROID__
+    /* Android gives the display's own (unrotated) size; at the window's,
+     * unrotated, the compositor turns the picture for a landscape window. */
+    ci.imageExtent.width = (uint32_t)w;
+    ci.imageExtent.height = (uint32_t)h;
+#else
     ci.imageExtent.width = caps.currentExtent.width != 0xFFFFFFFFu ? caps.currentExtent.width : (uint32_t)w;
     ci.imageExtent.height = caps.currentExtent.height != 0xFFFFFFFFu ? caps.currentExtent.height : (uint32_t)h;
+#endif
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+#ifdef __ANDROID__
+    ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                                                                       : caps.currentTransform;
+#else
     ci.preTransform = caps.currentTransform;
+#endif
+    /* Opaque where it can be (Android's surfaces often take only inherit). */
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (!(caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) {
+        uint32_t a;
+        for (a = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR; a < VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR; a <<= 1) {
+            if (caps.supportedCompositeAlpha & a) break;
+        }
+        ci.compositeAlpha = (VkCompositeAlphaFlagBitsKHR)a;
+    }
     ci.presentMode = sPresentMode;
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = old;
@@ -1128,6 +1403,22 @@ static void begin_slot(void) {
         CHECK(vkWaitForFences(sDev, 1, &S->fence, VK_TRUE, UINT64_MAX));
         CHECK(vkResetFences(sDev, 1, &S->fence));
         if (S->serial > sDone) sDone = S->serial;
+        if (sTimes) {
+            uint64_t t[2];
+            if (vkGetQueryPoolResults(sDev, sTimes, (uint32_t)sSlot * 2, 2, sizeof(t), t, sizeof(uint64_t),
+                                      VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                double ms = (double)(t[1] - t[0]) * sLimits.timestampPeriod / 1e6;
+                sTimeTotal += ms;
+                if (ms > sTimeWorst) sTimeWorst = ms;
+                if (ms > 1000.0 / 90) sTimeSlow++;
+                if (++sTimeFrames == 120) {
+                    fprintf(stderr, "gpu: %.2f ms a frame, slowest %.1f ms, %u of 120 over 11 ms\n", sTimeTotal / sTimeFrames,
+                            sTimeWorst, sTimeSlow);
+                    sTimeTotal = sTimeWorst = 0;
+                    sTimeFrames = sTimeSlow = 0;
+                }
+            }
+        }
     }
     /* What the GPU is done with. */
     for (i = 0; i < sDeadCount;) {
@@ -1152,6 +1443,10 @@ static void begin_slot(void) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     CHECK(vkBeginCommandBuffer(S->up, &bi));
     CHECK(vkBeginCommandBuffer(S->cb, &bi));
+    if (sTimes) {
+        vkCmdResetQueryPool(S->up, sTimes, (uint32_t)sSlot * 2, 2);
+        vkCmdWriteTimestamp(S->up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sTimes, (uint32_t)sSlot * 2);
+    }
     /* The staging ring grows for bursts of uploads (loading); halved again
      * when frames have long needed far less. */
     if (S->staging_used > S->staging_peak) S->staging_peak = S->staging_used;
@@ -1167,32 +1462,52 @@ static void begin_slot(void) {
     S->data_used = S->verts_used = S->idx_used = S->staging_used = 0;
     forget();
     sXfAt = sTevAt = -1;
+    sBound[0] = sBound[1] = 0;
     bind_sets();
     vkCmdSetFrontFace(S->cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
 }
 
+/* Copies into the vertex arena are recorded this frame (vk_arena_write):
+ * the frame's draws wait for them. */
+static int sArenaCopied;
+
 /* Submits the frame (and presents swapchain image `image`, if acquired),
  * and starts the next. */
 static void end_slot(int acquired, uint32_t image, int dump, int dw, int dh) {
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkSubmitInfo si[2] = {{VK_STRUCTURE_TYPE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SUBMIT_INFO}};
     VkCommandBuffer cbs[2];
     VkPipelineStageFlags wait = VK_PIPELINE_STAGE_TRANSFER_BIT;
     end_efb();
+    if (sArenaCopied) {
+        memory_barrier(S->up);
+        sArenaCopied = 0;
+    }
+    if (sTimes) vkCmdWriteTimestamp(S->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sTimes, (uint32_t)sSlot * 2 + 1);
     CHECK(vkEndCommandBuffer(S->up));
     CHECK(vkEndCommandBuffer(S->cb));
     cbs[0] = S->up;
     cbs[1] = S->cb;
-    si.commandBufferCount = 2;
-    si.pCommandBuffers = cbs;
+    si[0].commandBufferCount = 2;
+    si[0].pCommandBuffers = cbs;
+    /* The copy to the swapchain's image is a batch of its own, so waiting
+     * for the image holds up only that and not the frame: on Android the
+     * compositor gives an image back well after it's acquired. */
     if (acquired) {
-        si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &S->acquired;
-        si.pWaitDstStageMask = &wait;
-        si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores = &sRendered[image];
+        CHECK(vkEndCommandBuffer(S->out));
+        si[1].commandBufferCount = 1;
+        si[1].pCommandBuffers = &S->out;
+        si[1].waitSemaphoreCount = 1;
+        si[1].pWaitSemaphores = &S->acquired;
+        si[1].pWaitDstStageMask = &wait;
+        si[1].signalSemaphoreCount = 1;
+        si[1].pSignalSemaphores = &sRendered[image];
     }
-    CHECK(vkQueueSubmit(sQueue, 1, &si, S->fence));
+    present_done();
+    CHECK(vkQueueSubmit(sQueue, acquired ? 2 : 1, si, S->fence));
     S->serial = sSerial++;
+#ifdef __ANDROID__
+    if (acquired) present_later(image);
+#else
     if (acquired) {
         VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         VkResult r;
@@ -1204,6 +1519,7 @@ static void end_slot(int acquired, uint32_t image, int dump, int dw, int dh) {
         r = vkQueuePresentKHR(sQueue, &pi);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) sChainStale = 1;
     }
+#endif
     if (dump) {
         char path[512];
         CHECK(vkWaitForFences(sDev, 1, &S->fence, VK_TRUE, UINT64_MAX));
@@ -1218,8 +1534,8 @@ static void end_slot(int acquired, uint32_t image, int dump, int dw, int dh) {
 /* ------------------------------------------------------------------------ */
 /* The device's calls */
 
-static uint32_t vk_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0);
-static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels, const uint8_t* rgba);
+static uint32_t vk_texture(int pix, int width, int height, int levels, const uint8_t* pixels, uint32_t mode0);
+static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels, const uint8_t* pixels);
 
 static int pick_gpu(void) {
     VkPhysicalDevice gpus[16];
@@ -1257,12 +1573,14 @@ static int pick_gpu(void) {
             sQueueFamily = q;
             sLimits = p.limits;
             sMaxAniso = f.features.samplerAnisotropy ? p.limits.maxSamplerAnisotropy : 0;
+            sBc = f.features.textureCompressionBC;
         }
     }
     if (best == ~0u) return 0;
     {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(sGpu, &p);
+        if (p.limits.minUniformBufferOffsetAlignment > sUboAlign) sUboAlign = p.limits.minUniformBufferOffsetAlignment;
         fprintf(stderr, "vulkan: %s, Vulkan %u.%u.%u\n", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
                 VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
     }
@@ -1280,21 +1598,40 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_message(VkDebugUtilsMessageSeverityF
     return VK_FALSE;
 }
 
+/* The window's surface: made at the start, and again on Android when the
+ * app comes back with a new window. */
+static int make_surface(void) {
+#ifdef _WIN32
+    VkWin32SurfaceCreateInfoKHR sci = {VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    sci.hinstance = GetModuleHandleA(NULL);
+    sci.hwnd = (HWND)win_handle();
+    return vkCreateWin32SurfaceKHR(sInstance, &sci, NULL, &sSurface) == VK_SUCCESS;
+#else
+    VkAndroidSurfaceCreateInfoKHR sci = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+    sci.window = (ANativeWindow*)win_handle();
+    return vkCreateAndroidSurfaceKHR(sInstance, &sci, NULL, &sSurface) == VK_SUCCESS;
+#endif
+}
+
 static int make_instance(void) {
+#ifdef _WIN32
     HMODULE lib = LoadLibraryA("vulkan-1.dll");
-    const char* exts[3] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-                           VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+#define LIB_SYMBOL GetProcAddress
+#else
+    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+#define LIB_SYMBOL dlsym
+#endif
+    const char* exts[3] = {VK_KHR_SURFACE_EXTENSION_NAME, SURFACE_EXTENSION, VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     const char* layer = "VK_LAYER_KHRONOS_validation";
     const char* v = getenv("RECOMP_VK_VALIDATE");
     int validate = v && *v && *v != '0';
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    VkWin32SurfaceCreateInfoKHR sci = {VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     if (!lib) {
-        fprintf(stderr, "vulkan: no vulkan-1.dll\n");
+        fprintf(stderr, "vulkan: no Vulkan library\n");
         return 0;
     }
-    vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void*)GetProcAddress(lib, "vkGetInstanceProcAddr");
+    vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void*)LIB_SYMBOL(lib, "vkGetInstanceProcAddr");
     if (!vkGetInstanceProcAddr) return 0;
 #define LOAD(name) name = (PFN_##name)(void*)vkGetInstanceProcAddr(NULL, #name);
     VK_GLOBAL_FUNCS(LOAD)
@@ -1338,15 +1675,12 @@ static int make_instance(void) {
         if (create) create(sInstance, &di, NULL, &m);
         fprintf(stderr, "vulkan: validation layers on\n");
     }
-    sci.hinstance = GetModuleHandleA(NULL);
-    sci.hwnd = (HWND)win_handle();
-    if (vkCreateWin32SurfaceKHR(sInstance, &sci, NULL, &sSurface) != VK_SUCCESS) return 0;
-    return 1;
+    return make_surface();
 }
 
 static int make_device(void) {
     float prio = 1;
-    const char* ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    const char* exts[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME};
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -1357,6 +1691,17 @@ static int make_device(void) {
     qi.queueFamilyIndex = sQueueFamily;
     qi.queueCount = 1;
     qi.pQueuePriorities = &prio;
+    {
+        uint32_t n = 0, k;
+        VkExtensionProperties* e;
+        vkEnumerateDeviceExtensionProperties(sGpu, NULL, &n, NULL);
+        e = (VkExtensionProperties*)calloc(n ? n : 1, sizeof(*e));
+        vkEnumerateDeviceExtensionProperties(sGpu, NULL, &n, e);
+        for (k = 0; k < n; k++) {
+            if (strcmp(e[k].extensionName, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME) == 0) sLoadNone = 1;
+        }
+        free(e);
+    }
     f.pNext = &f12;
     f12.pNext = &f13;
     f12.descriptorBindingPartiallyBound = VK_TRUE;
@@ -1369,8 +1714,8 @@ static int make_device(void) {
     ci.pNext = &f;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qi;
-    ci.enabledExtensionCount = 1;
-    ci.ppEnabledExtensionNames = &ext;
+    ci.enabledExtensionCount = sLoadNone ? 2 : 1;
+    ci.ppEnabledExtensionNames = exts;
     if (vkCreateDevice(sGpu, &ci, NULL, &sDev) != VK_SUCCESS) {
         fprintf(stderr, "vulkan: no device\n");
         return 0;
@@ -1400,12 +1745,12 @@ static int make_device(void) {
 }
 
 static void make_layouts(void) {
-    VkDescriptorSetLayoutBinding tb = {0}, db = {0};
+    VkDescriptorSetLayoutBinding tb = {0}, db[3] = {{0}, {0}, {0}};
     VkDescriptorBindingFlags tflags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                       VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
     VkDescriptorSetLayoutBindingFlagsCreateInfo fi = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    VkDescriptorPoolSize sizes[2];
+    VkDescriptorPoolSize sizes[3];
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     VkPushConstantRange pc;
@@ -1422,21 +1767,32 @@ static void make_layouts(void) {
     li.bindingCount = 1;
     li.pBindings = &tb;
     CHECK(vkCreateDescriptorSetLayout(sDev, &li, NULL, &sTexLayout));
-    db.binding = 0;
-    db.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    db.descriptorCount = 1;
-    db.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    db[0].binding = 0;
+    db[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    db[0].descriptorCount = 1;
+    db[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    db[1].binding = 1;
+    db[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    db[1].descriptorCount = 1;
+    db[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    db[2].binding = 2;
+    db[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    db[2].descriptorCount = 1;
+    db[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     li.pNext = NULL;
     li.flags = 0;
-    li.pBindings = &db;
+    li.bindingCount = 3;
+    li.pBindings = db;
     CHECK(vkCreateDescriptorSetLayout(sDev, &li, NULL, &sDataLayout));
     sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sizes[0].descriptorCount = MAX_TEXTURES;
     sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[1].descriptorCount = 256;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    sizes[2].descriptorCount = 512;
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pi.maxSets = 257;
-    pi.poolSizeCount = 2;
+    pi.poolSizeCount = 3;
     pi.pPoolSizes = sizes;
     CHECK(vkCreateDescriptorPool(sDev, &pi, NULL, &sPool));
     ai.descriptorPool = sPool;
@@ -1457,6 +1813,7 @@ static void make_layouts(void) {
 
 static void vk_apply_settings(void);
 static void find_rebar(void);
+static void spec_start(void);
 
 static int vk_init(void) {
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -1475,30 +1832,44 @@ static int vk_init(void) {
     if ((v = getenv("RECOMP_GX_DUMP_FROM")) && atoi(v) > 0) sDumpFrom = (unsigned)atoi(v);
     make_layouts();
     find_rebar();
-    sGxVert = shader(kSpv_gx_vert, sizeof(kSpv_gx_vert));
-    sGxFrag = shader(kSpv_gx_frag, sizeof(kSpv_gx_frag));
+    for (i = 0; i < 9; i++) {
+        sGxVert[i] = shader(kSpv_gx_vert[i], kSpv_gx_vert_size[i]);
+        sGxFrag[i] = shader(kSpv_gx_frag[i], kSpv_gx_frag_size[i]);
+    }
     sQuadVert = shader(kSpv_quad_vert, sizeof(kSpv_quad_vert));
     sFillFrag = shader(kSpv_fill_frag, sizeof(kSpv_fill_frag));
     sCopyFrag = shader(kSpv_copy_frag, sizeof(kSpv_copy_frag));
     sBlitFrag = shader(kSpv_blit_frag, sizeof(kSpv_blit_frag));
+    spec_start();
     smp.magFilter = smp.minFilter = VK_FILTER_LINEAR;
     smp.addressModeU = smp.addressModeV = smp.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     CHECK(vkCreateSampler(sDev, &smp, NULL, &sLinearClamp));
     for (i = MAX_TEXTURES - 1; i >= TEX_FIRST; i--) sFreeHandles[sFreeCount++] = (uint32_t)i;
+    {
+        const char* e = getenv("RECOMP_FPS");
+        if (e && *e == '1' && sLimits.timestampComputeAndGraphics) {
+            VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = SLOTS * 2;
+            if (vkCreateQueryPool(sDev, &qi, NULL, &sTimes) != VK_SUCCESS) sTimes = VK_NULL_HANDLE;
+        }
+    }
     cpi.queueFamilyIndex = sQueueFamily;
     for (i = 0; i < SLOTS; i++) {
         Slot* s = &sSlots[i];
-        VkCommandBuffer cbs[2];
+        VkCommandBuffer cbs[3];
         CHECK(vkCreateCommandPool(sDev, &cpi, NULL, &s->pool));
         cai.commandPool = s->pool;
         cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cai.commandBufferCount = 2;
+        cai.commandBufferCount = 3;
         CHECK(vkAllocateCommandBuffers(sDev, &cai, cbs));
         s->up = cbs[0];
         s->cb = cbs[1];
+        s->out = cbs[2];
         CHECK(vkCreateFence(sDev, &fci, NULL, &s->fence));
         CHECK(vkCreateSemaphore(sDev, &sci, NULL, &s->acquired));
-        s->data = make_buffer((VkDeviceSize)2 << 20, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host);
+        s->data = make_buffer((VkDeviceSize)2 << 20, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              host);
         s->verts = make_buffer((VkDeviceSize)4 << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, host);
         s->idx = make_buffer((VkDeviceSize)1 << 20, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, host);
         s->staging = make_buffer(STAGING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host);
@@ -1535,7 +1906,7 @@ static void vk_apply_settings(void) {
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
     if (s == sScale && m == sMsaa && sEfb.img) return;
     /* Nothing in flight may still use what is remade. */
-    vkDeviceWaitIdle(sDev);
+    wait_idle();
     if (m != sMsaa) {
         /* The EFB's pipelines are for the old sample count; they stay
          * made, as switching back is likely. */
@@ -1550,21 +1921,22 @@ static void vk_apply_settings(void) {
             m > 1 ? (m == 2 ? "2x" : m == 4 ? "4x" : "8x") : "off");
 }
 
-/* Copies the levels of rgba (each half the last's size) into t's image,
- * in cb, with the copy in the slot's staging ring. */
-static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels, const uint8_t* rgba) {
+/* Copies the levels of pixels (each half the last's size, laid out as
+ * t->pix says) into t's image, in cb, with the copy in the slot's staging
+ * ring. */
+static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels, const uint8_t* pixels) {
     VkBufferImageCopy regions[16];
     VkDeviceSize bytes = 0, off;
     int l, w = width, h = height;
     uint8_t* dst;
     VkBuffer src;
     for (l = 0; l < levels; l++) {
-        bytes += (VkDeviceSize)w * h * 4;
+        bytes += gx_pix_size(t->pix, w, h);
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }
     dst = (uint8_t*)staging(bytes, &src, &off);
-    memcpy(dst, rgba, (size_t)bytes);
+    memcpy(dst, pixels, (size_t)bytes);
     w = width;
     h = height;
     memset(regions, 0, sizeof(regions));
@@ -1576,7 +1948,7 @@ static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels
         regions[l].imageExtent.width = (uint32_t)w;
         regions[l].imageExtent.height = (uint32_t)h;
         regions[l].imageExtent.depth = 1;
-        off += (VkDeviceSize)w * h * 4;
+        off += gx_pix_size(t->pix, w, h);
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }
@@ -1585,31 +1957,47 @@ static void upload(VkCommandBuffer cb, Tex* t, int width, int height, int levels
     transition(cb, &t->im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-static uint32_t vk_texture(int width, int height, int levels, const uint8_t* rgba, uint32_t mode0) {
+static unsigned vk_texture_pixels(void) {
+    return (1u << GX_PIX_I8) | (1u << GX_PIX_IA8) | (sBc ? 1u << GX_PIX_BC1 : 0u);
+}
+
+static uint32_t vk_texture(int pix, int width, int height, int levels, const uint8_t* pixels, uint32_t mode0) {
+    static const VkFormat kFormat[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM,
+                                       VK_FORMAT_BC1_RGB_UNORM_BLOCK};
+    const VkComponentSwizzle I = VK_COMPONENT_SWIZZLE_R, A = VK_COMPONENT_SWIZZLE_G;
+    VkComponentMapping map = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                              VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     uint32_t h = new_handle();
     Tex* t = &sTex[h];
     if (levels > 16) levels = 16;
-    t->im = make_image(width, height, levels, VK_FORMAT_R8G8B8A8_UNORM,
-                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SAMPLE_COUNT_1_BIT);
+    if (pix == GX_PIX_I8) map.r = map.g = map.b = map.a = I;
+    if (pix == GX_PIX_IA8) {
+        map.r = map.g = map.b = I;
+        map.a = A;
+    }
+    t->pix = pix;
+    t->im = make_image_mapped(width, height, levels, kFormat[pix], VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                              VK_SAMPLE_COUNT_1_BIT, map);
     t->sampler = sampler(mode0, levels);
     t->used = 0;
-    upload(S->up, t, width, height, levels, rgba);
+    upload(S->up, t, width, height, levels, pixels);
     set_texture(h);
     return h;
 }
 
-static void vk_texture_update(uint32_t handle, int width, int height, int levels, const uint8_t* rgba) {
+static void vk_texture_update(uint32_t handle, int pix, int width, int height, int levels, const uint8_t* pixels) {
     Tex* t = &sTex[handle];
+    (void)pix; /* the one it was made with */
     if (levels > 16) levels = 16;
     if (t->used == sSerial) {
         /* A draw of this frame used it: changed in the frame's order. */
         end_efb();
-        upload(S->cb, t, width, height, levels, rgba);
+        upload(S->cb, t, width, height, levels, pixels);
         forget();
         bind_sets();
         vkCmdSetFrontFace(S->cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
     } else {
-        upload(S->up, t, width, height, levels, rgba);
+        upload(S->up, t, width, height, levels, pixels);
     }
 }
 
@@ -1626,10 +2014,50 @@ static void vk_texture_delete(const uint32_t* handles, int n) {
 /* ------------------------------------------------------------------------ */
 /* Drawing */
 
-/* The XF state as the vertex shader reads it (gx.vert): memory 0x000-0x0FF,
- * 0x400-0x47F, 0x500-0x67F, then the registers. */
-#define XF_PACKED 0x360
 static uint32_t sXfLast[XF_PACKED];
+
+/* The texture coordinates' setup, for gx.vert: each coordinate as one
+ * matrix (3 x 4) times one of the vertex's vectors (with 1 for w), so the
+ * shader does no more for it than that. Into out[i]: coordinate i's vector
+ * (0 the position, 1 the normal, 2 none, (0, 0, 1, 1), 4 + n texture
+ * coordinates n); out[8 + 12 i]: its matrix,
+ * the texture matrix XF's MATINDEX registers give it (or, unlike XF's,
+ * rows passing the vector's x and y through, and 1, for a texgen other
+ * than a transform), times the post-transform matrix with dual texturing.
+ * Not such (and left to the shader's XF, vs_words says): a post-transform
+ * of normalized coordinates. */
+static void texgen_program(const uint32_t* xf, uint32_t* out) {
+    const uint32_t* r = xf + GX_XF_MEM_WORDS;
+    float* m = (float*)(out + 8);
+    int n = (int)(r[0x3F] & 15), dual = (int)(r[0x12] & 1), i, j, k;
+    memset(out, 0, 8 * sizeof(uint32_t));
+    if (n > 8) n = 8;
+    for (i = 0; i < n; i++, m += 12) {
+        uint32_t info = r[0x40 + i], pt = r[0x50 + i];
+        int row = (int)((info >> 7) & 31), type = (int)((info >> 4) & 7);
+        float t[4][4], *p;
+        out[i] = row == 0 ? 0 : row == 1 ? 1 : row >= 5 && row <= 12 ? (uint32_t)(4 + row - 5) : 2;
+        memset(t, 0, sizeof(t));
+        if (type == 0) {
+            uint32_t idx = i < 4 ? (r[0x18] >> (6 + 6 * i)) & 0x3F : (r[0x19] >> (6 * (i - 4))) & 0x3F;
+            memcpy(t, xf + idx * 4, ((info >> 1) & 1 ? 12 : 8) * sizeof(float));
+            if (!((info >> 1) & 1)) t[2][3] = 1;
+        } else {
+            t[0][0] = t[1][1] = t[2][3] = 1;
+        }
+        t[3][3] = 1;
+        if (!dual) {
+            memcpy(m, t, 12 * sizeof(float));
+            continue;
+        }
+        if ((pt >> 8) & 1) return;
+        p = (float*)(xf + 0x500 + (pt & 63) * 4);
+        for (j = 0; j < 3; j++) {
+            for (k = 0; k < 4; k++)
+                m[j * 4 + k] = p[j * 4] * t[0][k] + p[j * 4 + 1] * t[1][k] + p[j * 4 + 2] * t[2][k] + p[j * 4 + 3] * t[3][k];
+        }
+    }
+}
 
 static uint32_t write_xf(const uint32_t* xf) {
     uint32_t packed[XF_PACKED];
@@ -1642,16 +2070,15 @@ static uint32_t write_xf(const uint32_t* xf) {
         memcpy(packed + 0x100, xf + 0x400, 0x80 * 4);
         memcpy(packed + 0x180, xf + 0x500, 0x180 * 4);
         memcpy(packed + 0x300, xf + GX_XF_MEM_WORDS, GX_XF_REG_WORDS * 4);
+        texgen_program(xf, packed + 0x360);
     }
     if (sXfAt >= 0 && memcmp(packed, sXfLast, sizeof(packed)) == 0) return (uint32_t)sXfAt;
-    memcpy(ring(RING_DATA, sizeof(packed), 16, &off), packed, sizeof(packed));
+    memcpy(ring(RING_DATA, sizeof(packed), sUboAlign, &off), packed, sizeof(packed));
     memcpy(sXfLast, packed, sizeof(packed));
     sXfAt = (int64_t)(off / 4);
     return (uint32_t)sXfAt;
 }
 
-/* The TEV state as the fragment shader reads it (gx.frag). */
-#define TEV_WORDS (56 + 24 * 16)
 static uint32_t sTevLast[TEV_WORDS];
 static int sTevLastWords;
 
@@ -1701,13 +2128,27 @@ static uint32_t write_tev(const GXDrawState* st) {
     }
     if (sTevAt >= 0 && n == sTevLastWords && memcmp(w, sTevLast, (size_t)n * 4) == 0) return (uint32_t)sTevAt;
     /* The shader may read all 16 stages' worth: room for them, written or not. */
-    memcpy(ring(RING_DATA, TEV_WORDS * 4, 16, &off), w, (size_t)n * 4);
+    memcpy(ring(RING_DATA, TEV_WORDS * 4, sUboAlign, &off), w, (size_t)n * 4);
     memcpy(sTevLast, w, (size_t)n * 4);
     sTevLastWords = n;
     sTevAt = (int64_t)(off / 4);
     return (uint32_t)sTevAt;
 }
 
+/* Whether the alpha compare passes whatever the alpha (gx.frag's
+ * ALPHA_TEST): GX_NEVER 0, GX_ALWAYS 7; logic AND, OR, XOR, XNOR. */
+static int alpha_always(const GXDrawState* st) {
+    int f0 = st->alpha_func[0], f1 = st->alpha_func[1];
+    switch (st->alpha_logic) {
+    case 0: return f0 == 7 && f1 == 7;
+    case 1: return f0 == 7 || f1 == 7;
+    case 2: return (f0 == 7 && f1 == 0) || (f0 == 0 && f1 == 7);
+    default: return f0 == f1 && (f0 == 0 || f0 == 7);
+    }
+}
+
+/* The pipeline's: color and alpha writes (bits 0-3), blending (4-15),
+ * and no alpha test (16). */
 static uint32_t gx_key(const GXDrawState* st) {
     static const VkBlendFactor kSrc[8] = {
         VK_BLEND_FACTOR_ZERO,      VK_BLEND_FACTOR_ONE,       VK_BLEND_FACTOR_DST_COLOR,
@@ -1730,6 +2171,7 @@ static uint32_t gx_key(const GXDrawState* st) {
         if (st->blend_subtract) src = dst = VK_BLEND_FACTOR_ONE;
         key |= 16u | ((uint32_t)src << 5) | ((uint32_t)dst << 10) | (st->blend_subtract ? 1u << 15 : 0u);
     }
+    if (alpha_always(st)) key |= 1u << 16;
     return key;
 }
 
@@ -1742,12 +2184,257 @@ static const VkCompareOp kDepthFunc[8] = {VK_COMPARE_OP_NEVER, VK_COMPARE_OP_GRE
 static const VkCullModeFlags kCull[4] = {VK_CULL_MODE_NONE, VK_CULL_MODE_FRONT_BIT, VK_CULL_MODE_BACK_BIT,
                                          VK_CULL_MODE_FRONT_AND_BACK};
 
+/* ------------------------------------------------------------------------ */
+/* Pipelines for TEV setups */
+
+/* The general shader runs every stage's every choice for every pixel: a
+ * phone's GPU takes several times as long as with gx.frag specialized for
+ * the setup, which a draw uses once the pipeline thread has made it. */
+typedef struct Spec {
+    uint32_t words[SPEC_WORDS];
+    uint32_t vs[VS_WORDS];
+    uint32_t key;
+    int samples, used;
+    VkPipeline p; /* set by the pipeline thread once made */
+} Spec;
+#define SPEC_SLOTS 8192 /* a power of two; filled to three quarters at most */
+static Spec* sSpecs;
+static int sSpecCount;
+static int sMakeQueue[SPEC_SLOTS], sMakeHead, sMakeTail;
+static char sCachePath[1024];
+
+#ifdef _WIN32
+static CRITICAL_SECTION sMakeLock;
+static CONDITION_VARIABLE sMakeWake;
+#define MAKE_LOCK() EnterCriticalSection(&sMakeLock)
+#define MAKE_UNLOCK() LeaveCriticalSection(&sMakeLock)
+#define MAKE_WAIT() SleepConditionVariableCS(&sMakeWake, &sMakeLock, INFINITE)
+#define MAKE_WAKE() WakeConditionVariable(&sMakeWake)
+#else
+static pthread_mutex_t sMakeLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sMakeWake = PTHREAD_COND_INITIALIZER;
+#define MAKE_LOCK() pthread_mutex_lock(&sMakeLock)
+#define MAKE_UNLOCK() pthread_mutex_unlock(&sMakeLock)
+#define MAKE_WAIT() pthread_cond_wait(&sMakeWake, &sMakeLock)
+#define MAKE_WAKE() pthread_cond_signal(&sMakeWake)
+#endif
+#ifdef _MSC_VER
+#define PIPE_LOAD(x) (*(volatile VkPipeline*)&(x))
+#define PIPE_STORE(x, v) (*(volatile VkPipeline*)&(x) = (v))
+#define SAVE_BEGIN() (InterlockedExchange(&sSaving, 1) == 0)
+#define SAVE_END() InterlockedExchange(&sSaving, 0)
+#else
+#define PIPE_LOAD(x) __atomic_load_n(&(x), __ATOMIC_ACQUIRE)
+#define PIPE_STORE(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELEASE)
+#define SAVE_BEGIN() (__atomic_exchange_n(&sSaving, 1, __ATOMIC_ACQUIRE) == 0)
+#define SAVE_END() __atomic_store_n(&sSaving, 0, __ATOMIC_RELEASE)
+#endif
+static volatile long sSaving; /* save_cache is running (on either thread) */
+
+/* The setup's words, as gx.frag's run unpacks them. */
+static void spec_words(const GXDrawState* st, uint32_t* w) {
+    int i, k, n = st->num_stages > 16 ? 16 : st->num_stages;
+    memset(w, 0, SPEC_WORDS * sizeof(uint32_t));
+    w[0] = (uint32_t)n;
+    for (i = 0; i < 4; i++) {
+        for (k = 0; k < 4; k++) w[1] |= (uint32_t)(st->swap_table[i][k] & 3) << (8 * i + 2 * k);
+    }
+    for (i = 0; i < n; i++) {
+        const GXTevStage* s = &st->stage[i];
+        uint32_t* o = w + 2 + 3 * i;
+        for (k = 0; k < 4; k++) {
+            o[0] |= (uint32_t)(s->color_in[k] & 15) << (4 * k);
+            o[0] |= (uint32_t)(s->alpha_in[k] & 7) << (16 + 3 * k);
+        }
+        o[1] = (uint32_t)(s->color_op & 15) | (uint32_t)(s->color_bias & 15) << 4 | (uint32_t)(s->color_scale & 15) << 8 |
+               (uint32_t)(s->color_clamp & 15) << 12 | (uint32_t)(s->alpha_op & 15) << 16 |
+               (uint32_t)(s->alpha_bias & 15) << 20 | (uint32_t)(s->alpha_scale & 15) << 24 |
+               (uint32_t)(s->alpha_clamp & 15) << 28;
+        o[2] = (uint32_t)(s->texmap & 15) | (uint32_t)(s->texcoord & 15) << 4 | (s->tex_enable ? 1u : 0u) << 8 |
+               (uint32_t)(s->channel == 7 ? 7 : (s->channel & 1)) << 9 | (uint32_t)(s->color_dest & 3) << 13 |
+               (uint32_t)(s->alpha_dest & 3) << 15 |
+               (uint32_t)((s->kcolor_sel & 31) | (s->kalpha_sel & 31) << 5) << 17 |
+               (uint32_t)((s->tex_swap & 3) | (s->ras_swap & 3) << 2) << 27;
+    }
+}
+
+/* The transform setup's words, as gx.vert's VS_ constants; none (zeros)
+ * without the XF state. */
+static void vs_words(const GXDrawState* st, const uint32_t* xf, uint32_t* w) {
+    int i;
+    memset(w, 0, VS_WORDS * sizeof(uint32_t));
+    /* As many coordinates as the stages read: past the last read, none. */
+    for (i = 0; i < st->num_stages && i < 16; i++) {
+        const GXTevStage* s = &st->stage[i];
+        if (s->tex_enable && (uint32_t)(s->texcoord & 7) + 1 > w[VS_TEX_IO]) w[VS_TEX_IO] = (uint32_t)(s->texcoord & 7) + 1;
+    }
+    if (!xf) return;
+    w[0] = 1;
+    for (i = 0; i < 4; i++) w[1 + i] = xf[GX_XF_MEM_WORDS + 0x0E + i];
+    w[5] = (uint32_t)st->mtx_per_vertex;
+    /* Whether texgen_program's setup holds (no normalized coordinates
+     * post-transformed), with no texture matrix indices in the vertices. */
+    w[6] = !(st->mtx_per_vertex & 2);
+    if (xf[GX_XF_MEM_WORDS + 0x12] & 1) {
+        int n = (int)(xf[GX_XF_MEM_WORDS + 0x3F] & 15);
+        for (i = 0; i < n && i < 8; i++) {
+            if ((xf[GX_XF_MEM_WORDS + 0x50 + i] >> 8) & 1) w[6] = 0;
+        }
+    }
+}
+
+static void save_cache(void) {
+    size_t n = 0;
+    void* data;
+    char tmp[1040];
+    FILE* f;
+    if (!sCache || !sCachePath[0] || !SAVE_BEGIN()) return;
+    sCacheDirty = 0;
+    if (vkGetPipelineCacheData(sDev, sCache, &n, NULL) != VK_SUCCESS || !n || !(data = malloc(n))) {
+        SAVE_END();
+        return;
+    }
+    if (vkGetPipelineCacheData(sDev, sCache, &n, data) >= 0) {
+        snprintf(tmp, sizeof(tmp), "%s.new", sCachePath);
+        if ((f = fopen(tmp, "wb"))) {
+            int ok = fwrite(data, 1, n, f) == n;
+            ok &= fclose(f) == 0;
+#ifdef _WIN32
+            if (ok) MoveFileExA(tmp, sCachePath, MOVEFILE_REPLACE_EXISTING);
+#else
+            if (ok) rename(tmp, sCachePath);
+#endif
+        }
+    }
+    free(data);
+    SAVE_END();
+}
+
+#ifdef _WIN32
+static DWORD WINAPI spec_thread(LPVOID arg) {
+#else
+static void* spec_thread(void* arg) {
+#endif
+    (void)arg;
+    for (;;) {
+        Spec* s;
+        MAKE_LOCK();
+        while (sMakeHead == sMakeTail) {
+            if (sCacheDirty) {
+                /* Made all there was to: kept for the next start. */
+                MAKE_UNLOCK();
+                save_cache();
+                MAKE_LOCK();
+                continue;
+            }
+            MAKE_WAIT();
+        }
+        s = &sSpecs[sMakeQueue[sMakeHead]];
+        sMakeHead = (sMakeHead + 1) % SPEC_SLOTS;
+        MAKE_UNLOCK();
+        PIPE_STORE(s->p, make_pipeline(PK_GX, s->key, s->samples, s->words, s->vs));
+        sCacheDirty = 1;
+    }
+#ifndef _WIN32
+    return NULL;
+#endif
+}
+
+/* The pipeline for the draw's setup, or VK_NULL_HANDLE while it's being
+ * made (and then asked for). */
+static VkPipeline spec_pipeline(const GXDrawState* st, const uint32_t* xf, uint32_t key) {
+    uint32_t w[SPEC_WORDS], v[VS_WORDS], h = 2166136261u;
+    int i, n;
+    Spec* s;
+    if (!sSpecs) return VK_NULL_HANDLE;
+    spec_words(st, w);
+    vs_words(st, xf, v);
+    n = 2 + 3 * (int)w[0];
+    for (i = 0; i < n; i++) h = (h ^ w[i]) * 16777619u;
+    for (i = 0; i < VS_WORDS; i++) h = (h ^ v[i]) * 16777619u;
+    h = ((h ^ key) * 16777619u ^ (uint32_t)sMsaa) * 16777619u;
+    for (i = (int)(h & (SPEC_SLOTS - 1));; i = (i + 1) & (SPEC_SLOTS - 1)) {
+        s = &sSpecs[i];
+        if (!s->used) break;
+        if (s->key == key && s->samples == sMsaa && memcmp(s->words, w, sizeof(w)) == 0 &&
+            memcmp(s->vs, v, sizeof(v)) == 0)
+            return PIPE_LOAD(s->p);
+    }
+    if (sSpecCount >= SPEC_SLOTS / 4 * 3) return VK_NULL_HANDLE;
+    memcpy(s->words, w, sizeof(w));
+    memcpy(s->vs, v, sizeof(v));
+    s->key = key;
+    s->samples = sMsaa;
+    s->used = 1;
+    sSpecCount++;
+    MAKE_LOCK();
+    sMakeQueue[sMakeTail] = i;
+    sMakeTail = (sMakeTail + 1) % SPEC_SLOTS;
+    MAKE_WAKE();
+    MAKE_UNLOCK();
+    return VK_NULL_HANDLE;
+}
+
+/* The pipeline cache, from vk_pipelines.bin beside settings.ini (a
+ * driver's own check leaves out what another GPU or driver made), and the
+ * thread making the setups' pipelines. */
+static void spec_start(void) {
+    VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    const char* e = getenv("RECOMP_SETTINGS");
+    char *slash, *back;
+    void* data = NULL;
+    FILE* f;
+    if (e && *e) snprintf(sCachePath, sizeof(sCachePath) - 32, "%s", e);
+#ifdef _WIN32
+    else GetModuleFileNameA(NULL, sCachePath, sizeof(sCachePath) - 32);
+#endif
+    slash = strrchr(sCachePath, '/');
+    back = strrchr(sCachePath, '\\');
+    if (back > slash) slash = back;
+    strcpy(slash ? slash + 1 : sCachePath, "vk_pipelines.bin");
+    if ((f = fopen(sCachePath, "rb"))) {
+        long n;
+        fseek(f, 0, SEEK_END);
+        n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (n > 0 && (data = malloc((size_t)n)) && fread(data, 1, (size_t)n, f) == (size_t)n) {
+            ci.initialDataSize = (size_t)n;
+            ci.pInitialData = data;
+        }
+        fclose(f);
+    }
+    if (vkCreatePipelineCache(sDev, &ci, NULL, &sCache) != VK_SUCCESS) {
+        ci.initialDataSize = 0;
+        ci.pInitialData = NULL;
+        if (vkCreatePipelineCache(sDev, &ci, NULL, &sCache) != VK_SUCCESS) sCache = VK_NULL_HANDLE;
+    }
+    free(data);
+    if ((e = getenv("RECOMP_VK_GENERAL")) && *e == '1') return;
+    sSpecs = (Spec*)calloc(SPEC_SLOTS, sizeof(Spec));
+    if (!sSpecs) return;
+#ifdef _WIN32
+    InitializeCriticalSection(&sMakeLock);
+    InitializeConditionVariable(&sMakeWake);
+    CloseHandle(CreateThread(NULL, 0, spec_thread, NULL, 0, NULL));
+#else
+    {
+        pthread_t t;
+        pthread_create(&t, NULL, spec_thread, NULL);
+        pthread_detach(t);
+    }
+#endif
+}
+
 static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, VkBuffer ib, int32_t base_vertex,
                         uint32_t first_index, uint32_t count) {
     uint32_t pc[10];
     int i;
-    begin_efb();
-    use_pipeline(pipeline(PK_GX, gx_key(st)));
+    uint32_t key = gx_key(st);
+    VkPipeline sp = spec_pipeline(st, xf, key);
+    /* Depth is used by a test other than "always" or by writes. */
+    begin_efb(st->z_enable && ((st->z_func & 7) != 7 || st->z_update));
+
+    use_pipeline(sp ? sp : pipeline(PK_GX, key));
     {
         /* Edges are scaled and rounded, as gl_backend.c does; flipped,
          * so row 0 is the EFB's top. */
@@ -1762,6 +2449,8 @@ static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, 
     set_depth(st->z_enable, st->z_enable && st->z_update, (int)kDepthFunc[st->z_func & 7]);
     pc[0] = write_xf(xf);
     pc[1] = write_tev(st);
+    if (sXfAt < 0) pc[0] = write_xf(xf); /* the data buffer filled up and was replaced */
+    bind_data((VkDeviceSize)pc[0] * 4, (VkDeviceSize)pc[1] * 4);
     for (i = 0; i < 8; i++) {
         pc[2 + i] = st->texture[i];
         if (st->texture[i]) sTex[st->texture[i]].used = sSerial;
@@ -1779,24 +2468,6 @@ static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, 
     vkCmdDrawIndexed(S->cb, count, 1, first_index, base_vertex, 0);
 }
 
-static void vk_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
-                    int first_index, int count) {
-    VkDeviceSize voff, ioff;
-    memcpy(ring(RING_VERTS, (VkDeviceSize)vertices * sizeof(GXVertex), sizeof(GXVertex), &voff), v + first_vertex,
-           (size_t)vertices * sizeof(GXVertex));
-    memcpy(ring(RING_IDX, (VkDeviceSize)count * 4, 4, &ioff), index + first_index, (size_t)count * 4);
-    draw_common(st, st->xf, S->verts.buf, S->idx.buf, (int32_t)(voff / sizeof(GXVertex)), (uint32_t)(ioff / 4),
-                (uint32_t)count);
-}
-
-/* The recorded frame's vertices and indices, in device memory; a few
- * kept, as frames in flight may still draw from the last ones. */
-typedef struct FrameBuf {
-    Buffer vb, ib;
-    uint64_t used;
-} FrameBuf;
-static FrameBuf sFrameBufs[SLOTS + 1];
-static FrameBuf* sFrameBuf;
 /* Video memory the CPU can write (resizable BAR): the recorded frame is
  * written straight into it, rather than copied there from a staging
  * buffer. */
@@ -1813,6 +2484,164 @@ static void find_rebar(void) {
     }
 }
 
+/* The vertex arena (gxb_arena): vertices kept in video memory from frame
+ * to frame, in spans. The free spans are kept in address order, joined
+ * where they touch; a freed span joins them once the GPU has finished the
+ * frames that could draw from it. */
+typedef struct Span {
+    int first, n;
+    uint64_t serial;
+} Span;
+static Buffer sArena;
+static int sArenaVerts;
+/* The frame the arena last grew in: until the GPU has finished it, writes
+ * go by the staging ring, after the copy of the old arena, not into the
+ * mapped arena where the copy could overwrite them. */
+static uint64_t sArenaGrew;
+static Span *sSpans, *sFreed;
+static int sSpanCount, sSpanCap, sFreedCount, sFreedCap;
+
+static void span_add(int first, int n) {
+    int lo = 0, hi = sSpanCount;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (sSpans[mid].first < first) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo > 0 && sSpans[lo - 1].first + sSpans[lo - 1].n == first) {
+        sSpans[lo - 1].n += n;
+        if (lo < sSpanCount && sSpans[lo - 1].first + sSpans[lo - 1].n == sSpans[lo].first) {
+            sSpans[lo - 1].n += sSpans[lo].n;
+            memmove(sSpans + lo, sSpans + lo + 1, (size_t)(sSpanCount - lo - 1) * sizeof(Span));
+            sSpanCount--;
+        }
+        return;
+    }
+    if (lo < sSpanCount && first + n == sSpans[lo].first) {
+        sSpans[lo].first = first;
+        sSpans[lo].n += n;
+        return;
+    }
+    if (sSpanCount == sSpanCap) {
+        sSpanCap = sSpanCap ? sSpanCap * 2 : 256;
+        sSpans = (Span*)realloc(sSpans, (size_t)sSpanCap * sizeof(Span));
+    }
+    memmove(sSpans + lo + 1, sSpans + lo, (size_t)(sSpanCount - lo) * sizeof(Span));
+    sSpans[lo].first = first;
+    sSpans[lo].n = n;
+    sSpanCount++;
+}
+
+/* Room for at least `need` more vertices: a bigger arena, with the old
+ * one's contents, copied by the GPU: copied by the CPU, out of a mapped
+ * arena in video memory (Resizable BAR) it took 1.3 s at 64 MB, then
+ * 2.6 s, on an RTX 5070. */
+static void arena_grow(int need) {
+    VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    int verts = sArenaVerts ? sArenaVerts * 2 : 1 << 19;
+    Buffer b;
+    while (verts < sArenaVerts + need) verts *= 2;
+    if (sRebar) props |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    b = make_buffer((VkDeviceSize)verts * sizeof(GXVertex),
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    props);
+    if (sArena.buf) {
+        VkBufferCopy c;
+        c.srcOffset = c.dstOffset = 0;
+        c.size = (VkDeviceSize)sArenaVerts * sizeof(GXVertex);
+        vkCmdCopyBuffer(S->up, sArena.buf, b.buf, 1, &c);
+        memory_barrier(S->up); /* before the writes recorded after it */
+        sArenaCopied = 1;
+        sArenaGrew = sSerial;
+        drop_buffer(&sArena);
+    }
+    span_add(sArenaVerts, verts - sArenaVerts);
+    sArena = b;
+    sArenaVerts = verts;
+}
+
+static int vk_arena_alloc(int n) {
+    static uint64_t reclaimed;
+    int i, first;
+    if (n <= 0) return 0;
+    if (sDone != reclaimed) {
+        reclaimed = sDone;
+        for (i = 0; i < sFreedCount;) {
+            if (sFreed[i].serial <= sDone) {
+                span_add(sFreed[i].first, sFreed[i].n);
+                sFreed[i] = sFreed[--sFreedCount];
+            } else i++;
+        }
+    }
+    for (;;) {
+        for (i = 0; i < sSpanCount && sSpans[i].n < n; i++) {}
+        if (i < sSpanCount) break;
+        arena_grow(n);
+    }
+    first = sSpans[i].first;
+    sSpans[i].first += n;
+    sSpans[i].n -= n;
+    if (!sSpans[i].n) {
+        memmove(sSpans + i, sSpans + i + 1, (size_t)(sSpanCount - i - 1) * sizeof(Span));
+        sSpanCount--;
+    }
+    return first;
+}
+
+static void vk_arena_write(int first, const GXVertex* v, int n) {
+    VkDeviceSize bytes = (VkDeviceSize)n * sizeof(GXVertex), off;
+    VkBufferCopy c;
+    VkBuffer from;
+    if (n <= 0) return;
+    if (sArena.map && sDone >= sArenaGrew) {
+        memcpy(sArena.map + (size_t)first * sizeof(GXVertex), v, (size_t)bytes);
+        return;
+    }
+    memcpy(staging(bytes, &from, &off), v, (size_t)bytes);
+    c.srcOffset = off;
+    c.dstOffset = (VkDeviceSize)first * sizeof(GXVertex);
+    c.size = bytes;
+    vkCmdCopyBuffer(S->up, from, sArena.buf, 1, &c);
+    sArenaCopied = 1;
+}
+
+static void vk_arena_free(int first, int n) {
+    if (n <= 0) return;
+    if (sFreedCount == sFreedCap) {
+        sFreedCap = sFreedCap ? sFreedCap * 2 : 256;
+        sFreed = (Span*)realloc(sFreed, (size_t)sFreedCap * sizeof(Span));
+    }
+    sFreed[sFreedCount].first = first;
+    sFreed[sFreedCount].n = n;
+    sFreed[sFreedCount].serial = sSerial;
+    sFreedCount++;
+}
+
+static void vk_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
+                    int first_index, int count) {
+    VkDeviceSize voff, ioff;
+    if (!v) {
+        /* In the arena, by index from its start. */
+        memcpy(ring(RING_IDX, (VkDeviceSize)count * 4, 4, &ioff), index + first_index, (size_t)count * 4);
+        draw_common(st, st->xf, sArena.buf, S->idx.buf, 0, (uint32_t)(ioff / 4), (uint32_t)count);
+        return;
+    }
+    memcpy(ring(RING_VERTS, (VkDeviceSize)vertices * sizeof(GXVertex), sizeof(GXVertex), &voff), v + first_vertex,
+           (size_t)vertices * sizeof(GXVertex));
+    memcpy(ring(RING_IDX, (VkDeviceSize)count * 4, 4, &ioff), index + first_index, (size_t)count * 4);
+    draw_common(st, st->xf, S->verts.buf, S->idx.buf, (int32_t)(voff / sizeof(GXVertex)), (uint32_t)(ioff / 4),
+                (uint32_t)count);
+}
+
+/* The recorded frame's vertices and indices, in device memory; a few
+ * kept, as frames in flight may still draw from the last ones. */
+typedef struct FrameBuf {
+    Buffer vb, ib;
+    uint64_t used;
+    int arena; /* its indices are into the vertex arena */
+} FrameBuf;
+static FrameBuf sFrameBufs[SLOTS + 1];
+static FrameBuf* sFrameBuf;
 static void vk_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
     VkDeviceSize vbytes = (VkDeviceSize)vertices * sizeof(GXVertex), ibytes = (VkDeviceSize)count * 4, off;
     VkBufferCopy c;
@@ -1823,7 +2652,7 @@ static void vk_frame_data(const GXVertex* v, int vertices, const uint32_t* index
     }
     if (!f) {
         /* All in flight: wait for the GPU. */
-        vkDeviceWaitIdle(sDev);
+        wait_idle();
         sDone = sSerial - 1;
         f = &sFrameBufs[0] != sFrameBuf ? &sFrameBufs[0] : &sFrameBufs[1];
     }
@@ -1837,9 +2666,10 @@ static void vk_frame_data(const GXVertex* v, int vertices, const uint32_t* index
         f->ib = make_buffer(ibytes + ibytes / 4 + 4096, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             props);
     }
+    f->arena = !v;
     if (f->vb.map) {
         /* No frame in flight draws from it (above). */
-        memcpy(f->vb.map, v, (size_t)vbytes);
+        if (vbytes) memcpy(f->vb.map, v, (size_t)vbytes);
         memcpy(f->ib.map, index, (size_t)ibytes);
         f->used = sSerial;
         sFrameBuf = f;
@@ -1865,26 +2695,45 @@ static void vk_frame_data(const GXVertex* v, int vertices, const uint32_t* index
 }
 
 static void vk_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count) {
-    if (!sFrameBuf || !sFrameBuf->vb.buf) return;
+    VkBuffer vb;
+    if (!sFrameBuf) return;
+    vb = sFrameBuf->arena ? sArena.buf : sFrameBuf->vb.buf;
+    if (!vb) return;
     sFrameBuf->used = sSerial;
-    draw_common(st, xf, sFrameBuf->vb.buf, sFrameBuf->ib.buf, first_vertex, (uint32_t)first_index, (uint32_t)count);
+    draw_common(st, xf, vb, sFrameBuf->ib.buf, first_vertex, (uint32_t)first_index, (uint32_t)count);
 }
 
 static void vk_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
     Quad q;
     if (!color && !alpha && !depth) return;
-    begin_efb();
-    use_pipeline(pipeline(PK_FILL, (color ? 7u : 0u) | (alpha ? 8u : 0u)));
-    set_viewport(0, 0, (float)sEfb.w, (float)sEfb.h, 0, 1);
-    set_scissor(0, 0, sEfb.w, sEfb.h);
-    set_cull(VK_CULL_MODE_NONE);
-    set_depth(depth, depth, VK_COMPARE_OP_ALWAYS);
     memset(&q, 0, sizeof(q));
     q.color[0] = ((rgba >> 24) & 0xFF) / 255.0f;
     q.color[1] = ((rgba >> 16) & 0xFF) / 255.0f;
     q.color[2] = ((rgba >> 8) & 0xFF) / 255.0f;
     q.color[3] = (rgba & 0xFF) / 255.0f;
     q.depth = (float)(1.0 - z / 16777215.0);
+    if (!sRendering) {
+        /* Outside drawing (after a copy, as a rule): what is cleared whole
+         * is cleared as drawing starts. */
+        if (color && alpha) {
+            sClearColor = 1;
+            sClearShown = 0;
+            memcpy(sClearColorTo.float32, q.color, sizeof(sClearColorTo.float32));
+            color = alpha = 0;
+        }
+        if (depth) {
+            sClearDepth = 1;
+            sClearDepthTo = q.depth;
+            depth = 0;
+        }
+        if (!color && !alpha) return;
+    }
+    begin_efb(depth);
+    use_pipeline(pipeline(PK_FILL, (color ? 7u : 0u) | (alpha ? 8u : 0u)));
+    set_viewport(0, 0, (float)sEfb.w, (float)sEfb.h, 0, 1);
+    set_scissor(0, 0, sEfb.w, sEfb.h);
+    set_cull(VK_CULL_MODE_NONE);
+    set_depth(depth, depth, VK_COMPARE_OP_ALWAYS);
     quad(&q);
 }
 
@@ -1916,6 +2765,7 @@ static void vk_copy(int target, int x, int y, int w, int h, int fmt, int intensi
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
     Quad q;
     end_efb();
+    efb_settle();
     transition(S->cb, &sEfb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     transition(S->cb, &t->im, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     ca.imageView = t->im.view;
@@ -1966,11 +2816,21 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
             sWin = make_image(w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_SAMPLE_COUNT_1_BIT);
         }
+        present_done(); /* which may have found the swapchain out of date */
         if (sChainStale || sChainW != w || sChainH != h) make_swapchain(w, h);
         /* The settings menu, uploaded before the frame's commands run. */
         menu = menu_draw(w, h);
         if (menu) {
             Tex* m = &sTex[TEX_MENU];
+#ifdef __ANDROID__
+            /* Uploaded only when it changed: a phone's screen is a lot to
+             * copy every frame. */
+            static unsigned uploaded = ~0u;
+            int same = menu_generation() == uploaded && m->im.w == w && m->im.h == h;
+            uploaded = menu_generation();
+#else
+            int same = 0;
+#endif
             if (m->im.w != w || m->im.h != h) {
                 drop_image(&m->im);
                 m->im = make_image(w, h, 1, VK_FORMAT_B8G8R8A8_UNORM,
@@ -1978,7 +2838,7 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
                 m->sampler = sLinearClamp;
                 set_texture(TEX_MENU);
             }
-            upload(S->up, m, w, h, 1, (const uint8_t*)menu);
+            if (!same) upload(S->up, m, w, h, 1, (const uint8_t*)menu);
         }
         /* The copied rectangle of the EFB, as large as fits in the window
          * at the shape it has on a TV, with black bars left over. */
@@ -1989,6 +2849,7 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
             dh = h;
             dw = (int)(h * aspect + 0.5);
         }
+        efb_settle();
         transition(S->cb, &sEfb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         transition(S->cb, &sWin, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         ca.imageView = sWin.view;
@@ -2044,13 +2905,18 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
         if (sChain && sChainW == w && sChainH == h) {
             /* Above 60 fps a frame is never waited for (gx_frames.c):
              * left out if no image is free. */
-            VkResult r = vkAcquireNextImageKHR(sDev, sChain, may_drop ? 0 : UINT64_MAX, S->acquired, VK_NULL_HANDLE, &image);
+            VkResult r;
+            present_done();
+            r = vkAcquireNextImageKHR(sDev, sChain, may_drop ? 0 : UINT64_MAX, S->acquired, VK_NULL_HANDLE, &image);
             if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
                 VkImageMemoryBarrier2 b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
                 VkDependencyInfo d = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
                 VkImageBlit blit;
+                VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
                 acquired = 1;
-                if (r == VK_SUBOPTIMAL_KHR) sChainStale = 1;
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                CHECK(vkBeginCommandBuffer(S->out, &bi));
+                if (r == VK_SUBOPTIMAL_KHR && !SUBOPTIMAL_IS_EXPECTED) sChainStale = 1;
                 b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
                 b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
                 b.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -2063,20 +2929,20 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
                 b.subresourceRange.layerCount = 1;
                 d.imageMemoryBarrierCount = 1;
                 d.pImageMemoryBarriers = &b;
-                vkCmdPipelineBarrier2(S->cb, &d);
+                vkCmdPipelineBarrier2(S->out, &d);
                 memset(&blit, 0, sizeof(blit));
                 blit.srcSubresource.aspectMask = blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 blit.srcSubresource.layerCount = blit.dstSubresource.layerCount = 1;
                 blit.srcOffsets[1].x = blit.dstOffsets[1].x = w;
                 blit.srcOffsets[1].y = blit.dstOffsets[1].y = h;
                 blit.srcOffsets[1].z = blit.dstOffsets[1].z = 1;
-                vkCmdBlitImage(S->cb, sWin.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sChainImages[image],
+                vkCmdBlitImage(S->out, sWin.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sChainImages[image],
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
                 b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
                 b.dstAccessMask = 0;
                 b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-                vkCmdPipelineBarrier2(S->cb, &d);
+                vkCmdPipelineBarrier2(S->out, &d);
             } else if (r == VK_NOT_READY || r == VK_TIMEOUT) {
                 dropped = 1;
             } else {
@@ -2089,10 +2955,40 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
     return dropped;
 }
 
+#ifdef __ANDROID__
+/* The app went to the background and its window is going: everything on
+ * it is let go of, until vk_window_back. The pipelines made so far are
+ * kept on disk now, as Android may end the app while it's away. */
+void vk_window_lost(void) {
+    uint32_t i;
+    if (!sDev) return;
+    wait_idle();
+    if (sCacheDirty) save_cache();
+    if (sChain) vkDestroySwapchainKHR(sDev, sChain, NULL);
+    for (i = 0; i < sChainCount; i++) vkDestroySemaphore(sDev, sRendered[i], NULL);
+    sChain = VK_NULL_HANDLE;
+    sChainCount = 0;
+    sChainW = sChainH = 0;
+    if (sSurface) vkDestroySurfaceKHR(sInstance, sSurface, NULL);
+    sSurface = VK_NULL_HANDLE;
+}
+
+/* And back, with a new window. */
+void vk_window_back(void) {
+    if (!sDev) return;
+    if (!make_surface()) {
+        fprintf(stderr, "vulkan: no surface for the new window\n");
+        exit(1);
+    }
+    sChainStale = 1;
+}
+#endif
+
 const GXDevice g_vk_device = {
     "Vulkan",        vk_init,          vk_texture, vk_texture_update, vk_texture_delete, vk_draw,
     vk_frame_data,   vk_draw_recorded, vk_clear,   vk_copy_target,    vk_copy_texture,   vk_copy,
-    vk_present,      vk_apply_settings, vk_scale,  vk_msaa,
+    vk_present,      vk_apply_settings, vk_scale,  vk_msaa,   vk_arena_alloc,    vk_arena_write,    vk_arena_free,
+    vk_texture_pixels,
 };
 
 #endif

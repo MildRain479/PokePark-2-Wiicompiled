@@ -21,6 +21,134 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define FIBER_API WINAPI
+#define fiber_self() ConvertThreadToFiber(NULL)
+#define fiber_new(size, fn, arg) CreateFiber(size, fn, arg)
+#define fiber_free(h) DeleteFiber(h)
+#define fiber_switch(from, to) SwitchToFiber(to)
+#else
+/* Elsewhere, fibers of our own: a stack each, and a switch that pushes
+ * the callee-saved registers on the stack being left, then pops them
+ * from the one being entered. A new fiber's stack starts as if it had
+ * been switched out just before host_fiber_start, which calls fn(arg). */
+#include <sys/mman.h>
+#define FIBER_API
+
+typedef struct {
+    void* sp; /* saved while switched out */
+    void* stack;
+    size_t size;
+} HostFiber;
+
+void host_fiber_swap(void** save_sp, void* sp);
+void host_fiber_start(void);
+
+#if defined(__aarch64__)
+__asm__(".text\n"
+        ".globl host_fiber_swap\n"
+        ".type host_fiber_swap, %function\n"
+        ".p2align 2\n"
+        "host_fiber_swap:\n"
+        "  sub sp, sp, #160\n"
+        "  stp x19, x20, [sp, #0]\n"
+        "  stp x21, x22, [sp, #16]\n"
+        "  stp x23, x24, [sp, #32]\n"
+        "  stp x25, x26, [sp, #48]\n"
+        "  stp x27, x28, [sp, #64]\n"
+        "  stp x29, x30, [sp, #80]\n"
+        "  stp d8, d9, [sp, #96]\n"
+        "  stp d10, d11, [sp, #112]\n"
+        "  stp d12, d13, [sp, #128]\n"
+        "  stp d14, d15, [sp, #144]\n"
+        "  mov x9, sp\n"
+        "  str x9, [x0]\n"
+        "  mov sp, x1\n"
+        "  ldp x19, x20, [sp, #0]\n"
+        "  ldp x21, x22, [sp, #16]\n"
+        "  ldp x23, x24, [sp, #32]\n"
+        "  ldp x25, x26, [sp, #48]\n"
+        "  ldp x27, x28, [sp, #64]\n"
+        "  ldp x29, x30, [sp, #80]\n"
+        "  ldp d8, d9, [sp, #96]\n"
+        "  ldp d10, d11, [sp, #112]\n"
+        "  ldp d12, d13, [sp, #128]\n"
+        "  ldp d14, d15, [sp, #144]\n"
+        "  add sp, sp, #160\n"
+        "  ret\n"
+        ".globl host_fiber_start\n"
+        ".type host_fiber_start, %function\n"
+        "host_fiber_start:\n"
+        "  mov x0, x20\n"
+        "  blr x19\n"
+        "  brk #0\n");
+#define SWAP_FRAME 160
+static void fiber_frame(uintptr_t* f, void (*fn)(void*), void* arg) {
+    f[0] = (uintptr_t)fn; /* x19 */
+    f[1] = (uintptr_t)arg; /* x20 */
+    f[11] = (uintptr_t)host_fiber_start; /* x30 */
+}
+#elif defined(__x86_64__)
+__asm__(".text\n"
+        ".globl host_fiber_swap\n"
+        "host_fiber_swap:\n"
+        "  pushq %rbp\n"
+        "  pushq %rbx\n"
+        "  pushq %r12\n"
+        "  pushq %r13\n"
+        "  pushq %r14\n"
+        "  pushq %r15\n"
+        "  movq %rsp, (%rdi)\n"
+        "  movq %rsi, %rsp\n"
+        "  popq %r15\n"
+        "  popq %r14\n"
+        "  popq %r13\n"
+        "  popq %r12\n"
+        "  popq %rbx\n"
+        "  popq %rbp\n"
+        "  ret\n"
+        ".globl host_fiber_start\n"
+        "host_fiber_start:\n"
+        "  movq %r13, %rdi\n"
+        "  call *%r12\n"
+        "  ud2\n");
+/* Six registers and the return address, placed so the stack is 16-byte
+ * aligned at host_fiber_start's call. */
+#define SWAP_FRAME 72
+static void fiber_frame(uintptr_t* f, void (*fn)(void*), void* arg) {
+    f[2] = (uintptr_t)arg; /* r13 */
+    f[3] = (uintptr_t)fn; /* r12 */
+    f[6] = (uintptr_t)host_fiber_start;
+}
+#else
+#error "no fiber switch for this CPU"
+#endif
+
+static void* fiber_self(void) { return calloc(1, sizeof(HostFiber)); }
+
+static void* fiber_new(size_t size, void (*fn)(void*), void* arg) {
+    HostFiber* f = (HostFiber*)calloc(1, sizeof(HostFiber));
+    uint8_t* top;
+    f->stack = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (f->stack == MAP_FAILED) {
+        HLE_WARN("no memory for a thread's stack");
+        exit(1);
+    }
+    f->size = size;
+    mprotect(f->stack, 4096, PROT_NONE); /* a guard page under it */
+    top = (uint8_t*)f->stack + size;
+    f->sp = top - SWAP_FRAME;
+    memset(f->sp, 0, SWAP_FRAME);
+    fiber_frame((uintptr_t*)f->sp, fn, arg);
+    return f;
+}
+
+static void fiber_free(void* h) {
+    HostFiber* f = (HostFiber*)h;
+    if (f->stack) munmap(f->stack, f->size);
+    free(f);
+}
+
+static void fiber_switch(void* from, void* to) { host_fiber_swap(&((HostFiber*)from)->sp, ((HostFiber*)to)->sp); }
 #endif
 
 /* MSVC's longjmp unwinds through SEH, which rejects jumps on fiber
@@ -78,9 +206,7 @@ static void ensure_main_fiber(ppc_t* c) {
     if (sCurrent) return;
     sCpu = c;
     sCurrent = &sFibers[sFiberCount++];
-#ifdef _WIN32
-    sCurrent->handle = ConvertThreadToFiber(NULL);
-#endif
+    sCurrent->handle = fiber_self();
 }
 
 /* Loads registers from a guest OSContext. */
@@ -100,8 +226,7 @@ static void load_context(ppc_t* c, uint32_t ctx) {
     c->msr = LD32(ctx + 0x19C);
 }
 
-#ifdef _WIN32
-static void WINAPI fiber_main(void* arg) {
+static void FIBER_API fiber_main(void* arg) {
     Fiber* f = (Fiber*)arg;
     ppc_t* c = sCpu;
     uint32_t entry, ret;
@@ -119,7 +244,6 @@ static void WINAPI fiber_main(void* arg) {
     HLE_WARN("thread %08X: OSExitThread returned", f->ctx);
     exit(1);
 }
-#endif
 
 /* Continues fiber f: starts it, or jumps to its resume point. Called on
  * the fiber being left; returns only by a jump into that fiber's own
@@ -128,9 +252,7 @@ static void switch_to(Fiber* f) {
     Fiber* self = sCurrent;
     if (f != self) {
         sCurrent = f;
-#ifdef _WIN32
-        SwitchToFiber(f->handle);
-#endif
+        fiber_switch(self->handle, f->handle);
         /* Something switched back to this fiber. */
         self = sCurrent;
     }
@@ -205,16 +327,15 @@ void f_80209080(ppc_t* c) {
             }
             f = &sFibers[sFiberCount++];
         }
-#ifdef _WIN32
-        if (f->handle) DeleteFiber(f->handle);
-#endif
+        if (f->handle) fiber_free(f->handle);
         memset(f, 0, sizeof(*f));
         f->ctx = ctx;
-#ifdef _WIN32
-        f->handle = CreateFiber(FIBER_STACK, fiber_main, f);
-#endif
-        sCurrent = f;
-        SwitchToFiber(f->handle);
+        f->handle = fiber_new(FIBER_STACK, fiber_main, f);
+        {
+            Fiber* self = sCurrent;
+            sCurrent = f;
+            fiber_switch(self->handle, f->handle);
+        }
         /* Something switched back to this fiber. */
         longjmp(sCurrent->resume->jb, 1);
     }

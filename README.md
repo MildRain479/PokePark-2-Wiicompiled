@@ -107,3 +107,11 @@ Download the latest release from [encounter/objdiff](https://github.com/encounte
 Select an object from the left sidebar to begin diffing. Changes to the project will rebuild automatically: changes to source files, headers, `configure.py`, `splits.txt` or `symbols.txt`.
 
 ![](assets/objdiff.png)
+
+Credits
+=======
+
+The static recompilation (`recomp/`, see [recomp/README.md](recomp/README.md)) uses:
+
+- [nod](https://github.com/encounter/nod) by Luke Street and contributors (MIT or Apache-2.0): the Android app reads the player's disc image (RVZ, ISO, WBFS and others) with it, built into the app. Its license and those of the libraries it is built with are in [recomp/assets/nod_license.txt](recomp/assets/nod_license.txt).
+- [decomp-toolkit](https://github.com/encounter/decomp-toolkit) by Luke Street and contributors (MIT or Apache-2.0): the Windows program extracts the player's disc image with it ([recomp/assets/dtk_license.txt](recomp/assets/dtk_license.txt)).
