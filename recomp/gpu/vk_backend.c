@@ -2798,31 +2798,23 @@ static int vk_copy_target(uint32_t addr, int w, int h) {
 
 static uint32_t vk_copy_texture(int target) { return sTargets[target].handle; }
 
-/* The copy's texture read back, after the frames submitted so far: a
- * batch of its own, waited for (it's rare: gx_frames.c's write backs). */
+/* The copy's texture read back as the frame so far leaves it (a copy the
+ * game made this frame, for its CPU to read): what the frame has
+ * recorded is submitted with the read and waited for, and the frame goes
+ * on in fresh command buffers. It's rare: gx_frames.c's write backs. */
 static uint8_t* vk_copy_read(int target, int* w, int* h) {
-    static VkCommandPool pool;
-    static VkCommandBuffer cb;
     static VkFence fence;
     static Buffer buf;
     Image* im = &sTex[sTargets[target].handle].im;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkCommandBuffer cbs[2];
     VkBufferImageCopy r;
+    VkImageLayout was = im->layout;
     VkDeviceSize bytes = (VkDeviceSize)im->w * im->h * 4;
     uint8_t* out;
-    present_done(); /* (Android presents from another thread: the queue is ours again) */
-    if (!pool) {
-        VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    if (!fence) {
         VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        cpi.queueFamilyIndex = sQueueFamily;
-        CHECK(vkCreateCommandPool(sDev, &cpi, NULL, &pool));
-        cai.commandPool = pool;
-        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cai.commandBufferCount = 1;
-        CHECK(vkAllocateCommandBuffers(sDev, &cai, &cb));
         CHECK(vkCreateFence(sDev, &fci, NULL, &fence));
     }
     if (buf.size < bytes) {
@@ -2831,23 +2823,40 @@ static uint8_t* vk_copy_read(int target, int* w, int* h) {
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
     }
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    CHECK(vkBeginCommandBuffer(cb, &bi));
-    transition(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    end_efb();
+    transition(S->cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     memset(&r, 0, sizeof(r));
     r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     r.imageSubresource.layerCount = 1;
     r.imageExtent.width = (uint32_t)im->w;
     r.imageExtent.height = (uint32_t)im->h;
     r.imageExtent.depth = 1;
-    vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buf, 1, &r);
-    transition(cb, im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    CHECK(vkEndCommandBuffer(cb));
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cb;
+    vkCmdCopyImageToBuffer(S->cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buf, 1, &r);
+    transition(S->cb, im, was);
+    if (sArenaCopied) {
+        memory_barrier(S->up);
+        sArenaCopied = 0;
+    }
+    CHECK(vkEndCommandBuffer(S->up));
+    CHECK(vkEndCommandBuffer(S->cb));
+    cbs[0] = S->up;
+    cbs[1] = S->cb;
+    si.commandBufferCount = 2;
+    si.pCommandBuffers = cbs;
+    present_done(); /* (Android presents from another thread: the queue is ours again) */
     CHECK(vkQueueSubmit(sQueue, 1, &si, fence));
     CHECK(vkWaitForFences(sDev, 1, &fence, VK_TRUE, UINT64_MAX));
     CHECK(vkResetFences(sDev, 1, &fence));
+    /* The rest of the frame, as begin_slot starts one. */
+    CHECK(vkResetCommandPool(sDev, S->pool, 0));
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    CHECK(vkBeginCommandBuffer(S->up, &bi));
+    CHECK(vkBeginCommandBuffer(S->cb, &bi));
+    forget();
+    sXfAt = sTevAt = -1;
+    sBound[0] = sBound[1] = 0;
+    bind_sets();
+    vkCmdSetFrontFace(S->cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
     out = (uint8_t*)malloc((size_t)bytes);
     if (out) memcpy(out, buf.map, (size_t)bytes);
     *w = im->w;

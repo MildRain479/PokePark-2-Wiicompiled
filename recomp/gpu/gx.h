@@ -141,6 +141,8 @@ void gxb_present(int x, int y, int w, int h);
 
 /* Texture decoding (gx_texture.c). Output is RGBA8, row-major. */
 int gx_texture_size(int fmt, int width, int height);
+void gxb_copy_sync(uint32_t addr);
+void gx_frame_data_so_far(void);
 void gx_encode_copy(uint8_t* dst, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba);
 void gx_decode_texture(uint8_t* out, const uint8_t* src, int fmt, int width, int height,
                        const uint8_t* tlut, int tlut_fmt);

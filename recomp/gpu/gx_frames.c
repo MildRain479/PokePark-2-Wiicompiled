@@ -734,7 +734,7 @@ void gxb_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {
 }
 
 int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int fmt);
-void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba);
+void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba, int force);
 
 /* Copies to put in guest memory too (gx_register_copy says which), once
  * the frame that makes them has been drawn: read back from the GPU, at
@@ -745,40 +745,82 @@ typedef struct WriteBack {
 } WriteBack;
 static WriteBack sWriteBacks[8];
 static int sWriteBackCount;
+/* Every copy's latest, for gxb_copy_sync. */
+static WriteBack sCopiesMade[32];
+static int sCopiesMadeCount;
+
+static void write_back(const WriteBack* b, int force) {
+    int tw, th, x, y;
+    uint8_t* full = sDev->copy_read ? sDev->copy_read(b->target, &tw, &th) : NULL;
+    uint8_t* px = full ? (uint8_t*)malloc((size_t)b->w * b->h * 4) : NULL;
+    if (px) {
+        /* Each EFB pixel: the average of those it was drawn as. */
+        for (y = 0; y < b->h; y++) {
+            int y0 = y * th / b->h, y1 = (y + 1) * th / b->h;
+            for (x = 0; x < b->w; x++) {
+                int x0 = x * tw / b->w, x1 = (x + 1) * tw / b->w, sx, sy, k, n = 0;
+                unsigned sum[4] = {0, 0, 0, 0};
+                if (y1 <= y0) y1 = y0 + 1;
+                if (x1 <= x0) x1 = x0 + 1;
+                for (sy = y0; sy < y1 && sy < th; sy++) {
+                    for (sx = x0; sx < x1 && sx < tw; sx++, n++) {
+                        for (k = 0; k < 4; k++) sum[k] += full[((size_t)sy * tw + sx) * 4 + k];
+                    }
+                }
+                for (k = 0; k < 4; k++) px[((size_t)y * b->w + x) * 4 + k] = (uint8_t)(n ? (sum[k] + n / 2) / n : 0);
+            }
+        }
+        gx_copy_write_back(b->addr, b->fmt, b->intensity, b->w, b->h, b->stride, px, force);
+    }
+    free(px);
+    free(full);
+}
 
 static void write_back_copies(void) {
     int i;
-    for (i = 0; i < sWriteBackCount; i++) {
-        WriteBack* b = &sWriteBacks[i];
-        int tw, th, x, y;
-        uint8_t* full = sDev->copy_read ? sDev->copy_read(b->target, &tw, &th) : NULL;
-        uint8_t* px = full ? (uint8_t*)malloc((size_t)b->w * b->h * 4) : NULL;
-        if (px) {
-            /* Each EFB pixel: the average of those it was drawn as. */
-            for (y = 0; y < b->h; y++) {
-                int y0 = y * th / b->h, y1 = (y + 1) * th / b->h;
-                for (x = 0; x < b->w; x++) {
-                    int x0 = x * tw / b->w, x1 = (x + 1) * tw / b->w, sx, sy, k, n = 0;
-                    unsigned sum[4] = {0, 0, 0, 0};
-                    if (y1 <= y0) y1 = y0 + 1;
-                    if (x1 <= x0) x1 = x0 + 1;
-                    for (sy = y0; sy < y1 && sy < th; sy++) {
-                        for (sx = x0; sx < x1 && sx < tw; sx++, n++) {
-                            for (k = 0; k < 4; k++) sum[k] += full[((size_t)sy * tw + sx) * 4 + k];
-                        }
-                    }
-                    for (k = 0; k < 4; k++) px[((size_t)y * b->w + x) * 4 + k] = (uint8_t)(n ? (sum[k] + n / 2) / n : 0);
-                }
-            }
-            gx_copy_write_back(b->addr, b->fmt, b->intensity, b->w, b->h, b->stride, px);
-        }
-        free(px);
-        free(full);
-    }
+    for (i = 0; i < sWriteBackCount; i++) write_back(&sWriteBacks[i], 0);
     sWriteBackCount = 0;
 }
 
+/* g_gx_copy_sync: the copy holding addr, made every frame and so never
+ * written back (the game's photos: its JPEG encoder reads the screen's
+ * copy), put in memory now, as the frames submitted so far left it. */
+void gxb_copy_sync(uint32_t addr) {
+    const WriteBack* in = NULL;
+    int i;
+    for (i = 0; i < sCopiesMadeCount; i++) {
+        const WriteBack* b = &sCopiesMade[i];
+        /* Its rows of blocks: 8 lines for 4 bits a pixel, else 4. */
+        uint32_t bytes = (uint32_t)(b->stride * ((b->h + 7) / 8 * 8)) / ((b->fmt & 15) == 0 ? 8 : 4);
+        if (b->addr == addr) {
+            in = b;
+            break;
+        }
+        if (!in && addr - b->addr < bytes) in = b;
+    }
+    if (!in) return;
+    if (sRecording) {
+        /* The copy is drawn with the frame, not yet ended: what's been
+         * recorded of it is drawn now. Nothing more of the frame before is
+         * shown until this one ends (the device has this one's vertices). */
+        gx_frame_data_so_far();
+        GL_ENTER();
+        for (i = 0; i < sRec->count; i++) {
+            const RecOp* r = &sRec->ops[i];
+            if (r->op == OP_DRAW) sDev->draw_recorded(&r->st, sRec->xf + r->xf, r->a[0], r->a[2], r->a[3]);
+            else if (r->op == OP_CLEAR) sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]);
+            else if (r->op == OP_COPY) sDev->copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]);
+        }
+        GL_LEAVE(GLK_DRAW);
+        sHaveFrame = 0;
+    }
+    GL_ENTER();
+    write_back(in, 1);
+    GL_LEAVE(GLK_COPY);
+}
+
 void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha, int stride) {
+    WriteBack made;
     int t, i;
     GL_ENTER();
     t = sDev->copy_target(addr, w, h);
@@ -798,19 +840,26 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         r->a[6] = intensity;
         r->a[7] = efb_alpha;
     }
+    made.addr = addr;
+    made.target = t;
+    made.w = w;
+    made.h = h;
+    made.fmt = fmt;
+    made.intensity = intensity;
+    made.stride = stride;
+    for (i = 0; i < sCopiesMadeCount && sCopiesMade[i].addr != addr; i++) {}
+    if (i == sCopiesMadeCount) {
+        if (sCopiesMadeCount < 32) sCopiesMadeCount++;
+        else i = (int)(addr >> 5) & 31;
+    }
+    sCopiesMade[i] = made;
     if (!gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt)) return;
     for (i = 0; i < sWriteBackCount && sWriteBacks[i].addr != addr; i++) {}
     if (i == sWriteBackCount) {
         if (sWriteBackCount == 8) return;
         sWriteBackCount++;
     }
-    sWriteBacks[i].addr = addr;
-    sWriteBacks[i].target = t;
-    sWriteBacks[i].w = w;
-    sWriteBacks[i].h = h;
-    sWriteBacks[i].fmt = fmt;
-    sWriteBacks[i].intensity = intensity;
-    sWriteBacks[i].stride = stride;
+    sWriteBacks[i] = made;
 }
 
 void gxb_present(int x, int y, int cw, int ch) {

@@ -611,14 +611,17 @@ int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int 
 
 /* Puts the copy to addr, as read back (w x h RGBA8), into guest memory in
  * its format, unless the game has written there since it was made (the
- * memory is something else now). It stays the copy for draws. */
-void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba) {
+ * memory is something else now) and the game hasn't asked for it (force).
+ * It stays the copy for draws. */
+void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba, int force) {
     int i;
     for (i = 0; i < sCopyCount && sCopies[i].addr != addr; i++) {}
-    if (i == sCopyCount || sCopies[i].bytes <= 0) return;
-    if (hash_bytes(MA(addr), sCopies[i].bytes) != sCopies[i].mem_hash) return;
+    if (!force) {
+        if (i == sCopyCount || sCopies[i].bytes <= 0) return;
+        if (hash_bytes(MA(addr), sCopies[i].bytes) != sCopies[i].mem_hash) return;
+    }
     gx_encode_copy(MA(addr), fmt, intensity, w, h, stride, rgba);
-    sCopies[i].mem_hash = hash_bytes(MA(addr), sCopies[i].bytes);
+    if (i < sCopyCount && sCopies[i].bytes > 0) sCopies[i].mem_hash = hash_bytes(MA(addr), sCopies[i].bytes);
     if (getenv("RECOMP_GX_COPY_LOG"))
         fprintf(stderr, "gx: EFB copy %08X %dx%d fmt %d written to memory (frame %llu)\n", addr, w, h, fmt,
                 (unsigned long long)sFrame);
@@ -1020,6 +1023,13 @@ static uint32_t sDisplayList, sListDraws;
 /* Vertices go to the device's arena (gxb_arena), display lists' kept
  * there from frame to frame (list_begin). */
 static int sArena;
+
+/* The frame's vertices so far, for drawing what's been recorded of it
+ * (gxb_copy_sync, while frames are recorded). */
+void gx_frame_data_so_far(void) {
+    flush_batch();
+    if (sKeepFrame) gxb_frame_data(sArena ? NULL : sBatch, sBatchVerts, sIndex, sIndexCount);
+}
 
 static void flush_batch(void) {
     if (sIndexCount == sIndexFirst) return;
@@ -1693,5 +1703,6 @@ void gx_init(void) {
     sArena = gxb_arena() && !(v && *v == '0') && !getenv("RECOMP_GX_SKIP");
     g_wgpipe_write = fifo_append;
     g_gx_flush = gx_flush;
+    g_gx_copy_sync = gxb_copy_sync;
     sReady = 1;
 }
