@@ -1,4 +1,4 @@
-# Static recompilation (proof of concept)
+# PokePark 2: static recompilation
 
 This translates the game's PowerPC code in `main.dol` into C that compiles
 for the host (x86-64 today; any 64-bit target in principle). It is a
@@ -13,14 +13,62 @@ copy at startup.
 ## Use
 
 ```
-python tools/recomp/recomp.py          # main.dol -> build/recomp/gen/*.c (~4 s)
+python tools/recomp/recomp.py          # main.dol -> build/recomp_S2LE01/gen/*.c (~4 s)
 python tools/recomp/build.py --run     # compile (~25 s with MSVC) and run the tests
 python tools/recomp/build.py --release # optimized across files (~70 s, a few % faster)
 ```
 
-`recomp.py` needs `orig/R8AE01/sys/main.dol` and dtk's
-`config/R8AE01/symbols.txt` (for function boundaries). `build.py` uses
+`recomp.py` needs `orig/S2LE01/sys/main.dol` and dtk's
+`config/S2LE01/symbols.txt` (for function boundaries). `build.py` uses
 MSVC on Windows and `cc`/`c++` elsewhere.
+
+## The game
+
+This builds PokePark 2: Wonders Beyond (`S2LE01`) alone, into
+`build/recomp_S2LE01`. The recompiler, runtime, renderers and hardware
+patches are in `recomp/`; the game's own patches, hook list and addresses in
+`recomp/patches/S2LE01/`. It began as a fork of PokePark Wii's recomp, whose
+code was removed from here; that game is built from its own repository.
+
+`config/S2LE01/symbols.txt` comes from dtk (`dtk dol split
+config/S2LE01/config.yml build/S2LE01`). `config/S2LE01/symbols_ported.txt`
+holds names carried over from the first game: those with the same body are
+reliable; the ones paired by call order or vtable slot are hints for reading
+traces, so check a function's code before hooking it.
+
+Patches name game functions as `F_<name>` and other addresses as `A_<name>`,
+defined per game in `addrs.h`. A game's `hooks.txt` lists what it replaces.
+
+### Controls
+
+They follow the first game: the same keys and settings, the mouse turning the
+camera and B setting it back, and Q and E (LB and RB) by turns for shaking.
+Outside the attractions the pointer is on in menus and while B is held, for
+aiming photos. The four attractions (`recomp/patches/S2LE01/minigames.h`):
+
+| Attraction | Controls |
+|---|---|
+| Cake Contraption | mouse or right stick to aim, A to shoot |
+| Dance Inferno | the shake keys by turns, in time with the symbols |
+| Power Bash | the shake keys by turns to swing; A drops a bomb through the floor |
+| Flight of Fancy | left, right, up and down to tilt, 2 to fly faster |
+
+`RECOMP_ATTRACTION=<1-4>,<seconds>` goes from the park to an attraction's lobby
+that many seconds after reaching it, for testing. `RECOMP_MOUSE=<dx>,<dy>`
+moves the camera that many pixels every update, also for testing.
+`RECOMP_BOOT_SCREENS=1` keeps the full wrist strap screen, as in the first game.
+
+The Pad's Options tab works as in the first game (right on the Pad's main
+page), its book drawn in the Pad's colors since this game keeps the Pad's art
+in layouts. The dash's blur around the screen's borders is left off, and the
+turned camera is held inside walls and above the ground.
+
+The instructions are rewritten for the PC's and phone's controls
+(`hle_text.c`): the attractions' How to Play pages, the partners' moves, the
+moves taught in the field, the portals' charge, the photo and rumble lines.
+Each names the keyboard key, the controller button or the touch control,
+whichever was used last. The How to Play pictures still show a Wii Remote, and
+the pause screen has no PC changes.
 
 ## What works
 
@@ -65,21 +113,21 @@ MSVC on Windows and `cc`/`c++` elsewhere.
 
 ```
 python tools/recomp/build.py --run boot          # boots main.dol (10 s watchdog)
-RECOMP_HLE_LOG=1 build/recomp/boot.exe orig/R8AE01/sys/main.dol 20
+RECOMP_HLE_LOG=1 build/recomp_S2LE01/boot.exe orig/S2LE01/sys/main.dol 20
 ```
 
 The boot harness (`recomp/boot/boot.c`) sets up low memory the way the
 system menu and apploader leave it, then runs the game's own `__start`.
 
-It needs the disc's files in `orig/R8AE01/disc` (git-ignored), extracted
+It needs the disc's files in `orig/S2LE01/disc` (git-ignored), extracted
 from your copy with dtk:
 - `sys/boot.bin`, `bi2.bin`, `apploader.img` and `fst.bin`;
 - `tmd.bin`;
 - the `files/` tree.
 
-The THP movies (`files/Thp`, 667 MB) are needed from the title screen on.
+The movies are needed from the title screen on.
 
-Save data (the console's NAND) lives in `orig/R8AE01/nand`, also
+Save data (the console's NAND) lives in `orig/S2LE01/nand`, also
 git-ignored, and is created on first run.
 
 **Where it gets to:**
@@ -117,8 +165,31 @@ shape they have on a TV, with black bars filling the rest of the
 window. THP movie frames are
 decoded natively (`hle_thp.c`). EFB copies are converted to their copy
 format, and the EFB depth is stored reversed in a float buffer, for the
-precision GX scenes need near the far plane. 3D lighting is implemented
-but not yet checked in gameplay.
+precision GX scenes need near the far plane.
+
+The Aspect ratio setting picks that shape. 4:3 sets the console up for
+a 4:3 TV, from the next start, and the game draws its own 4:3 layouts.
+16:10 and 21:9 (64:27) widen the 16:9 picture into a canvas
+(`gx_canvas`, `gx_frames.c`) with margins above and below or at the
+sides: the EFB is made that much larger, and each draw is placed on it
+(`gx_canvas_draw`). A draw of the world (a perspective projection whose
+far plane is past 2000) over the whole picture has its viewport grown to
+the canvas and its clip space shrunk as much (the vertex shader's
+`canvas`), so what was in the picture stays put and more of the world
+shows around it. The HUD's layouts are drawn with a perspective camera
+too (45 degrees, also seeing to 10000), on the plane at z -579.4 where
+480 units fill the picture's height; those are told apart and stay 2D
+(`canvas_kind`, `gx_fifo.c`): grown as the world, the black bars the
+HUD keeps just past the picture's top and bottom showed on the margins.
+A draw covering the whole picture otherwise (2D, or the glow's copies
+of the picture laid back over it) is stretched over the canvas; other
+2D stays where it is, in the middle, and the menus show at 16:9 with
+the PokePark Pad's background filling the margins. EFB copies and the
+presented picture of the whole picture take in the margins; a copy
+written back to memory (the game's photos) is the picture's part of
+it. An EFB copy reads only the pixels wholly inside its rectangle, as
+filtering past its edges at a scale that isn't whole showed the sky's
+blue along the glow's edges.
 
 **Controls** (`recomp/boot/input_win32.c`; remote 0, held sideways), by
 default:
@@ -167,7 +238,11 @@ the device change. The icons are PNGs in `recomp/assets/prompts`, copied
 beside the program (Icons8's; see the README there); a key with none
 keeps the game's glyph, as does the d-pad on the keyboard. Prompts drawn
 as pictures in a screen's layout (the save screen's footer, the title's
-"Please Press") are not text and stay as they are.
+"Please Press") are not text and stay as they are, except the field's
+action bubble ("Talk", "Check": `ActionWin.tpl`, found as the game binds
+it with `TPLBind`), whose 2 is redrawn as the bound button: a
+controller's button in the game's grey disc, a key (Space, say) on its
+own, the disc wiped.
 
 The keyboard counts only while the game window has focus. While it has
 focus the mouse is captured for the camera: Esc lets it go, and a click
@@ -238,7 +313,7 @@ Diagnostics:
   tall; at 3 in 16:9 it is 2560x1368, pixel for pixel across a 1440p
   display.
 - `RECOMP_WIDESCREEN=0` sets the console up for a 4:3 TV instead of
-  16:9.
+  16:9 (`1` for 16:9), over the Aspect ratio setting.
 - `RECOMP_PAD_SCRIPT="<seconds>:<buttons> ..."` presses buttons at set
   times, for unattended runs: `"10:2 10.3: 22:right 22.3:"` presses 2 at
   10 s and right at 22 s. Buttons: up down left right a b 1 2 plus minus
@@ -290,10 +365,12 @@ Diagnostics:
 | `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
 | `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
 | `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. |
+| `hle_autosave.c` | Autosave (Options > Gameplay, off by default): when a friend is made (a Pokemon's friendship points reaching 100) or another area entered (the save data's area and zone changing), the save the PokePark Pad's Save makes (`fn_80185A20`): the game held busy (`fn_8002EAB0`), the play time brought up to date (`fn_802161D0`) and the slot the game was loaded from written (`fn_802165A0`, polled with `fn_802166A0` and `fn_80216750`). Watched from the minimap's drawing, so in the park; it waits until no event script has run for half a second (the script interface's `+0x248`, `0x804B04F0`). |
 | `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. It also provides what a US console's system menu leaves there: `SYSCONF` (English, stereo, Wii Remote settings) and `setting.txt` (region USA). `SCGetAspectRatio` reports a 16:9 TV unless `RECOMP_WIDESCREEN=0`. |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
 | `hle_exi.c` | EXI: no devices. |
 | `hle_bt.c` | Bluetooth: reported ready, with no adapter behind it. |
+| `hle_text.c` | The instructions for the PC's and phone's controls. A hook on the message lookup (`fn_803D7670`) swaps the text of the lines that describe the Wii Remote for new text, written into a block reserved at the top of the arena. Button tags in the new text (`[A]`, `[-]`, ...) become the game's own button tags, so they draw as the bound key's prompt. |
 | `hle_wpad.c` | The Wii Remote (WPAD). Remote 0, sideways with no extension, connects a second after the game sets its connect callback; a 200 Hz timer stands in for its reports, read from the host's controls (`host_input.h`). KPAD runs unchanged on top. Remotes 1-3 are absent; the speaker is accepted and silent. |
 | `hle_audio.c` | Audio. The DSP start-up is skipped and the DSP takes mail at once. A timer stands in for the AI DMA interrupt, at the buffer length the game sets (3 ms). Each tick mixes the voices of the last command list, as the DSP would (DSP-ADPCM, PCM16 and PCM8 decoding, linear resampling, envelope and mixer volumes, the low-pass filter, loops and ends), sends the mix to the host (`host_audio.h`), hands back to AX through its resume callback, and runs AX's AI callback, which starts the next frame. The aux (effects) buses go out to the game's effect callbacks and come back in at their return volumes. Volume ramps and the remote speaker are not mixed. |
 | `hle_gx.c` | `GXDrawDone` decodes the pending FIFO and returns. |
@@ -416,7 +493,7 @@ Not implemented yet:
 ## Android
 
 ```
-python tools/recomp/build.py --android            # build/recomp/android/PokePark.apk
+python tools/recomp/build.py --android            # build/recomp_S2LE01/android/PokePark2.apk
 python tools/recomp/build.py --android --install  # ...and install it with adb
 ```
 
@@ -426,7 +503,7 @@ NativeActivity with one small Java class (`recomp/android/java`), which
 asks for the disc image (`recomp/android/AndroidManifest.xml`). It needs
 Android 11 and a GPU with Vulkan 1.3. The build also needs Rust (cargo and
 rustup): it fetches [nod](https://github.com/encounter/nod) at a pinned
-commit into `build/recomp/nod` and builds its C library for arm64 once.
+commit into `build/recomp_S2LE01/nod` and builds its C library for arm64 once.
 
 The game is the player's own. On first start the app asks for it, a disc
 image (RVZ, ISO, WBFS, CISO, WIA, ...) chosen with Android's file picker,
@@ -442,12 +519,12 @@ An extracted game, as for Windows, in the app's folder on shared storage
 is used instead when it is there:
 
 ```
-adb push orig/R8AE01/sys /sdcard/Android/data/io.github.pokeparkrecomp/files/R8AE01/sys
-adb push orig/R8AE01/disc /sdcard/Android/data/io.github.pokeparkrecomp/files/R8AE01/disc
+adb push orig/S2LE01/sys /sdcard/Android/data/io.github.pokeparkrecomp2/files/S2LE01/sys
+adb push orig/S2LE01/disc /sdcard/Android/data/io.github.pokeparkrecomp2/files/S2LE01/disc
 ```
 
-(or `R8AE01/disc/sys/main.dol`, as dtk extracts a disc). Saves go in
-`R8AE01/nand` beside it, settings in the app's private files. Output goes
+(or `S2LE01/disc/sys/main.dol`, as dtk extracts a disc). Saves go in
+`S2LE01/nand` beside it, settings in the app's private files. Output goes
 to logcat (`adb logcat -s PokePark`). From a disc image the saves go in
 the same place.
 
