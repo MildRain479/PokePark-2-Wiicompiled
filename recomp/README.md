@@ -505,6 +505,18 @@ Android 11 and a GPU with Vulkan 1.3. The build also needs Rust (cargo and
 rustup): it fetches [nod](https://github.com/encounter/nod) at a pinned
 commit into `build/recomp_S2LE01/nod` and builds its C library for arm64 once.
 
+The APK is signed with the release key when the machine building it has
+one: `~/.android/pokepark2-release` (or the folder `RECOMP_ANDROID_KEY`
+names), with a `release.properties` naming its keystore, alias and
+password. Elsewhere it is signed with the SDK's debug key. Android installs
+an update over a copy only if both were signed with the same key, so
+releases are always signed with the release key, which is kept out of the
+repository and backed up. Moving a device from one key to the other means
+uninstalling, which deletes the app's files, saves included: copy
+`/sdcard/Android/data/io.github.pokeparkrecomp2/files` and the private
+files (`run-as`, on a debuggable build) off first, and back as the app
+(`run-as`) after; the disc image is chosen again.
+
 The game is the player's own. On first start the app asks for it, a disc
 image (RVZ, ISO, WBFS, CISO, WIA, ...) chosen with Android's file picker,
 and plays straight from it: nod reads the data partition, decrypted and

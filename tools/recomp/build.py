@@ -309,6 +309,33 @@ def java_env():
     return env
 
 
+# The key APKs are signed with: the release key if this machine has it, in
+# ~/.android/pokepark2-release (or RECOMP_ANDROID_KEY), a release.properties
+# there naming its keystore, alias and password; else the SDK's debug key,
+# made as Android Studio would if there isn't one yet. An update installs
+# over an existing copy only if both were signed with the same key.
+def android_key():
+    folder = os.environ.get("RECOMP_ANDROID_KEY") or os.path.join(os.path.expanduser("~"), ".android",
+                                                                    "pokepark2-release")
+    props = os.path.join(folder, "release.properties")
+    if os.path.exists(props):
+        p = {}
+        for line in open(props, encoding="utf-8"):
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                p[k.strip()] = v.strip()
+        print("android: signed with the release key in", folder)
+        return os.path.join(folder, p["keystore"]), p["alias"], p["password"]
+    keystore = os.path.join(os.path.expanduser("~"), ".android", "debug.keystore")
+    if not os.path.exists(keystore):
+        keytool = shutil.which("keytool", path=java_env()["PATH"]) or "keytool"
+        subprocess.check_call([keytool, "-genkeypair", "-keystore", keystore, "-storepass", "android", "-alias",
+                               "androiddebugkey", "-keypass", "android", "-keyalg", "RSA", "-validity", "10000",
+                               "-dname", "CN=Android Debug,O=Android,C=US"])
+    print("android: signed with the debug key (no release key in %s)" % folder)
+    return keystore, "androiddebugkey", "android"
+
+
 NOD_COMMIT = "ebd80cac99b48a323200d84365e07a58cc27412d"  # nod 2.0.0-alpha.12
 NOD_FEATURES = "compress-bzip2-vendored,compress-lzma-vendored,compress-zlib-vendored,compress-zstd-vendored,threading"
 
@@ -442,18 +469,11 @@ def build_android(common, boot, install, public):
     base = full
     aligned = os.path.join(out, "aligned.apk")
     subprocess.check_call([os.path.join(tools, "zipalign" + exe), "-f", "-P", "16", "4", base, aligned])
-    # Signed with the SDK's debug key, made as Android Studio would if
-    # there isn't one yet.
-    keystore = os.path.join(os.path.expanduser("~"), ".android", "debug.keystore")
-    if not os.path.exists(keystore):
-        keytool = shutil.which("keytool", path=java_env()["PATH"]) or "keytool"
-        subprocess.check_call([keytool, "-genkeypair", "-keystore", keystore, "-storepass", "android", "-alias",
-                               "androiddebugkey", "-keypass", "android", "-keyalg", "RSA", "-validity", "10000",
-                               "-dname", "CN=Android Debug,O=Android,C=US"])
+    keystore, alias, password = android_key()
     apk = os.path.join(out, label.replace(" ", "") + ".apk")
     signer = os.path.join(tools, "apksigner.bat" if os.name == "nt" else "apksigner")
-    subprocess.check_call([signer, "sign", "--ks", keystore, "--ks-pass", "pass:android", "--out", apk, aligned],
-                          env=java_env())
+    subprocess.check_call([signer, "sign", "--ks", keystore, "--ks-key-alias", alias, "--ks-pass", "env:RECOMP_KS_PASS",
+                           "--out", apk, aligned], env=dict(java_env(), RECOMP_KS_PASS=password))
     print("android:", apk)
     if install:
         adb = os.path.join(sdk, "platform-tools", "adb" + exe)
