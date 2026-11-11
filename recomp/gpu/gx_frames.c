@@ -951,6 +951,16 @@ void gx_canvas_draw(const GXDrawState* st, int mx, int my, float vp[4], int sc[4
         sc[2] = st->scissor[2] + mx;
         sc[3] = st->scissor[3] + my;
     }
+    {
+        int dy = gx_minimap_dy(st);
+        vp[1] += dy;
+        sc[1] += dy;
+        sc[3] += dy;
+    }
+}
+
+int gx_minimap_dy(const GXDrawState* st) {
+    return st->screen == 1 && input_touch_shown() ? 24 - (int)kGxMinimapRect[1] : 0;
 }
 
 void gx_canvas_rect(int mx, int my, int* x, int* y, int* w, int* h) {

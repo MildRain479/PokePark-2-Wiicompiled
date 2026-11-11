@@ -230,6 +230,8 @@ static int sControllerLast;
 
 /* RECOMP_PROMPTS=controller: as if the controller had been used last (for
  * test runs, whose scripted input is no device's). */
+int input_touch_shown(void) { return 0; }
+
 int input_controller_last(void) {
     static int forced = -1;
     if (forced < 0) {

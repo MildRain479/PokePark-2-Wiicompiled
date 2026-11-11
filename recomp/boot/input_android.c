@@ -376,6 +376,10 @@ int input_controller_last(void) {
     return forced || sControllerLast;
 }
 
+int input_touch_shown(void) {
+    return g_settings.touch_controls && !menu_is_open() && !input_controller_last();
+}
+
 static int read_pad(int chan, uint32_t* held) {
     static int menuHeld;
     uint32_t buttons, stick, pad;
@@ -544,7 +548,7 @@ static void draw_controls(void) {
 const uint32_t* menu_draw(int w, int h) {
     static unsigned last;
     const uint32_t* opt = options_draw(w, h);
-    int show = g_settings.touch_controls && !menu_is_open() && !input_controller_last();
+    int show = input_touch_shown();
     unsigned key = 2166136261u;
     /* What's on it: redrawn and uploaded again only when that changes. */
     unsigned parts[8] = {(unsigned)show, opt ? options_draws() : ~0u, sTouchHeld, (unsigned)(sStickX * 8),

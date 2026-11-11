@@ -109,6 +109,12 @@ typedef struct GXDrawState {
     uint64_t key;
 } GXDrawState;
 
+/* How far the minimap's draws (GXDrawState.screen 1) are moved on the
+ * game's screen, in EFB pixels down (negative: up): up to the top right
+ * corner while the touch controls are shown, as their buttons cover the
+ * bottom right; else 0. */
+int gx_minimap_dy(const GXDrawState* st);
+
 /* How a texture's pixels are laid out: RGBA8 (gx_decode_texture's), or
  * one of the smaller layouts that hold some formats exactly, read as
  * RGBA all the same (gx_decode_texture_pix's): GX_PIX_I8, an intensity

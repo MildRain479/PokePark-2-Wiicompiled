@@ -80,6 +80,9 @@ uint32_t settings_generation(void);
 /* Whether the controller was used more recently than the keyboard and
  * mouse (input_win32.c). */
 int input_controller_last(void);
+/* Whether the touch screen's controls are drawn over the picture
+ * (input_android.c; never on Windows). */
+int input_touch_shown(void);
 /* A short buzz at the rumble setting's strength (input_win32.c). */
 void input_rumble_preview(void);
 /* Sets up the button prompt icons (prompts.c). */

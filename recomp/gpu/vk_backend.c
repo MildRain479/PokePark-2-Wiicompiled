@@ -3518,6 +3518,8 @@ static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, 
             float b[4];
             int bx0, by0, bx1, by1;
             for (i = 0; i < 4; i++) b[i] = fminf(fmaxf(st->bounds[i], -65536.0f), 65536.0f);
+            b[1] += (float)gx_minimap_dy(st); /* moved as the viewport is */
+            b[3] += (float)gx_minimap_dy(st);
             bx0 = (int)floor(b[0] * sScaleX) - 1;
             by0 = (int)floor(b[1] * sScaleY) - 1;
             bx1 = (int)ceil(b[2] * sScaleX) + 1;
