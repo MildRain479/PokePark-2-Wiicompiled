@@ -359,7 +359,7 @@ def build_android(common, boot, install, public):
     inc = ["-I" + os.path.join(ROOT, "recomp", d) for d in ("runtime", "gpu", "patches", os.path.join("patches", GAME))] + \
           ["-I" + GEN, "-I" + glue, "-I" + nod_inc]
     defs = [f"-D{d}" for d in DEFINES if d != "RECOMP_DEBUG_MENU"] + ["-DRECOMP_VULKAN"]
-    defs.append("-DRECOMP_ANDROID_LOG")  # still being brought up on phones: the log kept, shown on the next start
+    defs.append("-DRECOMP_ANDROID_LOG")  # the log kept, shown on the next start after a crash
     flags = [f"--target=aarch64-linux-android{ANDROID_API}", "-O2", "-fPIC", "-fvisibility=hidden", "-flto=thin", "-std=gnu11", "-w", "-g"] + inc + defs
     shaders = os.path.join(GEN, "vk_shaders.h")
 

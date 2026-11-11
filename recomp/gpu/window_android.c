@@ -67,7 +67,7 @@ static int sLogPipe[2];
 #ifdef RECOMP_ANDROID_LOG
 /* While a new game is being brought up, without adb to hand: the log also
  * goes to a file, with what a crash leaves, for PokeParkActivity to show on
- * the next start. */
+ * the next start if that run crashed. */
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -564,7 +564,6 @@ void android_main(struct android_app* app) {
 #ifdef RECOMP_ANDROID_LOG
     log_file_open(app->activity->internalDataPath);
     log_catch_crashes();
-    setenv("RECOMP_FPS", "1", 0);
 #endif
     log_to_logcat();
     g_android_app = app;

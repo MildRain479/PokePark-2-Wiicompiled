@@ -64,7 +64,8 @@ public class PokeParkActivity extends NativeActivity {
         }
     }
 
-    /** The last run's log, read before this run starts its own. */
+    /** The last run's log, read before this run starts its own, and shown
+     *  only when that run crashed (window_android.c's on_crash marks it). */
     @Override
     protected void onCreate(Bundle state) {
         String log = "";
@@ -72,6 +73,7 @@ public class PokeParkActivity extends NativeActivity {
             log = tail(new File(getFilesDir(), "last_run.old.log"), 60000)
                 + tail(new File(getFilesDir(), "last_run.log"), 60000);
             if (log.length() > 60000) log = log.substring(log.length() - 60000);
+            if (!log.contains("CRASH: signal ")) log = "";
         }
         super.onCreate(state);
         if (!log.isEmpty()) showLog(log);
@@ -80,7 +82,7 @@ public class PokeParkActivity extends NativeActivity {
     private void showLog(final String log) {
         int cut = log.length() > 2500 ? log.length() - 2500 : 0;
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Last run's log")
+            .setTitle("The last run crashed")
             .setMessage(log.substring(cut))
             .setPositiveButton("Copy all", (d, w) -> ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
                 .setPrimaryClip(ClipData.newPlainText("PokePark log", log)))
