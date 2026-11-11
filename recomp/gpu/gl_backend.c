@@ -164,6 +164,7 @@ static const char* kVertexShader =
     "layout(std140) uniform XF { uvec4 xfm[" GX_XF_WORDS_STR " / 4]; };\n"
     "in vec4 a_mtx0, a_mtx1, a_mtx2; in vec3 a_pos, a_nrm; in vec4 a_col0, a_col1;\n"
     "in vec4 a_tex01, a_tex23, a_tex45, a_tex67;\n"
+    "uniform vec4 u_canvas; /* what clip space's x and y are multiplied by (gx_canvas_draw) */\n"
     "out vec4 v_col0; out vec4 v_col1; out vec3 v_tex[8];\n"
     "uint xw(int a) { int i = a < 0x1000 ? a : a - 0x1000 + " GX_XF_MEM_WORDS_STR "; return xfm[i >> 2][i & 3]; }\n"
     "float xfl(int a) { return uintBitsToFloat(xw(a)); }\n"
@@ -227,7 +228,7 @@ static const char* kVertexShader =
     /* GX depth runs from -w (near) to 0 (far). The EFB depth is stored
      * reversed (see gxd_init), so the far plane, where GX scenes keep
      * nearly everything, gets the float precision: 0..w, far to near. */
-    "  gl_Position = vec4(clip.x, clip.y, -clip.z, clip.w);\n"
+    "  gl_Position = vec4(clip.x * u_canvas.x, clip.y * u_canvas.y, -clip.z, clip.w);\n"
     "  v_col0 = channel(0, a_col0, world, n);\n"
     "  v_col1 = channel(1, a_col1, world, n);\n"
     "  int ntex = int(xw(0x103F) & 15u);\n"
@@ -526,7 +527,7 @@ static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
 static GLuint sVaos[2], sVbos[2], sIbos[2];
 static int sFrameSlot;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef, uFog, uFogF, uFogColor;
-static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize, uFogRange, uVideo;
+static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize, uFogRange, uVideo, uCanvas;
 
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = p_glCreateShader(type);
@@ -588,6 +589,7 @@ static void build_program(void) {
     uTcSize = p_glGetUniformLocation(sProgram, "u_tc_size");
     uVideo = p_glGetUniformLocation(sProgram, "u_video");
     uFogRange = p_glGetUniformLocation(sProgram, "u_fog_range");
+    uCanvas = p_glGetUniformLocation(sProgram, "u_canvas");
 
     for (k = 1; k >= 0; k--) {
         p_glGenVertexArrays(1, &sVao);
@@ -646,12 +648,20 @@ static const char* kCopyFragmentShader =
     "out vec4 o_color;\n"
     "uniform sampler2D u_efb;\n"
     "uniform ivec4 u_mode; /* copy format, intensity, EFB has alpha */\n"
+    "uniform vec4 u_src;\n"
     "float bits(float v, int n) {\n"
     "    float i = float(int(v * 255.0 + 0.5) >> (8 - n));\n"
     "    return floor(i * 255.0 / float((1 << n) - 1) + 0.5) / 255.0;\n"
     "}\n"
     "void main() {\n"
-    "    vec4 c = texture(u_efb, v_uv);\n"
+    "    /* Only the EFB's pixels wholly inside the rectangle are read: at a\n"
+    "     * scale that isn't whole, filtering at its edges would take in the\n"
+    "     * pixels past them, which a copy of part of the EFB (the glow's)\n"
+    "     * must not show (vk_shaders/copy.frag). */\n"
+    "    vec2 ts = vec2(textureSize(u_efb, 0));\n"
+    "    vec2 a = min(u_src.xy, u_src.zw), b = max(u_src.xy, u_src.zw);\n"
+    "    vec2 lo = (ceil(a * ts - 0.01) + 0.5) / ts, hi = (floor(b * ts + 0.01) - 0.5) / ts;\n"
+    "    vec4 c = texture(u_efb, clamp(v_uv, lo, max(lo, hi)));\n"
     "    int f = u_mode.x;\n"
     "    float i;\n"
     "    if (u_mode.z == 0) c.a = 1.0;\n"
@@ -756,6 +766,12 @@ static double sScaleX = 2, sScaleY = 2;
 static double sPixelAspect = 1; /* win_pixel_aspect() */
 #define GLX(x) ((GLint)floor((x) * sScaleX + 0.5))
 #define GLY(y) ((GLint)floor((y) * sScaleY + 0.5))
+/* The canvas's margins (gx_canvas), as the EFB was made for: positions on
+ * it are in EFB pixels from its top left corner (gx_canvas_draw,
+ * gx_canvas_rect), CANVAS_W by CANVAS_H. */
+static int sMX, sMY;
+#define CANVAS_W (EFB_W + 2 * sMX)
+#define CANVAS_H (EFB_H + 2 * sMY)
 /* Draws go to sDrawFbo. Without anti-aliasing that is sEfbFbo, whose
  * color texture the copies and the presented picture read; with it, a
  * multisampled framebuffer resolved into sEfbFbo when they need it. */
@@ -784,18 +800,21 @@ static int gl_msaa(void) {
 static void alloc_efb(void);
 
 static void gl_apply_settings(void) {
-    int w, h, s, m;
+    int w, h, s, m, mx, my;
     win_size(&w, &h);
     if (h <= 0) return; /* minimized */
     s = gx_wanted_scale(h);
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
-    if (s == sScale && m == sMsaa) return;
+    gx_canvas(&mx, &my);
+    if (s == sScale && m == sMsaa && mx == sMX && my == sMY) return;
     sScale = s;
     sMsaa = m;
+    sMX = mx;
+    sMY = my;
     sScaleY = s;
     sScaleX = s * sPixelAspect;
     alloc_efb();
-    fprintf(stderr, "gl: internal resolution %dx (%d x %d), anti-aliasing %s\n", s, GLX(EFB_W), GLY(EFB_H),
+    fprintf(stderr, "gl: internal resolution %dx (%d x %d), anti-aliasing %s\n", s, GLX(CANVAS_W), GLY(CANVAS_H),
             m > 1 ? (m == 2 ? "2x" : m == 4 ? "4x" : "8x") : "off");
 }
 
@@ -806,7 +825,8 @@ static void resolve(void) {
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, sMsFbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sEfbFbo);
     glDisable(GL_SCISSOR_TEST);
-    p_glBlitFramebuffer(0, 0, GLX(EFB_W), GLY(EFB_H), 0, 0, GLX(EFB_W), GLY(EFB_H), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBlitFramebuffer(0, 0, GLX(CANVAS_W), GLY(CANVAS_H), 0, 0, GLX(CANVAS_W), GLY(CANVAS_H), GL_COLOR_BUFFER_BIT,
+                        GL_NEAREST);
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
     sMsDirty = 0;
 }
@@ -1369,7 +1389,7 @@ static void apply_draw_state(const GXDrawState* st) {
         GLfloat range[16] = {0};
         if (st->fog_range) {
             range[0] = (GLfloat)(1.0 / sScaleX);
-            range[1] = -st->fog_center;
+            range[1] = -st->fog_center - (GLfloat)sMX;
             range[2] = 1;
             for (i = 0; i < 10; i++) range[4 + i] = st->fog_k[i];
         }
@@ -1474,16 +1494,25 @@ static void apply_draw_state(const GXDrawState* st) {
          * neighbouring rectangles still meet at a fractional scale. */
         GLint vp[4], sc[4];
         double dr[2];
-        vp[0] = GLX(st->viewport[0]);
-        vp[1] = GLY(EFB_H - (st->viewport[1] + st->viewport[3]));
-        vp[2] = GLX(st->viewport[0] + st->viewport[2]) - GLX(st->viewport[0]);
-        vp[3] = GLY(EFB_H - st->viewport[1]) - GLY(EFB_H - (st->viewport[1] + st->viewport[3]));
+        /* On the canvas, with its clip space scaled (u_canvas). */
+        static GLfloat lk[4];
+        float v[4], k[4] = {1, 1, 0, 0};
+        int s[4];
+        gx_canvas_draw(st, sMX, sMY, v, s, k);
+        if (all || memcmp(k, lk, sizeof(k)) != 0) {
+            p_glUniform4fv(uCanvas, 1, k);
+            memcpy(lk, k, sizeof(k));
+        }
+        vp[0] = GLX(v[0]);
+        vp[1] = GLY(CANVAS_H - (v[1] + v[3]));
+        vp[2] = GLX(v[0] + v[2]) - GLX(v[0]);
+        vp[3] = GLY(CANVAS_H - v[1]) - GLY(CANVAS_H - (v[1] + v[3]));
         dr[0] = 1.0 - (st->viewport[5] > 1 ? 1 : st->viewport[5]);
         dr[1] = 1.0 - (st->viewport[4] < 0 ? 0 : st->viewport[4]);
-        sc[0] = GLX(st->scissor[0]);
-        sc[1] = GLY(EFB_H - st->scissor[3]);
-        sc[2] = GLX(st->scissor[2]) - GLX(st->scissor[0]);
-        sc[3] = GLY(EFB_H - st->scissor[1]) - GLY(EFB_H - st->scissor[3]);
+        sc[0] = GLX(s[0]);
+        sc[1] = GLY(CANVAS_H - s[3]);
+        sc[2] = GLX(s[2]) - GLX(s[0]);
+        sc[3] = GLY(CANVAS_H - s[1]) - GLY(CANVAS_H - s[3]);
         if (all || memcmp(vp, sGl.viewport, sizeof(vp)) != 0) {
             glViewport(vp[0], vp[1], vp[2], vp[3]);
             memcpy(sGl.viewport, vp, sizeof(vp));
@@ -1617,7 +1646,19 @@ typedef struct CopyTarget {
 static CopyTarget sTargets[64];
 static int sTargetCount;
 
+/* A copy target's texture size: a copy of the whole picture has the
+ * canvas's margins. */
+static void target_size(const CopyTarget* t, int* w, int* h) {
+    int x = 0, y = 0;
+    *w = t->w;
+    *h = t->h;
+    gx_canvas_rect(sMX, sMY, &x, &y, w, h);
+    *w = GLX(*w);
+    *h = GLY(*h);
+}
+
 static int gl_copy_target(uint32_t addr, int w, int h) {
+    int tw, th;
     CopyTarget* t;
     int i;
     gl_forget();
@@ -1631,7 +1672,8 @@ static int gl_copy_target(uint32_t addr, int w, int h) {
     t->h = h;
     glGenTextures(1, &t->tex);
     glBindTexture(GL_TEXTURE_2D, t->tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(w), GLY(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    target_size(t, &tw, &th);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1650,8 +1692,7 @@ static uint8_t* gl_copy_read(int target, int* w, int* h) {
     CopyTarget* t = &sTargets[target];
     uint8_t* out;
     gl_forget();
-    *w = GLX(t->w);
-    *h = GLY(t->h);
+    target_size(t, w, h);
     out = (uint8_t*)malloc((size_t)*w * *h * 4);
     if (!out) return NULL;
     glBindTexture(GL_TEXTURE_2D, t->tex);
@@ -1665,8 +1706,11 @@ static void gl_copy(int target, int x, int y, int w, int h, int fmt, int intensi
     CopyTarget* t = &sTargets[target];
     GLint mode[4];
     GLfloat src[4];
+    int tw, th;
     gl_forget();
     resolve();
+    target_size(t, &tw, &th);
+    gx_canvas_rect(sMX, sMY, &x, &y, &w, &h);
     /* Row 0 of the texture is the top row of the rectangle. */
     p_glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
     glDisable(GL_SCISSOR_TEST);
@@ -1674,15 +1718,15 @@ static void gl_copy(int target, int x, int y, int w, int h, int fmt, int intensi
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glViewport(0, 0, GLX(w), GLY(h));
+    glViewport(0, 0, tw, th);
     p_glUseProgram(sCopyProgram);
     p_glBindVertexArray(sCopyVao);
     p_glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
-    src[0] = (float)x / EFB_W;
-    src[1] = (float)(EFB_H - y) / EFB_H;
-    src[2] = (float)(x + w) / EFB_W;
-    src[3] = (float)(EFB_H - y - h) / EFB_H;
+    src[0] = (float)x / CANVAS_W;
+    src[1] = (float)(CANVAS_H - y) / CANVAS_H;
+    src[2] = (float)(x + w) / CANVAS_W;
+    src[3] = (float)(CANVAS_H - y - h) / CANVAS_H;
     p_glUniform4fv(uCopySrc, 1, src);
     mode[0] = fmt;
     mode[1] = intensity;
@@ -1696,7 +1740,7 @@ static void gl_copy(int target, int x, int y, int w, int h, int fmt, int intensi
 }
 
 static void alloc_efb(void) {
-    int w = GLX(EFB_W), h = GLY(EFB_H), i;
+    int w = GLX(CANVAS_W), h = GLY(CANVAS_H), i;
     gl_forget();
     glBindTexture(GL_TEXTURE_2D, sEfbColor);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -1730,8 +1774,10 @@ static void alloc_efb(void) {
         sDrawFbo = sMsFbo;
     }
     for (i = 0; i < sTargetCount; i++) {
+        int tw, th;
+        target_size(&sTargets[i], &tw, &th);
         glBindTexture(GL_TEXTURE_2D, sTargets[i].tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, GLX(sTargets[i].w), GLY(sTargets[i].h), 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, sDrawFbo);
     glDisable(GL_SCISSOR_TEST);
@@ -1774,7 +1820,8 @@ static int gl_present(int x, int y, int cw, int ch, int may_drop) {
     win_size(&w, &h);
     /* The copied rectangle of the EFB, as large as fits in the window at
      * the shape it has on a TV (an EFB pixel is square in 4:3, wider in
-     * 16:9), with black bars on the sides left over. */
+     * 16:9; on the canvas), with black bars on the sides left over. */
+    gx_canvas_rect(sMX, sMY, &x, &y, &cw, &ch);
     aspect = ch > 0 ? cw * sPixelAspect / ch : 1;
     dw = w;
     dh = (int)(w / aspect + 0.5);
@@ -1791,7 +1838,7 @@ static int gl_present(int x, int y, int cw, int ch, int may_drop) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    p_glBlitFramebuffer(GLX(x), GLY(EFB_H - y - ch), GLX(x + cw), GLY(EFB_H - y), (w - dw) / 2, (h - dh) / 2,
+    p_glBlitFramebuffer(GLX(x), GLY(CANVAS_H - y - ch), GLX(x + cw), GLY(CANVAS_H - y), (w - dw) / 2, (h - dh) / 2,
                         (w - dw) / 2 + dw, (h - dh) / 2 + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     {
         const uint32_t* menu = menu_draw(w, h);

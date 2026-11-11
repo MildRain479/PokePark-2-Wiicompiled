@@ -6,10 +6,11 @@
  * are marked in the FIFO, a write to CP register 0xF0 (one the GPU has
  * not) before and after, for the second screen to pick the minimap out of
  * (gx_fifo.c). Its friends list is kept current from here too
- * (hle_friends.c). */
+ * (hle_friends.c), and the autosave watched for (hle_autosave.c). */
 #include "hle.h"
 
 void hle_friends_update(ppc_t* c);
+void hle_autosave_update(ppc_t* c);
 
 static void mark_minimap(uint32_t on) {
     g_wgpipe_write(0x08, 1);
@@ -29,6 +30,7 @@ static int named(uint32_t at, const char* name) {
 void f_8013CAC0(ppc_t* c) {
     int minimap = c->lr == 0x801431C8u && named(c->r[3], "MnFdMap");
     if (minimap) hle_friends_update(c);
+    if (minimap) hle_autosave_update(c); /* hle_autosave.c */
     if (minimap) mark_minimap(1);
     f_8013CAC0_orig(c);
     if (minimap) mark_minimap(0);

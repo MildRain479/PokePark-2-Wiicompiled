@@ -26,6 +26,10 @@ enum {
 
 #define MAX_SCALE 6
 enum { RENDERER_OPENGL, RENDERER_VULKAN };
+/* The picture's shape: 4:3 is the game's own 4:3 mode (from the next
+ * start); 16:10 and 21:9 show more of the world above and below or at the
+ * sides of the game's 16:9 (gx_canvas, gx_frames.c). */
+enum { ASPECT_4_3, ASPECT_16_9, ASPECT_16_10, ASPECT_21_9, ASPECTS };
 /* Movies: drawn as the game does, upscaled along their edges, or upscaled by
  * a network (Vulkan; OpenGL draws those upscaled along their edges). */
 enum { MOVIE_UPSCALE_OFF, MOVIE_UPSCALE_FILTER, MOVIE_UPSCALE_AI };
@@ -45,6 +49,7 @@ typedef struct {
     int swap_screens;        /* the game on the second screen, the Pad's pages on the main one */
     int minimap_top;         /* the minimap on the game's screen too */
     int renderer;            /* RENDERER_*: what draws, from the next start */
+    int aspect;              /* ASPECT_*: the picture's shape */
     int rumble;              /* controller rumble: 0 off, 1 light, 2 normal, 3 strong */
     int touch_controls;      /* Android: the touch screen's controls, shown while it was used last; 0 never */
     int text_speed;          /* dialogue: 1 (the game's), 2, 3, or 0 (a page at once) */
@@ -52,6 +57,7 @@ typedef struct {
     int prices;              /* berries spent, percent of the game's */
     int damage_dealt;        /* damage Pikachu deals in battles, percent of the game's */
     int damage_taken;        /* damage Pikachu takes in battles, percent of the game's */
+    int autosave;            /* the game saved on making a friend or entering an area (hle_autosave.c) */
     int chase_speed;         /* the speed of the Pokémon Pikachu chases, percent of the game's */
     float mouse_sensitivity; /* camera turn per pixel, times the default */
     int invert_tilt;         /* mouse up looks down */
@@ -83,7 +89,7 @@ void prompts_init(void);
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
        SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH, SET_UPDATES, SET_MOVIES,
-       SET_DUAL_SCREEN, SET_SWAP_SCREENS, SET_MINIMAP_TOP };
+       SET_DUAL_SCREEN, SET_SWAP_SCREENS, SET_MINIMAP_TOP, SET_ASPECT, SET_AUTOSAVE };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);

@@ -662,7 +662,7 @@ static struct {
     VkViewport vp;
     VkRect2D sc;
     VkBuffer vb, ib;
-    uint32_t push[10];
+    uint32_t push[12];
     int push_valid;
 } sCmd;
 
@@ -1043,10 +1043,10 @@ static void set_cull(int cull) {
 }
 
 static void push(const void* data, uint32_t bytes) {
-    if (bytes == 40 && sCmd.push_valid && memcmp(sCmd.push, data, 40) == 0) return;
+    if (bytes == sizeof(sCmd.push) && sCmd.push_valid && memcmp(sCmd.push, data, bytes) == 0) return;
     vkCmdPushConstants(S->cb, sLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, bytes, data);
-    if (bytes == 40) {
-        memcpy(sCmd.push, data, 40);
+    if (bytes == sizeof(sCmd.push)) {
+        memcpy(sCmd.push, data, bytes);
         sCmd.push_valid = 1;
     } else sCmd.push_valid = 0;
 }
@@ -1074,6 +1074,10 @@ static uint32_t sEfbTex = TEX_EFB, sEfbAltTex = TEX_EFB_ALT;
 static void expand(void);
 static double sScaleX = 2, sScaleY = 2, sPixelAspect = 1;
 static int sScale, sRendering;
+/* The canvas's margins (gx_canvas), as the EFB was made for: positions
+ * on it are in EFB pixels from its top left corner (gx_canvas_draw,
+ * gx_canvas_rect). */
+static int sMX, sMY;
 #define VX(x) ((int)floor((x) * sScaleX + 0.5))
 #define VY(y) ((int)floor((y) * sScaleY + 0.5))
 
@@ -1363,7 +1367,9 @@ static int sTargetCount;
 
 static void make_target_image(CopyTarget* t) {
     Tex* x = &sTex[t->handle];
-    x->im = make_image(VX(t->w), VY(t->h), 1, VK_FORMAT_R8G8B8A8_UNORM,
+    int cx = 0, cy = 0, cw = t->w, ch = t->h; /* a copy of the whole picture has the canvas's margins */
+    gx_canvas_rect(sMX, sMY, &cx, &cy, &cw, &ch);
+    x->im = make_image(VX(cw), VY(ch), 1, VK_FORMAT_R8G8B8A8_UNORM,
                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                        VK_SAMPLE_COUNT_1_BIT);
     x->sampler = sLinearClamp;
@@ -1375,7 +1381,7 @@ static void make_target_image(CopyTarget* t) {
  * textures at the matching scale. What they held is lost; the game
  * redraws it. Nothing in flight uses them (the caller waits). */
 static void alloc_efb(void) {
-    int w = VX(EFB_W), h = VY(EFB_H), i;
+    int w = VX(EFB_W + 2 * sMX), h = VY(EFB_H + 2 * sMY), i;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     end_efb();
@@ -2171,12 +2177,13 @@ static int vk_msaa(void) {
 }
 
 static void vk_apply_settings(void) {
-    int w, h, s, m;
+    int w, h, s, m, mx, my;
     win_size(&w, &h);
     if (h <= 0) return; /* minimized */
     s = gx_wanted_scale(h);
     for (m = g_settings.msaa; m > sMaxSamples; m /= 2) {}
-    if (s == sScale && m == sMsaa && sEfb.img) return;
+    gx_canvas(&mx, &my);
+    if (s == sScale && m == sMsaa && mx == sMX && my == sMY && sEfb.img) return;
     /* Nothing in flight may still use what is remade. */
     wait_idle();
     if (m != sMsaa) {
@@ -2186,10 +2193,13 @@ static void vk_apply_settings(void) {
     }
     sScale = s;
     sMsaa = m;
+    sMX = mx;
+    sMY = my;
     sScaleY = s;
     sScaleX = s * sPixelAspect;
     alloc_efb();
-    fprintf(stderr, "vulkan: internal resolution %dx (%d x %d), anti-aliasing %s\n", s, VX(EFB_W), VY(EFB_H),
+    fprintf(stderr, "vulkan: internal resolution %dx (%d x %d), anti-aliasing %s\n", s, VX(EFB_W + 2 * sMX),
+            VY(EFB_H + 2 * sMY),
             m > 1 ? (m == 2 ? "2x" : m == 4 ? "4x" : "8x") : "off");
 }
 
@@ -2646,7 +2656,7 @@ static uint32_t write_tev(const GXDrawState* st) {
     if (st->fog_range) {
         /* The pixel's offset from the center, in EFB pixels: x a + b. */
         fw[144] = (float)(1.0 / sScaleX);
-        fw[145] = -st->fog_center;
+        fw[145] = -st->fog_center - (float)sMX;
         iw[146] = 1;
         for (i = 0; i < 10; i++) fw[148 + i] = st->fog_k[i];
     }
@@ -3067,7 +3077,7 @@ static void draw_indexed(VkBuffer vb, VkBuffer ib, int32_t base_vertex, uint32_t
 typedef struct MapDraw {
     VkPipeline p;
     VkBuffer vb, ib, data;
-    uint32_t pc[10], first, count;
+    uint32_t pc[12], first, count;
     int32_t base;
     float vp[6];
     int sc[4], cull, dtest, dwrite, dfunc;
@@ -3476,8 +3486,9 @@ static void second_out(const Image* what) { (void)what; }
 
 static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, VkBuffer ib, int32_t base_vertex,
                         uint32_t first_index, uint32_t count) {
-    uint32_t pc[10], up[8] = {0};
-    int i;
+    uint32_t pc[12], up[8] = {0};
+    int i, sc[4];
+    float vp[4], k[2];
     uint32_t key = gx_key(st);
     VkPipeline sp = spec_pipeline(st, xf, key);
     /* The minimap, with a second screen: drawn there, and here too if
@@ -3487,13 +3498,15 @@ static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, 
     for (i = 0; i < 8; i++) {
         if (st->video_maps >> i & 1) up[i] = a4k_upscale(st->texture[i]);
     }
+    /* Where it's drawn on the canvas, its clip space scaled (pc[10..11]). */
+    gx_canvas_draw(st, sMX, sMY, vp, sc, k);
     {
         /* Depth is used by a test other than "always" or by writes; drawn
          * within the scissor and the viewport (geometry is clipped to it),
          * in the EFB. */
-        int x0 = VX(st->scissor[0]), y0 = VY(st->scissor[1]), x1 = VX(st->scissor[2]), y1 = VY(st->scissor[3]);
-        int vx0 = VX(st->viewport[0]), vx1 = VX(st->viewport[0] + st->viewport[2]);
-        int vy0 = VY(st->viewport[1]), vy1 = VY(st->viewport[1] + st->viewport[3]);
+        int x0 = VX(sc[0]), y0 = VY(sc[1]), x1 = VX(sc[2]), y1 = VY(sc[3]);
+        int vx0 = VX(vp[0]), vx1 = VX(vp[0] + vp[2]);
+        int vy0 = VY(vp[1]), vy1 = VY(vp[1] + vp[3]);
         VkRect2D area;
         if (vx0 > vx1) { int k = vx0; vx0 = vx1; vx1 = k; }
         if (vy0 > vy1) { int k = vy0; vy0 = vy1; vy1 = k; }
@@ -3532,12 +3545,15 @@ static void draw_common(const GXDrawState* st, const uint32_t* xf, VkBuffer vb, 
     {
         /* Edges are scaled and rounded, as gl_backend.c does; flipped,
          * so row 0 is the EFB's top. */
-        float x0 = (float)VX(st->viewport[0]), x1 = (float)VX(st->viewport[0] + st->viewport[2]);
-        float y0 = (float)VY(st->viewport[1]), y1 = (float)VY(st->viewport[1] + st->viewport[3]);
+        float x0, x1, y0, y1;
         float zn = st->viewport[4] < 0 ? 0 : st->viewport[4], zf = st->viewport[5] > 1 ? 1 : st->viewport[5];
+        x0 = (float)VX(vp[0]);
+        x1 = (float)VX(vp[0] + vp[2]);
+        y0 = (float)VY(vp[1]);
+        y1 = (float)VY(vp[1] + vp[3]);
         set_viewport(x0, y1, x1 - x0, y0 - y1, 1.0f - zf, 1.0f - zn);
-        set_scissor(VX(st->scissor[0]), VY(st->scissor[1]), VX(st->scissor[2]) - VX(st->scissor[0]),
-                    VY(st->scissor[3]) - VY(st->scissor[1]));
+        set_scissor(VX(sc[0]), VY(sc[1]), VX(sc[2]) - VX(sc[0]), VY(sc[3]) - VY(sc[1]));
+        memcpy(&pc[10], k, sizeof(k));
     }
     set_cull((int)kCull[st->cull_mode & 3]);
     set_depth(st->z_enable, st->z_enable && st->z_update, (int)kDepthFunc[st->z_func & 7]);
@@ -3980,10 +3996,11 @@ static void vk_copy(int target, int x, int y, int w, int h, int fmt, int intensi
     set_depth(0, 0, VK_COMPARE_OP_ALWAYS);
     memset(&q, 0, sizeof(q));
     /* Row 0 of the texture is the top row of the rectangle, as the EFB has it. */
-    q.src[0] = (float)x / EFB_W;
-    q.src[1] = (float)y / EFB_H;
-    q.src[2] = (float)(x + w) / EFB_W;
-    q.src[3] = (float)(y + h) / EFB_H;
+    gx_canvas_rect(sMX, sMY, &x, &y, &w, &h);
+    q.src[0] = (float)x / (EFB_W + 2 * sMX);
+    q.src[1] = (float)y / (EFB_H + 2 * sMY);
+    q.src[2] = (float)(x + w) / (EFB_W + 2 * sMX);
+    q.src[3] = (float)(y + h) / (EFB_H + 2 * sMY);
     q.mode[0] = fmt;
     q.mode[1] = intensity;
     q.mode[2] = efb_alpha;
@@ -4051,8 +4068,10 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
             }
             if (!same) upload(S->up, m, gw, gh, 1, (const uint8_t*)menu);
         }
-        /* The copied rectangle of the EFB, as large as fits in the window
-         * at the shape it has on a TV, with black bars left over. */
+        /* The copied rectangle of the EFB (on the canvas), as large as
+         * fits in the window at the shape it has on a TV, with black bars
+         * left over. */
+        gx_canvas_rect(sMX, sMY, &x, &y, &cw, &ch);
         aspect = ch > 0 ? cw * sPixelAspect / ch : 1;
         dw = gw;
         dh = (int)(gw / aspect + 0.5);
@@ -4080,10 +4099,10 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
         set_cull(VK_CULL_MODE_NONE);
         set_depth(0, 0, VK_COMPARE_OP_ALWAYS);
         memset(&q, 0, sizeof(q));
-        q.src[0] = (float)x / EFB_W;
-        q.src[1] = (float)y / EFB_H;
-        q.src[2] = (float)(x + cw) / EFB_W;
-        q.src[3] = (float)(y + ch) / EFB_H;
+        q.src[0] = (float)x / (EFB_W + 2 * sMX);
+        q.src[1] = (float)y / (EFB_H + 2 * sMY);
+        q.src[2] = (float)(x + cw) / (EFB_W + 2 * sMX);
+        q.src[3] = (float)(y + ch) / (EFB_H + 2 * sMY);
         q.tex = sEfbTex;
         quad(&q);
         if (menu) {

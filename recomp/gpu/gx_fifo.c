@@ -1012,11 +1012,11 @@ static unsigned sOpCount[256];
 
 static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
     int i;
-    fprintf(stderr, "draw %u: %d verts, vp %.0f,%.0f %.0fx%.0f z %.3f-%.3f, sc %d,%d-%d,%d, stages %d, blend %d %d/%d sub %d lop %d/%d, z %d/%d/%d, cu %d au %d\n",
+    fprintf(stderr, "draw %u: %d verts, vp %.0f,%.0f %.0fx%.0f z %.3f-%.3f, sc %d,%d-%d,%d, stages %d, blend %d %d/%d sub %d lop %d/%d, z %d/%d/%d, cu %d au %d canvas %d\n",
             sDrawCount, n, st->viewport[0], st->viewport[1], st->viewport[2], st->viewport[3], st->viewport[4],
             st->viewport[5], st->scissor[0], st->scissor[1], st->scissor[2], st->scissor[3], st->num_stages,
             st->blend_enable, st->blend_src, st->blend_dst, st->blend_subtract, st->logic_enable, st->logic_op, st->z_enable,
-            st->z_func, st->z_update, st->color_update, st->alpha_update);
+            st->z_func, st->z_update, st->color_update, st->alpha_update, st->canvas);
     fprintf(stderr, "   alpha test %d %d / %d %d logic %d; chan0 ctrl %X/%X mat %08X amb %08X; konst0 %.2f %.2f %.2f %.2f\n",
             st->alpha_func[0], st->alpha_ref[0], st->alpha_func[1], st->alpha_ref[1], st->alpha_logic, xf[0x100E],
             xf[0x1010], xf[0x100C], xf[0x100A], st->konst[0][0], st->konst[0][1], st->konst[0][2], st->konst[0][3]);
@@ -1068,6 +1068,7 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
         float vy = xf_float(mr + 4) * v[i].pos[0] + xf_float(mr + 5) * v[i].pos[1] + xf_float(mr + 6) * v[i].pos[2] + xf_float(mr + 7);
         float cx = xf[0x1026] ? xf_float(0x1020) * vx + xf_float(0x1021) : xf_float(0x1020) * vx + xf_float(0x1021) * vz;
         float cy = xf[0x1026] ? xf_float(0x1022) * vy + xf_float(0x1023) : xf_float(0x1022) * vy + xf_float(0x1023) * vz;
+
         /* Screen position in the 640x456 EFB (y down). */
         float sx = cw != 0 ? (cx / cw * 0.5f + 0.5f) * st->viewport[2] + st->viewport[0] : 0;
         float sy = cw != 0 ? (0.5f - cy / cw * 0.5f) * st->viewport[3] + st->viewport[1] : 0;
@@ -1133,15 +1134,81 @@ static void flush_batch(void) {
  * the minimap's (GXDrawState's screen 1). */
 static int sScreenMarked;
 
-static void use_current_state(int mtx_per_vertex) {
-    int rebuilt = sStateDirty;
+/* The canvas has margins (gx_canvas), as the frame started. */
+static int sCanvasOn;
+void gx_canvas(int* mx, int* my);                       /* gx_frames.c */
+int gx_canvas_whole(float x, float y, float w, float h); /* gx_frames.c */
+
+/* GXDrawState's canvas for a draw of count vertices at p, with the state
+ * st: 1 if it is the world in 3D (a perspective projection with a far
+ * plane past 2000) over the whole picture; 2 if it covers the whole
+ * picture otherwise (2D, or the 2D screens' 3D), in up to 64 vertices;
+ * else 0. A flat quad of the world's facing the camera over the whole
+ * picture is a screen effect drawn in front of it (the dash's blur, a
+ * copy of the picture on a quad just past the near plane), so it's 2:
+ * held where it was, it covered only the 16:9 middle. */
+static int canvas_kind(const GXDrawState* st, const uint8_t* p, const VtxFormat* f, int count) {
+    static GXVertex v[64];
+    GXVertex tpl;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, z0 = 1e9f, z1 = -1e9f;
+    int i, persp = !xf[0x1026], world, layout;
+    if (!sCanvasOn || !gx_canvas_whole(st->viewport[0], st->viewport[1], st->viewport[2], st->viewport[3])) return 0;
+    /* The park's cameras see to 9999; the 2D screens' 3D (the menus'
+     * boards, close-ups) only to 1000, and stays in the picture, as the
+     * rest of the screen does. */
+    world = persp && xf_float(0x1024) != 0 && xf_float(0x1025) / xf_float(0x1024) > 2000;
+    /* The HUD's layouts (PP2's) are drawn with a 45 degree camera that
+     * also sees to 10000, on the plane where 480 units fill the picture's
+     * height (z -579.4): those stay in the picture, as 2D. Its black bars
+     * lie just past the picture's top and bottom edges, where a Wii shows
+     * none of them; grown as the world, they showed on the margins. */
+    layout = world && fabsf(xf_float(0x1022) - 2.4142136f) < 1e-3f;
+    if (world && (count > 4 || count <= 0) && !(layout && count > 0 && count <= 64)) return 1;
+    if (count > 64 || count <= 0) return 0;
+    vertex_template(&tpl);
+    for (i = 0; i < count; i++) v[i] = tpl;
+    read_vertices(p, f, v, count);
+    for (i = 0; i < count; i++) {
+        uint32_t m = (v[i].mtx[0] & 63) * 4;
+        const float* q = v[i].pos;
+        float wx = xf_float(m) * q[0] + xf_float(m + 1) * q[1] + xf_float(m + 2) * q[2] + xf_float(m + 3);
+        float wy = xf_float(m + 4) * q[0] + xf_float(m + 5) * q[1] + xf_float(m + 6) * q[2] + xf_float(m + 7);
+        float wz = xf_float(m + 8) * q[0] + xf_float(m + 9) * q[1] + xf_float(m + 10) * q[2] + xf_float(m + 11);
+        float cx, cy, x, y;
+        if (wz < z0) z0 = wz;
+        if (wz > z1) z1 = wz;
+        if (persp) {
+            if (wz >= 0) return world; /* behind the camera */
+            cx = (xf_float(0x1020) * wx + xf_float(0x1021) * wz) / -wz;
+            cy = (xf_float(0x1022) * wy + xf_float(0x1023) * wz) / -wz;
+        } else {
+            cx = xf_float(0x1020) * wx + xf_float(0x1021);
+            cy = xf_float(0x1022) * wy + xf_float(0x1023);
+        }
+        x = st->viewport[0] + (cx + 1) * 0.5f * st->viewport[2];
+        y = st->viewport[1] + (1 - cy) * 0.5f * st->viewport[3];
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+    }
+    if (layout && z0 > -580.5f && z1 < -578.3f) return gx_canvas_whole(x0, y0, x1 - x0, y1 - y0) ? 2 : 0;
+    if (world && count > 4) return 1;
+    if (world) return gx_canvas_whole(x0, y0, x1 - x0, y1 - y0) && z1 - z0 <= -z1 * 0.001f ? 2 : 1;
+    return gx_canvas_whole(x0, y0, x1 - x0, y1 - y0) ? 2 : 0;
+}
+
+static void use_current_state(int mtx_per_vertex, const uint8_t* p, const VtxFormat* f, int count) {
+    int rebuilt = sStateDirty, canvas;
     if (rebuilt) {
         build_state(&sState); /* may draw the pending batch, if a texture changes */
         sStateDirty = 0;
     }
-    if (sState.mtx_per_vertex != mtx_per_vertex || sState.screen != sScreenMarked) {
+    canvas = canvas_kind(&sState, p, f, count);
+    if (sState.mtx_per_vertex != mtx_per_vertex || sState.screen != sScreenMarked || sState.canvas != canvas) {
         sState.mtx_per_vertex = mtx_per_vertex;
         sState.screen = sScreenMarked;
+        sState.canvas = canvas;
         rebuilt = 1;
     }
     /* Everything but the XF fields, which build_state leaves zero. A
@@ -1634,7 +1701,7 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
         sDrawCount++;
         return;
     }
-    use_current_state(f->pnmtx | (f->texmtx_mask ? 2 : 0));
+    use_current_state(f->pnmtx | (f->texmtx_mask ? 2 : 0), p, f, count);
     if ((sArena ? 0 : sBatchVerts) + count > sBatchCap) {
         sBatchCap = ((sArena ? 0 : sBatchVerts) + count) * 2;
         sBatch = (GXVertex*)realloc(sBatch, (size_t)sBatchCap * sizeof(GXVertex));
@@ -1791,6 +1858,11 @@ static void efb_copy(uint32_t exec) {
         }
         sDrawCount = sVertexCount = 0;
         sStateDirty = 1; /* textures are checked again each frame */
+        {
+            int mx, my;
+            gx_canvas(&mx, &my);
+            sCanvasOn = mx || my;
+        }
     } else {
         int fmt = (int)(((exec >> 4) & 7) | (((exec >> 3) & 1) << 3));
         gxb_copy_to_texture(dst, x, y, w, h, fmt, (exec >> 15) & 1, (bp[0x43] & 7) == 1, (int)(bp[0x4D] & 0x3FF) * 32);
