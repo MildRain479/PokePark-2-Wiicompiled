@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "gx.h"
+#include "host_settings.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -46,6 +47,9 @@ static int sReady;
 /* Register state */
 
 static uint32_t cp[256];
+/* Counts writes to the vertex descriptor, format and array registers
+ * (0x50-0xBF), so what's worked out from them is redone only after one. */
+static uint32_t sCpGen = 1;
 static uint32_t bp[256];
 static uint32_t bp_mask = 0xFFFFFF;
 static uint32_t xf[0x1100];
@@ -53,6 +57,7 @@ static uint32_t xf[0x1100];
  * shader (gx.h), and the words written since the last draw. */
 static uint32_t sXfPacked[GX_XF_WORDS];
 static int sXfDirtyLo = 0, sXfDirtyHi = GX_XF_WORDS;
+static uint64_t sXfDirtyChunks = ~0ull;
 
 static void flush_batch(void);
 /* Set when anything build_state reads may have changed: draws in between
@@ -73,6 +78,7 @@ static void xf_write(uint32_t addr, uint32_t value) {
     if (addr >= 0x101A && addr <= 0x101F) sStateDirty = 1; /* the viewport */
     if (i < sXfDirtyLo) sXfDirtyLo = i;
     if (i + 1 > sXfDirtyHi) sXfDirtyHi = i + 1;
+    sXfDirtyChunks |= 1ull << (i >> 5);
 }
 static uint8_t tmem[1 << 20];
 
@@ -261,8 +267,12 @@ static VtxFormat sFormats[8];
 static uint32_t sFormatRegs[8][5];
 static uint8_t sFormatValid[8];
 
+static uint32_t sFormatGen[8]; /* sCpGen when sFormats[vat] was last checked */
+
 static const VtxFormat* format(int vat) {
     uint32_t regs[5];
+    if (sFormatGen[vat] == sCpGen) return &sFormats[vat];
+    sFormatGen[vat] = sCpGen;
     regs[0] = cp[0x50];
     regs[1] = cp[0x60];
     regs[2] = cp[0x70 + vat];
@@ -429,18 +439,39 @@ typedef struct TexEntry {
     uint32_t handle, hash;
     uint32_t image_hash; /* of the texture's memory alone, without its palette */
     int pix;             /* its layout (GX_PIX_...) */
-    uint64_t checked, hashed; /* the frames it was last looked at, and hashed */
+    uint64_t checked;         /* the frame it was last looked at */
+    uint32_t hashed, seen;    /* the write notes (sNote) it was last hashed and looked at in */
+    uint32_t stamp;           /* elsewhere than Windows, ppc_mem_watch's when it was last hashed */
+    uint64_t updated;         /* the frame its contents last changed in place */
+    int updates;              /* how many times running, a few frames apart */
 } TexEntry;
 
+/* A texture whose contents change in place this many times running, no
+ * more than VIDEO_GAP frames apart, is a movie's frame (its Y, U or V
+ * plane). Draws mark the maps that use the widest of a draw's (the Y
+ * plane): the backends upscale it along its edges. The U and V planes,
+ * half as wide, stay bilinear: upscaled apart, their edges stray from Y's
+ * and fringe the picture with color. */
+#define VIDEO_UPDATES 8
+#define VIDEO_GAP 16
+static uint8_t sVideoMaps;
+static int sVideoWidth[8];
+
 /* Which pages (4 KB) of MEM1 and MEM2 have been written, and when: the
- * frame after the write, as Windows' write watch reports them at each
- * frame's start. A texture is hashed again only when its memory has been
- * written since it last was; most never are, and hashing every texture
- * every frame took 4% of the time in the park. */
+ * note after the write, as Windows' write watch reports them. A texture is
+ * hashed again only when its memory has been written since it last was;
+ * most never are, and hashing every texture every frame took 4% of the
+ * time in the park. Writes are noted at each frame's start and, once the
+ * game has invalidated the texture cache (as it must after changing a
+ * texture), before the next texture is looked at: a texture loaded into
+ * memory another had (same size and format) was otherwise drawn with the
+ * old one's pixels until the next frame. */
 #define MEM1_PAGES (0x01800000u >> 12)
 #define MEM2_PAGES (0x04000000u >> 12)
 static uint32_t sPageWritten[MEM1_PAGES + MEM2_PAGES];
 static int sWriteWatch = -1; /* whether it works: 1, 0, or -1 not yet known */
+static uint32_t sNote = 1;   /* counts the notes taken */
+static int sInvalidated;     /* the texture cache was invalidated since the last */
 
 static int page_of(uint32_t phys) {
     if (phys < 0x01800000u) return (int)(phys >> 12);
@@ -448,8 +479,10 @@ static int page_of(uint32_t phys) {
     return -1;
 }
 
-/* At each frame's start: the pages written since the last. */
-static void note_writes(uint32_t frame) {
+/* The pages written since the last note. */
+static void note_writes(void) {
+    uint32_t note = ++sNote;
+    sInvalidated = 0;
 #ifdef _WIN32
     static void* pages[4096];
     static const uint32_t kRange[2][2] = {{0x00000000u, 0x01800000u}, {0x10000000u, 0x04000000u}};
@@ -467,26 +500,32 @@ static void note_writes(uint32_t frame) {
             sWriteWatch = 1;
             for (i = 0; i < count; i++) {
                 int pg = page_of(kRange[r][0] + (uint32_t)((uint8_t*)pages[i] - base));
-                if (pg >= 0) sPageWritten[pg] = frame;
+                if (pg >= 0) sPageWritten[pg] = note;
             }
             if (count < sizeof(pages) / sizeof(pages[0])) break;
         }
     }
 #else
-    (void)frame;
+    (void)note;
     sWriteWatch = 0;
 #endif
 }
 
-/* Whether guest memory [addr, addr + size) may have been written since frame. */
-static int written_since(uint32_t addr, int size, uint64_t frame) {
+/* Whether e's memory, [addr, addr + size), may have been written since it
+ * was last hashed. Elsewhere than Windows the runtime's page protection
+ * says (ppc_mem_watch), which sees writes as they're made. */
+static int written_since(const TexEntry* e, uint32_t addr, int size) {
+#ifdef _WIN32
     uint32_t phys = addr & 0x3FFFFFFFu, end = phys + (uint32_t)size - 1;
     int a = page_of(phys), b = page_of(end), i;
     if (sWriteWatch != 1 || a < 0 || b < 0 || b - a != (int)((end >> 12) - (phys >> 12))) return 1;
     for (i = a; i <= b; i++) {
-        if (sPageWritten[i] > (uint32_t)frame) return 1;
+        if (sPageWritten[i] > e->hashed) return 1;
     }
     return 0;
+#else
+    return ppc_mem_written(addr, (uint32_t)size, e->stamp);
+#endif
 }
 #define TEX_CACHE 4096
 #define TEX_WAYS 4
@@ -602,8 +641,14 @@ int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int 
     sCopies[i].handle = handle;
     sCopies[i].width = width;
     sCopies[i].height = height;
-    sCopies[i].bytes = copy_bytes(fmt, width, height);
-    sCopies[i].mem_hash = sCopies[i].bytes > 0 ? hash_bytes(MA(addr), sCopies[i].bytes) : 0;
+    /* Made again (most are, every frame: 5 MB of them in the park), its
+     * memory keeps the hash it had: while the copy is made, it isn't
+     * checked (made this frame), and once the game stops making it, any
+     * change since then shows the memory is something else now. */
+    if (!again || sCopies[i].bytes != copy_bytes(fmt, width, height)) {
+        sCopies[i].bytes = copy_bytes(fmt, width, height);
+        sCopies[i].mem_hash = sCopies[i].bytes > 0 ? hash_bytes(MA(addr), sCopies[i].bytes) : 0;
+    }
     sCopies[i].checked = sFrame + 1;
     sStateDirty = 1; /* draws sampling addr now get the copy */
     return !again;
@@ -710,14 +755,23 @@ static uint32_t texture_for_map(int map) {
             }
         }
     }
-    if (e->handle && e->key == key && e->checked == sFrame) return e->handle;
+    if (sInvalidated) note_writes();
+    if (e->handle && e->key == key && e->seen == sNote) return e->handle;
     {
         uint32_t image;
-        if (e->handle && e->key == key && !written_since(addr, size, e->hashed)) {
+        /* A texture changing frame after frame (a movie's) is hashed every
+         * time: written_since learns of a write only at the next frame's
+         * start, and a movie frame decoded into it would be drawn a frame
+         * late, its pictures shown for 1 and 3 frames instead of 2 and 2. */
+        int changing = e->updates >= 2 && sFrame - e->updated <= VIDEO_GAP;
+        if (e->handle && e->key == key && !changing && !written_since(e, addr, size)) {
             image = e->image_hash;
         } else {
+#ifndef _WIN32
+            if (!ppc_mem_watch(addr, (uint32_t)size, &e->stamp)) e->stamp = 0;
+#endif
             image = hash_bytes(MA(addr), size);
-            e->hashed = sFrame;
+            e->hashed = sNote;
         }
         e->image_hash = image;
         h = image;
@@ -769,12 +823,15 @@ static uint32_t texture_for_map(int map) {
              * covers size and sampling, so update it in place. */
             flush_batch();
             gxb_texture_update(e->handle, pix, width, height, levels, rgba);
+            e->updates = sFrame - e->updated <= VIDEO_GAP ? e->updates + 1 : 1;
+            e->updated = sFrame;
         } else {
             /* The way goes to another texture. The old one is freed (or
              * GPU memory grows without bound) once the frame is
              * presented: draws made this frame may still use it. */
             if (e->handle) gxb_texture_free(e->handle);
             e->handle = gxb_texture(key, pix, width, height, levels, rgba, mode0);
+            e->updates = 0;
         }
         free(rgba);
         e->pix = pix;
@@ -782,6 +839,12 @@ static uint32_t texture_for_map(int map) {
         e->hash = h;
     }
     e->checked = sFrame;
+    e->seen = sNote;
+    if (e->updates >= VIDEO_UPDATES && sFrame - e->updated <= VIDEO_GAP &&
+        g_settings.movie_upscale != MOVIE_UPSCALE_OFF) {
+        sVideoMaps |= (uint8_t)(1 << map);
+        sVideoWidth[map] = width;
+    }
     return e->handle;
 }
 
@@ -798,6 +861,7 @@ static void build_state(GXDrawState* st) {
     uint32_t genmode = bp[0x00], ac = bp[0xF3], blend = bp[0x41], zmode = bp[0x40];
     int i, k;
     memset(st, 0, sizeof(*st));
+    sVideoMaps = 0;
     st->num_stages = (int)((genmode >> 10) & 15) + 1;
     st->num_texcoords = (int)(genmode & 15);
     for (i = 0; i < st->num_stages; i++) {
@@ -875,6 +939,16 @@ static void build_state(GXDrawState* st) {
         const GXTevStage* s = &st->stage[i];
         if (s->tex_enable && !st->texture[s->texmap]) st->texture[s->texmap] = texture_for_map(s->texmap);
     }
+    if (sVideoMaps) {
+        int widest = 0;
+        for (i = 0; i < 8; i++) {
+            if ((sVideoMaps >> i & 1) && sVideoWidth[i] > widest) widest = sVideoWidth[i];
+        }
+        for (i = 0; i < 8; i++) {
+            if ((sVideoMaps >> i & 1) && sVideoWidth[i] < widest) sVideoMaps &= (uint8_t)~(1 << i);
+        }
+    }
+    st->video_maps = sVideoMaps;
     st->alpha_ref[0] = ac & 0xFF;
     st->alpha_ref[1] = (ac >> 8) & 0xFF;
     st->alpha_func[0] = (ac >> 16) & 7;
@@ -964,6 +1038,9 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
                     xf_float(b + 15));
         }
     }
+    for (i = 0; i < (int)(xf[0x103F] & 15); i++) {
+        fprintf(stderr, "   texgen %d: %08X post %08X\n", i, xf[0x1040 + i], xf[0x1050 + i]);
+    }
     for (i = 0; i < st->num_stages && i < 3; i++) {
         const GXTevStage* t = &st->stage[i];
         fprintf(stderr, "   stage %d: c %d %d %d %d a %d %d %d %d tex %d(map %d coord %d) ch %d k %d/%d -> %d/%d\n", i,
@@ -1010,6 +1087,10 @@ static void debug_draw(const GXDrawState* st, const GXVertex* v, int n) {
  * Vertices are decoded straight into the batch, each once, and the
  * primitives become indices into them. */
 static GXDrawState sState, sBatchState;
+/* Whether the pending batch has been drawn: one that hasn't hands its XF
+ * changes on to the batch that replaces it, as the device's copy of the
+ * state is the last draw's. */
+static int sBatchDrawn;
 static GXVertex* sBatch;
 static uint32_t* sIndex;
 static int sBatchVerts, sBatchCap, sIndexCount, sIndexCap;
@@ -1037,6 +1118,7 @@ static void flush_batch(void) {
     else
         gxb_draw_triangles(&sBatchState, sBatch, sBatchFirst, sBatchVerts - sBatchFirst, sIndex, sIndexFirst,
                            sIndexCount - sIndexFirst);
+    sBatchDrawn = 1;
     if (sKeepFrame) {
         sBatchFirst = sBatchVerts;
         sIndexFirst = sIndexCount;
@@ -1047,27 +1129,47 @@ static void flush_batch(void) {
 
 /* Makes the batch one drawn with the current state, drawing the pending
  * one first if its state differs. */
+/* hle_minimap.c marks the minimap's layouts' drawing: their draws are
+ * the minimap's (GXDrawState's screen 1). */
+static int sScreenMarked;
+
 static void use_current_state(int mtx_per_vertex) {
     int rebuilt = sStateDirty;
     if (rebuilt) {
         build_state(&sState); /* may draw the pending batch, if a texture changes */
         sStateDirty = 0;
     }
-    if (sState.mtx_per_vertex != mtx_per_vertex) {
+    if (sState.mtx_per_vertex != mtx_per_vertex || sState.screen != sScreenMarked) {
         sState.mtx_per_vertex = mtx_per_vertex;
+        sState.screen = sScreenMarked;
         rebuilt = 1;
     }
     /* Everything but the XF fields, which build_state leaves zero. A
      * pending batch already has the current state unless it was rebuilt. */
     if (sIndexCount == sIndexFirst || (rebuilt && memcmp(&sState, &sBatchState, offsetof(GXDrawState, xf)) != 0)) {
+        int lo = sXfDirtyLo, hi = sXfDirtyHi;
+        uint64_t chunks = sXfDirtyChunks;
         flush_batch();
+        if (!sBatchDrawn) {
+            if (sBatchState.xf_dirty_lo < lo) lo = sBatchState.xf_dirty_lo;
+            if (sBatchState.xf_dirty_hi > hi) hi = sBatchState.xf_dirty_hi;
+            chunks |= sBatchState.xf_dirty_chunks;
+        }
+        sBatchDrawn = 0;
         sBatchState = sState;
         sBatchState.xf = sXfPacked;
-        sBatchState.xf_dirty_lo = sXfDirtyLo;
-        sBatchState.xf_dirty_hi = sXfDirtyHi;
+        sBatchState.xf_dirty_lo = lo;
+        sBatchState.xf_dirty_hi = hi;
+        sBatchState.xf_dirty_chunks = chunks;
+        sBatchState.bounds_ok = 1;
+        sBatchState.bounds[0] = sBatchState.bounds[1] = 1e30f;
+        sBatchState.bounds[2] = sBatchState.bounds[3] = -1e30f;
+        sBatchState.bounds_mtx[0] = 63;
+        sBatchState.bounds_mtx[1] = 0;
         sBatchState.key = 0;
         sXfDirtyLo = GX_XF_WORDS;
         sXfDirtyHi = 0;
+        sXfDirtyChunks = 0;
     }
 }
 
@@ -1116,18 +1218,29 @@ typedef struct ListEntry {
     uint64_t hash;       /* of the list's bytes */
     int first, verts;    /* its vertices in the arena; first -1 for none */
     int valid;           /* decoded, and its vertices kept */
+    GXVertex* small;     /* a copy of them when few (LIST_SMALL), for draws' bounds */
     ListRange* ranges;
     int nranges, rangecap;
     uint64_t used;       /* the last frame it was called in */
     int changed;         /* calls in a row it was different */
+    /* Its bytes and ranges watched for writes since stamp (ppc_mem_watch:
+     * not on Windows), so unwritten they needn't be hashed; and the
+     * times they were written but found the same (memory next to them
+     * written), after which they're hashed every time instead: each write
+     * noted costs a fault. */
+    int tracked, same_written;
+    uint32_t stamp;
 } ListEntry;
 
 #define LIST_SETS 4096
+/* Vertices a list may have to have a copy kept (ListEntry's small). */
+#define LIST_SMALL 64
 #define LIST_WAYS 4
 /* Calls in a row a list was different, after which it's only checked
  * every 64 frames; and the count for one that can't be kept. */
 #define LIST_CHANGING 4
 #define LIST_UNCACHED 1000000
+#define LIST_SAME_WRITTEN 8
 static ListEntry sLists[LIST_SETS * LIST_WAYS];
 
 /* The list running: drawn from its entry's vertices (sListBuild 0), or
@@ -1146,12 +1259,18 @@ static int sTransNext, sTransLeft;
  * vertex descriptors and formats, the array registers, and the default
  * matrix indices. */
 static uint64_t list_state(void) {
+    static uint32_t gen, x18, x19;
+    static uint64_t last;
     uint64_t h = 0x243F6A8885A308D3ull;
     int i;
+    if (gen == sCpGen && x18 == xf[0x1018] && x19 == xf[0x1019]) return last;
+    gen = sCpGen;
+    x18 = xf[0x1018];
+    x19 = xf[0x1019];
     h = mix64(h ^ cp[0x50] ^ ((uint64_t)cp[0x60] << 32));
     for (i = 0; i < 8; i++) h = mix64(h ^ cp[0x70 + i] ^ ((uint64_t)cp[0x80 + i] << 32) ^ ((uint64_t)cp[0x90 + i] << 16));
     for (i = 0; i < 12; i++) h = mix64(h ^ cp[0xA0 + i] ^ ((uint64_t)cp[0xB0 + i] << 32));
-    return mix64(h ^ xf[0x1018] ^ ((uint64_t)xf[0x1019] << 32));
+    return last = mix64(h ^ xf[0x1018] ^ ((uint64_t)xf[0x1019] << 32));
 }
 
 /* The vertices of the draws in list p[0..len), as run would draw them;
@@ -1166,7 +1285,10 @@ static int list_vertex_count(const uint8_t* p, uint32_t len) {
         uint8_t op = p[pos];
         if (op == 0x08) {
             if (left < 6) break;
-            if (p[pos + 1] >= 0x50 && p[pos + 1] < 0x98) cp[p[pos + 1]] = rd32(p + pos + 2);
+            if (p[pos + 1] >= 0x50 && p[pos + 1] < 0x98) {
+                cp[p[pos + 1]] = rd32(p + pos + 2);
+                sCpGen++;
+            }
             pos += 6;
         } else if (op == 0x10) {
             if (left < 5) break;
@@ -1189,6 +1311,7 @@ static int list_vertex_count(const uint8_t* p, uint32_t len) {
         }
     }
     memcpy(cp + 0x50, saved, sizeof(saved));
+    sCpGen++;
     return total > (1 << 22) ? -1 : (int)total;
 }
 
@@ -1226,6 +1349,27 @@ static int range_order(const void* a, const void* b) {
     return x < y ? -1 : x > y;
 }
 
+/* Watches e's bytes and ranges for writes from now (tracked, from stamp);
+ * before they're hashed. */
+static void list_watch(ListEntry* e) {
+    int i;
+    e->tracked = e->same_written < LIST_SAME_WRITTEN && ppc_mem_watch(e->addr, e->size, &e->stamp);
+    for (i = 0; i < e->nranges && e->tracked; i++) {
+        uint32_t stamp;
+        e->tracked = ppc_mem_watch(e->ranges[i].addr, e->ranges[i].len, &stamp);
+    }
+}
+
+/* Whether e's bytes or ranges may have been written since it was watched. */
+static int list_written(const ListEntry* e) {
+    int i;
+    if (!e->tracked || ppc_mem_written(e->addr, e->size, e->stamp)) return 1;
+    for (i = 0; i < e->nranges; i++) {
+        if (ppc_mem_written(e->ranges[i].addr, e->ranges[i].len, e->stamp)) return 1;
+    }
+    return 0;
+}
+
 static int list_ranges_same(const ListEntry* e) {
     int i;
     for (i = 0; i < e->nranges; i++) {
@@ -1236,6 +1380,8 @@ static int list_ranges_same(const ListEntry* e) {
 
 static void list_drop_vertices(ListEntry* e) {
     if (e->first >= 0) arena_free_later(e->first, e->verts);
+    free(e->small);
+    e->small = NULL;
     e->first = -1;
     e->verts = 0;
     e->valid = 0;
@@ -1260,6 +1406,18 @@ static void list_begin(uint32_t addr, uint32_t size) {
         e->used = sFrame;
         /* One that has kept changing is only checked now and then. */
         if (e->changed >= LIST_CHANGING && (sFrame & 63) != 0) return;
+        if (e->valid && !list_written(e)) {
+            e->changed = 0;
+            sList = e;
+            sListBuild = 0;
+            sListAt = 0;
+            return;
+        }
+        if (e->valid) {
+            int was = e->tracked;
+            list_watch(e);
+            if (was) e->same_written++; /* undone below if it isn't the same */
+        }
         hash = hash_bytes64(MA(addr), size);
         if (e->valid && hash == e->hash && list_ranges_same(e)) {
             e->changed = 0;
@@ -1269,6 +1427,7 @@ static void list_begin(uint32_t addr, uint32_t size) {
             return;
         }
         e->changed++;
+        e->same_written = 0;
         list_drop_vertices(e);
     } else {
         e = &set[0];
@@ -1287,6 +1446,7 @@ static void list_begin(uint32_t addr, uint32_t size) {
         e->verts = 0;
         e->valid = 0;
         e->changed = 0;
+        e->same_written = 0;
         e->used = sFrame;
         hash = hash_bytes64(MA(addr), size);
     }
@@ -1317,6 +1477,12 @@ static void list_end(void) {
     sList = NULL;
     if (!e || !sListBuild) return;
     if (sListAt) gxb_arena_write(e->first, sListVerts, sListAt);
+    free(e->small);
+    e->small = NULL;
+    if (sListAt && sListAt <= LIST_SMALL) {
+        e->small = (GXVertex*)malloc((size_t)sListAt * sizeof(GXVertex));
+        if (e->small) memcpy(e->small, sListVerts, (size_t)sListAt * sizeof(GXVertex));
+    }
     if (sListAt < sListMax) {
         /* Never drawn from: free at once. */
         gxb_arena_free(e->first + sListAt, sListMax - sListAt);
@@ -1341,8 +1507,11 @@ static void list_end(void) {
         e->ranges[i] = sRanges[i];
         /* A range that big is likely an index of 0xFFFF, not an array. */
         if (sRanges[i].len > (4u << 20)) bad = 1;
-        else e->ranges[i].hash = hash_bytes64(MA(sRanges[i].addr), sRanges[i].len);
     }
+    /* Watched before the ranges are hashed; its bytes, hashed before it
+     * ran, can't have been written since (it ran here). */
+    if (!bad) list_watch(e);
+    for (i = 0; i < n && !bad; i++) e->ranges[i].hash = hash_bytes64(MA(sRanges[i].addr), sRanges[i].len);
     if (bad) {
         e->changed = LIST_UNCACHED;
         list_drop_vertices(e);
@@ -1386,10 +1555,57 @@ static void list_frame_end(void) {
     sTransLeft = 0;
 }
 
+static float xf_packed_float(int i) {
+    float f;
+    memcpy(&f, &sXfPacked[i], 4);
+    return f;
+}
+
+/* The batch's bounds (GXDrawState's) taken out to vertices v[0..count), as
+ * gx.vert places them: their position matrix, the projection, the
+ * viewport. Unknown once a vertex is behind the eye or isn't a number. */
+static void note_bounds(const GXVertex* v, int count) {
+    const int proj = GX_XF_MEM_WORDS + 0x20;
+    float p[6], *b = sBatchState.bounds;
+    const float* vp = sBatchState.viewport;
+    int ortho = sXfPacked[proj + 6] != 0, i, j;
+    if (!sBatchState.bounds_ok) return;
+    for (j = 0; j < 6; j++) p[j] = xf_packed_float(proj + j);
+    for (i = 0; i < count; i++) {
+        int pn = (sBatchState.mtx_per_vertex & 1) ? v[i].mtx[0] : (int)(sXfPacked[GX_XF_MEM_WORDS + 0x18] & 63);
+        float w[3], cx, cy, cw, x, y;
+        if (pn * 4 + 12 > 0x100) {
+            sBatchState.bounds_ok = 0;
+            return;
+        }
+        if (pn < sBatchState.bounds_mtx[0]) sBatchState.bounds_mtx[0] = pn;
+        if (pn > sBatchState.bounds_mtx[1]) sBatchState.bounds_mtx[1] = pn;
+        for (j = 0; j < 3; j++) {
+            int r = pn * 4 + 4 * j;
+            w[j] = xf_packed_float(r) * v[i].pos[0] + xf_packed_float(r + 1) * v[i].pos[1] +
+                   xf_packed_float(r + 2) * v[i].pos[2] + xf_packed_float(r + 3);
+        }
+        cx = ortho ? p[0] * w[0] + p[1] : p[0] * w[0] + p[1] * w[2];
+        cy = ortho ? p[2] * w[1] + p[3] : p[2] * w[1] + p[3] * w[2];
+        cw = ortho ? 1.0f : -w[2];
+        if (!(cw > 1e-6f) || !(cx == cx) || !(cy == cy)) {
+            sBatchState.bounds_ok = 0;
+            return;
+        }
+        x = vp[0] + (cx / cw + 1.0f) * 0.5f * vp[2];
+        y = vp[1] + (1.0f - cy / cw) * 0.5f * vp[3];
+        if (x < b[0]) b[0] = x;
+        if (y < b[1]) b[1] = y;
+        if (x > b[2]) b[2] = x;
+        if (y > b[3]) b[3] = y;
+    }
+}
+
 /* Draws count vertices of format f from p as primitive prim. */
 static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int vat) {
     static int skipLo = -2, skipHi = -1;
     GXVertex tpl, *v;
+    const GXVertex* placed = NULL; /* the vertices, for the batch's bounds */
     uint32_t* ix;
     uint32_t base;
     int tris, i, own = 0;
@@ -1441,6 +1657,7 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
     } else if (sList && sListAt + count <= sList->verts) {
         /* The list's, in the arena: decoded now (sListBuild), or before. */
         v = sListBuild ? sListVerts + sListAt : NULL;
+        if (!v && sList->small) placed = sList->small + sListAt;
         base = (uint32_t)(sList->first + sListAt);
         sListAt += count;
         if (sListBuild) list_note_arrays(p, f, count);
@@ -1456,6 +1673,9 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
         if ((long)sFrame == sDebugFrame) debug_draw(&sBatchState, v, count);
         if (own) gxb_arena_write((int)base, v, count);
     }
+    if (v) placed = v;
+    if (placed && count <= LIST_SMALL) note_bounds(placed, count);
+    else sBatchState.bounds_ok = 0;
     ix = sIndex + sIndexCount;
     switch (prim) {
     case 0x80:
@@ -1471,10 +1691,12 @@ static void draw(int prim, const uint8_t* p, const VtxFormat* f, int count, int 
         }
         break;
     case 0x98: /* every other triangle turned round, to keep the winding */
-        for (i = 0; i + 2 < count; i++) {
-            if (i & 1) { *ix++ = base + i + 1; *ix++ = base + i; *ix++ = base + i + 2; }
-            else { *ix++ = base + i; *ix++ = base + i + 1; *ix++ = base + i + 2; }
+        for (i = 0; i + 3 < count; i += 2) {
+            ix[0] = base + i; ix[1] = base + i + 1; ix[2] = base + i + 2;
+            ix[3] = base + i + 2; ix[4] = base + i + 1; ix[5] = base + i + 3;
+            ix += 6;
         }
+        if (i + 2 < count) { *ix++ = base + i; *ix++ = base + i + 1; *ix++ = base + i + 2; }
         break;
     default:
         for (i = 1; i + 1 < count; i++) {
@@ -1554,7 +1776,7 @@ static void efb_copy(uint32_t exec) {
         sBatchVerts = sIndexCount = sBatchFirst = sIndexFirst = 0;
         sKeepFrame = gxb_recording();
         sFrame++;
-        note_writes((uint32_t)sFrame);
+        note_writes();
         {
             /* The filtering setting changed: every texture made again. */
             static int generation;
@@ -1593,6 +1815,7 @@ static void bp_write(uint32_t v) {
     bp[reg] = val;
     if (reg >= 0xE0 && reg <= 0xE7) set_tev_color((int)reg, val);
     else if (reg == 0x65) load_tlut();
+    else if (reg == 0x66) sInvalidated = 1; /* the texture cache: see note_writes */
     else if (reg == 0x52) efb_copy(val);
     else if (reg == 0x45) hle_raise_interrupt(INTERRUPT_PE_FINISH); /* draw done */
     else if (reg == 0x47) ST16(PE_TOKEN_REG, val & 0xFFFF);
@@ -1614,11 +1837,17 @@ static size_t run(const uint8_t* p, size_t len, int depth, size_t* need) {
         size_t left = len - pos;
         uint8_t op = c[0];
         if ((long)sFrame == sDebugFrame && depth >= 0) sOpCount[op]++;
-        if (op == 0x00 || op == 0x48 || op == 0x44) {
+        if (op == 0x00) {
+            /* The padding that ends lists and FIFO flushes, a third of
+             * the park's commands. */
+            for (pos++; pos < len && p[pos] == 0; pos++) {}
+        } else if (op == 0x48 || op == 0x44) {
             pos++;
         } else if (op == 0x08) {
             if (left < 6) { *need = 6; break; }
             cp[c[1]] = rd32(c + 2);
+            if (c[1] >= 0x50 && c[1] < 0xC0) sCpGen++;
+            if (c[1] == 0xF0) sScreenMarked = (int)cp[0xF0]; /* not the GPU's: hle_minimap.c's mark */
             if (c[1] == 0x30) xf_write(0x1018, cp[0x30]);
             if (c[1] == 0x40) xf_write(0x1019, cp[0x40]);
             pos += 6;

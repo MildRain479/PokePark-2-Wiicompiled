@@ -150,7 +150,7 @@ static void connect(ppc_t* c) {
 }
 
 /* s32 WPADProbe(s32 chan, u32* type) */
-void f_80247F10(ppc_t* c) {
+void F_WPADProbe(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     int on = chan >= 0 && chan < WPAD_MAX_CHANS && connected(chan);
     if (c->r[4]) ST32(c->r[4], on ? WPAD_DEV_CORE : WPAD_DEV_NOT_FOUND);
@@ -158,7 +158,7 @@ void f_80247F10(ppc_t* c) {
 }
 
 /* WPADConnectCallback WPADSetConnectCallback(s32 chan, WPADConnectCallback cb) */
-void f_80248030(ppc_t* c) {
+void F_WPADSetConnectCallback(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t cb = c->r[4], old = 0;
     if (chan >= 0 && chan < WPAD_MAX_CHANS) {
@@ -173,7 +173,7 @@ void f_80248030(ppc_t* c) {
 }
 
 /* WPADExtensionCallback WPADSetExtensionCallback(s32 chan, WPADExtensionCallback cb) */
-void f_802480C0(ppc_t* c) {
+void F_WPADSetExtensionCallback(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t old = 0;
     if (chan >= 0 && chan < WPAD_MAX_CHANS) {
@@ -184,7 +184,7 @@ void f_802480C0(ppc_t* c) {
 }
 
 /* WPADSamplingCallback WPADSetSamplingCallback(s32 chan, WPADSamplingCallback cb) */
-void f_80247FA0(ppc_t* c) {
+void F_WPADSetSamplingCallback(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t old = 0;
     if (chan >= 0 && chan < WPAD_MAX_CHANS) {
@@ -195,13 +195,13 @@ void f_80247FA0(ppc_t* c) {
 }
 
 /* u32 WPADGetDataFormat(s32 chan) */
-void f_80248120(ppc_t* c) {
+void F_WPADGetDataFormat(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     c->r[3] = chan >= 0 && chan < WPAD_MAX_CHANS ? sChan[chan].format : 0;
 }
 
 /* s32 WPADSetDataFormat(s32 chan, u32 format) */
-void f_80248170(ppc_t* c) {
+void F_WPADSetDataFormat(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     if (chan >= 0 && chan < WPAD_MAX_CHANS) sChan[chan].format = c->r[4];
     c->r[3] = connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER;
@@ -210,7 +210,7 @@ void f_80248170(ppc_t* c) {
 /* void WPADRead(s32 chan, WPADStatus* status): the latest report.
  * WPADStatus: u16 button; s16 accX, accY, accZ; DPDObject obj[4] (s16 x,
  * y; u16 size; u8 traceId; pad); u8 dev; s8 err. */
-void f_802488A0(ppc_t* c) {
+void F_WPADRead(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t st = c->r[4], held = 0;
     int16_t ax = 0, ay = 0, az = ACC_ONE_G;
@@ -252,14 +252,14 @@ void f_802488A0(ppc_t* c) {
 }
 
 /* void WPADGetAccGravityUnit(s32 chan, u32 type, WPADAcc* acc) */
-void f_80247D40(ppc_t* c) {
+void F_WPADGetAccGravityUnit(ppc_t* c) {
     ST16(c->r[5] + 0, ACC_ONE_G);
     ST16(c->r[5] + 2, ACC_ONE_G);
     ST16(c->r[5] + 4, ACC_ONE_G);
 }
 
 /* s32 WPADControlDpd(s32 chan, u32 command, WPADCallback cb) */
-void f_8024A990(ppc_t* c) {
+void F_WPADControlDpd(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     if (chan >= 0 && chan < WPAD_MAX_CHANS) sChan[chan].dpdCommand = c->r[4];
     if (c->r[5]) hle_post(c->r[5], (uint32_t)chan, connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER, NULL, 0);
@@ -267,25 +267,25 @@ void f_8024A990(ppc_t* c) {
 }
 
 /* BOOL WPADIsDpdEnabled(s32 chan) */
-void f_8024A8A0(ppc_t* c) {
+void F_WPADIsDpdEnabled(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     c->r[3] = chan >= 0 && chan < WPAD_MAX_CHANS && sChan[chan].dpdCommand != 0;
 }
 
 /* u8 WPADGetDpdFormat(s32 chan) */
-void f_8024A8F0(ppc_t* c) {
+void F_WPADGetDpdFormat(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     c->r[3] = chan >= 0 && chan < WPAD_MAX_CHANS ? sChan[chan].dpdCommand : 0;
 }
 
 /* void WPADControlMotor(s32 chan, u32 command): 1 starts the rumble. */
-void f_802484B0(ppc_t* c) {
+void F_WPADControlMotor(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     if (connected(chan) && g_host_pad_rumble) g_host_pad_rumble(chan, c->r[4] == 1);
 }
 
 /* s32 WPADControlLed(s32 chan, u8 pattern, WPADCallback cb) */
-void f_80248600(ppc_t* c) {
+void F_WPADControlLed(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     if (c->r[5]) hle_post(c->r[5], (uint32_t)chan, connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER, NULL, 0);
     c->r[3] = connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER;
@@ -294,7 +294,7 @@ void f_80248600(ppc_t* c) {
 /* s32 WPADGetInfoAsync(s32 chan, WPADInfo* info, WPADCallback cb).
  * WPADInfo: BOOL dpd, speaker, attach, lowBat, nearempty; u8 battery,
  * led, protocol, firmware. */
-void f_80248290(ppc_t* c) {
+void F_WPADGetInfoAsync(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     uint32_t info = c->r[4];
     if (!connected(chan)) {
@@ -311,16 +311,16 @@ void f_80248290(ppc_t* c) {
 }
 
 /* u8 WPADGetRadioSensitivity(s32 chan): a strong signal. */
-void f_80246BC0(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]) ? 100 : 0; }
+void F_WPADGetRadioSensitivity(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]) ? 100 : 0; }
 
 /* s32 WPADDisconnect(s32 chan): the remote stays connected. */
-void f_80247E50(ppc_t* c) { c->r[3] = WPAD_ERR_NONE; }
+void F_WPADDisconnect(ppc_t* c) { c->r[3] = WPAD_ERR_NONE; }
 
 /* The speaker. Sound sent to it is dropped. */
 
 /* s32 WPADControlSpeaker(s32 chan, u32 command, WPADCallback cb):
  * command 0 turns it off, 1 on. */
-void f_80248DF0(ppc_t* c) {
+void F_WPADControlSpeaker(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     if (!connected(chan)) {
         c->r[3] = (uint32_t)WPAD_ERR_NO_CONTROLLER;
@@ -333,13 +333,13 @@ void f_80248DF0(ppc_t* c) {
 }
 
 /* BOOL WPADIsSpeakerEnabled(s32 chan) */
-void f_80248DA0(ppc_t* c) {
+void F_WPADIsSpeakerEnabled(ppc_t* c) {
     int32_t chan = (int32_t)c->r[3];
     c->r[3] = chan >= 0 && chan < WPAD_MAX_CHANS && sChan[chan].speakerOn;
 }
 
 /* BOOL WPADCanSendStreamData(s32 chan) */
-void f_8024A5C0(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]); }
+void F_WPADCanSendStreamData(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]); }
 
 /* s32 WPADSendStreamData(s32 chan, void* data, u16 len) */
-void f_8024A650(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER; }
+void F_WPADSendStreamData(ppc_t* c) { c->r[3] = connected((int32_t)c->r[3]) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER; }

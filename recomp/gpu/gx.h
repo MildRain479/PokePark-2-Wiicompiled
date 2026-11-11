@@ -38,6 +38,9 @@ typedef struct GXTevStage {
     uint8_t ras_swap, tex_swap;
 } GXTevStage;
 
+/* Where the minimap is on the game's screen, in EFB pixels: x0, y0, x1, y1. */
+static const float kGxMinimapRect[4] = {472, 273, 591, 427};
+
 /* Everything the backend needs to draw with the current state. */
 typedef struct GXDrawState {
     int num_stages;
@@ -47,6 +50,7 @@ typedef struct GXDrawState {
     uint8_t swap_table[4][4];
     int num_texcoords;
     uint32_t texture[8];   /* backend texture handles, 0 = none */
+    uint8_t video_maps;    /* maps whose texture is a movie frame (bit per map): drawn upscaled */
     int alpha_func[2], alpha_ref[2], alpha_logic;
     int blend_enable, blend_src, blend_dst, blend_subtract, logic_enable, logic_op;
     int color_update, alpha_update;
@@ -82,8 +86,18 @@ typedef struct GXDrawState {
      * texture coordinates'); the rest are XF's MATINDEX registers' alike
      * for every vertex. */
     int mtx_per_vertex;
+    /* What the draw is of: 0 the game's picture, 1 the minimap, which a
+     * second screen shows (gx_fifo.c). */
+    int screen;
     const uint32_t* xf;    /* GX_XF_WORDS words, laid out as above */
     int xf_dirty_lo, xf_dirty_hi; /* words changed since the last draw (lo >= hi: none) */
+    uint64_t xf_dirty_chunks;     /* the same, by 32-word chunks (bit n: words 32n..32n+31) */
+    /* Where the batch draws, in EFB pixels (x0, y0, x1, y1), if bounds_ok:
+     * a few vertices outside display lists (2D, and the blur chain's
+     * quads), placed as the vertex shader places them. */
+    int bounds_ok;
+    float bounds[4];
+    int bounds_mtx[2]; /* the position matrices those vertices use, lowest and highest */
     /* What the batch draws, the same from frame to frame (its display
      * lists and their draws), for matching it with the last frame's. */
     uint64_t key;

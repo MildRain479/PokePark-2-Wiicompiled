@@ -10,8 +10,11 @@
 #include <windows.h>
 #include <intrin.h>
 #else
+#include <signal.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 uint8_t* g_mem;
@@ -55,6 +58,153 @@ int ppc_mem_init(void) {
 #endif
     return 0;
 }
+
+/* Which guest pages have been written, for the texture cache (gx_fifo.c),
+ * where Windows' write watch isn't: a page a texture is on is made
+ * read-only before the texture is hashed, and the first write to it
+ * faults here, which notes the write (a stamp, from a count of the writes
+ * noted) and makes the page writable again. Pages no texture is on are
+ * never protected, so the game's other writes cost nothing; hashing every
+ * texture every frame took a tenth of the game thread on the Thor. Writes
+ * the kernel makes (read() into guest memory) fail rather than fault, so
+ * they go through ppc_mem_host_write first. RECOMP_MEM_TRACK=0 turns it
+ * off (every texture is hashed every frame). */
+#ifdef _WIN32
+int ppc_mem_watch(uint32_t addr, uint32_t size, uint32_t* stamp) {
+    (void)addr, (void)size, (void)stamp;
+    return 0;
+}
+int ppc_mem_written(uint32_t addr, uint32_t size, uint32_t stamp) {
+    (void)addr, (void)size, (void)stamp;
+    return 1;
+}
+void ppc_mem_host_write(uint32_t addr, uint32_t size) { (void)addr, (void)size; }
+#else
+#define TRACK_MEM1 0x01800000u
+#define TRACK_PAGES ((TRACK_MEM1 + 0x04000000u) >> 12)
+static uint32_t sStamp;                 /* counts the writes noted */
+static uint32_t sWritten[TRACK_PAGES];  /* the stamp of each page's last noted write */
+static uint8_t sWatched[TRACK_PAGES];   /* read-only, its next write to be noted */
+static int sTrack = -1;                 /* 1 working, 0 not, -1 not set up yet */
+static uint32_t sHostPage;              /* the host's page size: 4 KB, or 16 KB on some */
+static atomic_flag sTrackLock = ATOMIC_FLAG_INIT;
+static struct sigaction sPrevSegv;
+
+/* The tracked page (4 KB) a physical address is in, or -1 outside MEM1
+ * and MEM2. */
+static int track_page(uint32_t phys) {
+    if (phys < TRACK_MEM1) return (int)(phys >> 12);
+    if (phys - 0x10000000u < 0x04000000u) return (int)((TRACK_MEM1 + (phys - 0x10000000u)) >> 12);
+    return -1;
+}
+
+static void track_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&sTrackLock, memory_order_acquire)) {
+    }
+}
+static void track_unlock(void) { atomic_flag_clear_explicit(&sTrackLock, memory_order_release); }
+
+/* Notes a write to the host page at phys (aligned) and makes it writable;
+ * with the lock held. */
+static void unwatch(uint32_t phys) {
+    int pg = track_page(phys), i, n = (int)(sHostPage >> 12);
+    uint32_t stamp = ++sStamp;
+    for (i = 0; i < n; i++) {
+        sWritten[pg + i] = stamp;
+        __atomic_store_n(&sWatched[pg + i], 0, __ATOMIC_RELEASE);
+    }
+    mprotect(g_mem + phys, sHostPage, PROT_READ | PROT_WRITE);
+}
+
+static void on_write(int sig, siginfo_t* info, void* context) {
+    uintptr_t at = (uintptr_t)info->si_addr - (uintptr_t)g_mem;
+    if (at < GUEST_SPACE && track_page((uint32_t)at) >= 0) {
+        /* MEM1 and MEM2 are only ever read-only here, so the write is one
+         * to note, unless another thread already did (then the page is
+         * writable and the write goes through when retried). */
+        uint32_t phys = (uint32_t)at & ~(sHostPage - 1);
+        track_lock();
+        if (sWatched[track_page(phys)]) unwatch(phys);
+        track_unlock();
+        return;
+    }
+    if (sPrevSegv.sa_flags & SA_SIGINFO) sPrevSegv.sa_sigaction(sig, info, context);
+    else if (sPrevSegv.sa_handler != SIG_DFL && sPrevSegv.sa_handler != SIG_IGN) sPrevSegv.sa_handler(sig);
+    else sigaction(SIGSEGV, &sPrevSegv, NULL); /* the fault comes again, as it would have */
+}
+
+static int track_start(void) {
+    const char* env = getenv("RECOMP_MEM_TRACK");
+    struct sigaction sa;
+    long page = sysconf(_SC_PAGESIZE);
+    if ((env && *env == '0') || page < 4096 || (page & (page - 1)) || page > 0x10000) return 0;
+    sHostPage = (uint32_t)page;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_write;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(SIGSEGV, &sa, &sPrevSegv) == 0;
+}
+
+/* The first and last host pages of [addr, addr + size), or 0 if the range
+ * isn't all in MEM1 or all in MEM2. */
+static int host_pages(uint32_t addr, uint32_t size, uint32_t* first, uint32_t* last) {
+    uint32_t phys = addr & 0x3FFFFFFFu, end = phys + (size ? size : 1) - 1;
+    int a = track_page(phys), b = track_page(end);
+    if (a < 0 || b < 0 || b - a != (int)((end >> 12) - (phys >> 12))) return 0;
+    *first = phys & ~(sHostPage - 1);
+    *last = end & ~(sHostPage - 1);
+    return 1;
+}
+
+int ppc_mem_watch(uint32_t addr, uint32_t size, uint32_t* stamp) {
+    uint32_t first, last, p, run = 0;
+    int have_run = 0;
+    if (sTrack < 0) sTrack = track_start();
+    if (!sTrack || !host_pages(addr, size, &first, &last)) return 0;
+    track_lock();
+    for (p = first;; p += sHostPage) {
+        int pg = track_page(p), i, n = (int)(sHostPage >> 12), all = 1;
+        for (i = 0; i < n; i++) all &= sWatched[pg + i];
+        if (!all) {
+            for (i = 0; i < n; i++) sWatched[pg + i] = 1;
+            if (!have_run) run = p, have_run = 1;
+        }
+        /* Pages left writable next to each other are protected together. */
+        if (have_run && (all || p == last)) {
+            mprotect(g_mem + run, (all ? p : p + sHostPage) - run, PROT_READ);
+            have_run = 0;
+        }
+        if (p == last) break;
+    }
+    *stamp = sStamp;
+    track_unlock();
+    return 1;
+}
+
+int ppc_mem_written(uint32_t addr, uint32_t size, uint32_t stamp) {
+    uint32_t phys = addr & 0x3FFFFFFFu, end = phys + (size ? size : 1) - 1;
+    int a = track_page(phys), b = track_page(end), i;
+    if (sTrack != 1 || a < 0 || b < 0 || b - a != (int)((end >> 12) - (phys >> 12))) return 1;
+    for (i = a; i <= b; i++) {
+        if (!__atomic_load_n(&sWatched[i], __ATOMIC_ACQUIRE) || sWritten[i] > stamp) return 1;
+    }
+    return 0;
+}
+
+void ppc_mem_host_write(uint32_t addr, uint32_t size) {
+    uint32_t first, last, p;
+    if (sTrack != 1 || !size || !host_pages(addr, size, &first, &last)) return;
+    track_lock();
+    for (p = first;; p += sHostPage) {
+        int pg = track_page(p), i, n = (int)(sHostPage >> 12), any = 0;
+        for (i = 0; i < n; i++) any |= sWatched[pg + i];
+        if (any) unwatch(p);
+        if (p == last) break;
+    }
+    track_unlock();
+}
+#endif
 
 static uint32_t be32(const uint8_t* p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -105,11 +255,11 @@ static struct {
 static int sOverrideCount;
 
 /* Indirect calls (bctrl, function pointers, virtual calls) look their
- * target up here. For main.dol's code, below 0x80400000, a table indexed
+ * target up here. For main.dol's code, below 0x80800000, a table indexed
  * by address answers in one load; it is built on first use and follows
  * overrides. */
 #define DIRECT_BASE 0x80000000u
-#define DIRECT_COUNT 0x100000u /* 4 MB of code, one entry per word */
+#define DIRECT_COUNT 0x200000u /* 8 MB of code, one entry per word */
 static ppc_func* sDirect;
 
 static void build_direct(void) {

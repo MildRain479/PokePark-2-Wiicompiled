@@ -28,33 +28,33 @@
 
 #define AI_SAMPLE_RATE HOST_AUDIO_RATE /* AX output rate */
 
-static const uint32_t kAXDSPResumeCallback = 0x80231000; /* __AXDSPResumeCallback */
+static const uint32_t kAXDSPResumeCallback = A___AXDSPResumeCallback;
 
 static uint32_t sAiCallback;
 static uint32_t sDmaBytes;
 
 /* void __OSInitAudioSystem(void): uploads a small init program to the DSP
  * and waits for it to report back. */
-void f_80208330(ppc_t* c) { (void)c; }
+void F___OSInitAudioSystem(ppc_t* c) { (void)c; }
 
 /* static void __AI_SRC_INIT(void): times how long the audio interface's
  * sample-rate converter takes to start, by watching its sample counter.
  * There is no audio hardware to time. */
-void f_8022F080(ppc_t* c) { (void)c; }
+void F___AI_SRC_INIT(ppc_t* c) { (void)c; }
 
 /* static void __AXOutInitDSP(void): boots the AX mixer program on the DSP
  * and waits for it to start. */
-void f_80231080(ppc_t* c) { (void)c; }
+void F___AXOutInitDSP(ppc_t* c) { (void)c; }
 
 /* u32 DSPCheckMailToDSP(void): nonzero while the DSP has not taken the
  * last mail. It takes it at once. */
-void f_802395B0(ppc_t* c) { c->r[3] = 0; }
+void F_DSPCheckMailToDSP(ppc_t* c) { c->r[3] = 0; }
 
 /* The DSP's voice parameter blocks (AXPB, 0x140 bytes each): AX copies each
  * voice's settings in before a frame and reads its position and state back
  * after it (__AXSyncPBs). */
-#define AX_PBS 0x80486F70       /* __AXGetPBs() */
-#define AX_MAX_VOICES 0x80486F7C /* AXGetMaxVoices() */
+#define AX_PBS A_AX_PBS /* __AXGetPBs() */
+#define AX_MAX_VOICES A_AX_MAX_VOICES /* AXGetMaxVoices() */
 #define AX_PB_SIZE 0x140
 #define AX_FRAME_SAMPLES 96 /* 3 ms at 32 kHz */
 enum {
@@ -125,12 +125,12 @@ static void aux_where(ppc_t* c, uint32_t* to, void (*orig)(ppc_t*)) {
 }
 
 /* void __AXGetAuxAInput(u32* addr) and the rest. */
-void f_8022FA70(ppc_t* c) { aux_where(c, &sAuxIn[0], f_8022FA70_orig); }
-void f_8022FAB0(ppc_t* c) { aux_where(c, &sAuxOut[0], f_8022FAB0_orig); }
-void f_8022FB50(ppc_t* c) { aux_where(c, &sAuxIn[1], f_8022FB50_orig); }
-void f_8022FB90(ppc_t* c) { aux_where(c, &sAuxOut[1], f_8022FB90_orig); }
-void f_8022FC30(ppc_t* c) { aux_where(c, &sAuxIn[2], f_8022FC30_orig); }
-void f_8022FC70(ppc_t* c) { aux_where(c, &sAuxOut[2], f_8022FC70_orig); }
+void F___AXGetAuxAInput(ppc_t* c) { aux_where(c, &sAuxIn[0], F___AXGetAuxAInput_orig); }
+void F___AXGetAuxAOutput(ppc_t* c) { aux_where(c, &sAuxOut[0], F___AXGetAuxAOutput_orig); }
+void F___AXGetAuxBInput(ppc_t* c) { aux_where(c, &sAuxIn[1], F___AXGetAuxBInput_orig); }
+void F___AXGetAuxBOutput(ppc_t* c) { aux_where(c, &sAuxOut[1], F___AXGetAuxBOutput_orig); }
+void F___AXGetAuxCInput(ppc_t* c) { aux_where(c, &sAuxIn[2], F___AXGetAuxCInput_orig); }
+void F___AXGetAuxCOutput(ppc_t* c) { aux_where(c, &sAuxOut[2], F___AXGetAuxCOutput_orig); }
 
 /* One voice's decoder state for the frame, kept in registers and written
  * back to its parameter block at the end. */
@@ -357,28 +357,28 @@ static void update_timer(void) {
 }
 
 /* AIDCallback AIRegisterDMACallback(AIDCallback callback) */
-void f_8022EC80(ppc_t* c) {
+void F_AIRegisterDMACallback(ppc_t* c) {
     sAiCallback = c->r[3];
-    f_8022EC80_orig(c);
+    F_AIRegisterDMACallback_orig(c);
 }
 
 /* void AIInitDMA(u32 start, u32 length) */
-void f_8022ECD0(ppc_t* c) {
+void F_AIInitDMA(ppc_t* c) {
     if (c->r[4] != sDmaBytes) {
         sDmaBytes = c->r[4];
         HLE_LOG("AI DMA buffer: %u bytes (%.2f ms)", sDmaBytes, sDmaBytes / 4 * 1000.0 / AI_SAMPLE_RATE);
     }
-    f_8022ECD0_orig(c);
+    F_AIInitDMA_orig(c);
 }
 
 /* void AIStartDMA(void) */
-void f_8022ED50(ppc_t* c) {
+void F_AIStartDMA(ppc_t* c) {
     update_timer();
-    f_8022ED50_orig(c);
+    F_AIStartDMA_orig(c);
 }
 
 /* void AIStopDMA(void) */
-void f_8022ED70(ppc_t* c) {
+void F_AIStopDMA(ppc_t* c) {
     hle_timer_stop(HLE_TIMER_AUDIO);
-    f_8022ED70_orig(c);
+    F_AIStopDMA_orig(c);
 }

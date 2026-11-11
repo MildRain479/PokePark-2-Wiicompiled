@@ -244,7 +244,9 @@ static const char* kVertexShader =
     "    if (type == 0) {\n"
     "      int m = texmtx(i) * 4;\n"
     "      stq = vec3(dot(row(m), src), dot(row(m + 4), src), ((info >> 1) & 1u) != 0u ? dot(row(m + 8), src) : 1.0);\n"
-    "    } else stq = vec3(src.xy, 1.0);\n"
+    "    } else if (type == 2) stq = vec3(v_col0.rg, 1.0);\n" /* the lit color as coordinates: a ramp */
+    "    else if (type == 3) stq = vec3(v_col1.rg, 1.0);\n"
+    "    else stq = vec3(src.xy, 1.0);\n"
     "    if (dual) {\n" /* post-transform */
     "      uint pt = xw(0x1050 + i);\n"
     "      vec4 v = vec4(stq, 1.0);\n"
@@ -281,7 +283,84 @@ static const char* kFragmentShader =
     " * and scales; the matrices' rows, each with its shift; the coordinates'\n"
     " * sizes, two to a vector. */\n"
     "uniform ivec4 u_ind, u_ind_cmd[4], u_ind_stage[4], u_ind_mtx[6], u_tc_size[4];\n"
+    "uniform int u_video; /* the maps whose texture is a movie frame, a bit each */\n"
+    "/* A movie's frame, upscaled along its edges as AMD's FSR 1 does (EASU):\n"
+    " * twelve texels weighted by a lobe stretched along the local edge, held\n"
+    " * within the four nearest. Drawn smaller than its texels, it is sampled\n"
+    " * as any texture. */\n"
+    "float video_luma(vec4 c) { return dot(c.rgb, vec3(0.25, 0.5, 0.25)); }\n"
+    "// One bilinear quadrant's edge direction and strength, from its texel (c)\n"
+    "// and the four around it (a above, b left, d right, e below).\n"
+    "void easu_dir(inout vec2 dir, inout float len, float w, float a, float b, float c, float d, float e) {\n"
+    "    float lx = max(abs(d - c), abs(c - b)), ly = max(abs(e - c), abs(c - a));\n"
+    "    lx = lx > 0.0 ? clamp(abs(d - b) / lx, 0.0, 1.0) : 0.0;\n"
+    "    ly = ly > 0.0 ? clamp(abs(e - a) / ly, 0.0, 1.0) : 0.0;\n"
+    "    dir += vec2(d - b, e - a) * w;\n"
+    "    len += (lx * lx + ly * ly) * w;\n"
+    "}\n"
+    "// A texel's weight: a lobe stretched along the edge, shortened across it.\n"
+    "void easu_tap(inout vec4 ac, inout float aw, vec2 off, vec2 dir, vec2 len2, float lob, float clp, vec4 c) {\n"
+    "    vec2 v = vec2(dot(off, dir), dot(off, vec2(-dir.y, dir.x))) * len2;\n"
+    "    float d2 = min(dot(v, v), clp);\n"
+    "    float wb = 0.4 * d2 - 1.0, wa = lob * d2 - 1.0;\n"
+    "    wb *= wb;\n"
+    "    wa *= wa;\n"
+    "    float w = (1.5625 * wb - 0.5625) * wa;\n"
+    "    ac += c * w;\n"
+    "    aw += w;\n"
+    "}\n"
+    "vec4 easu(vec2 pp, vec4 b, vec4 c, vec4 e, vec4 f, vec4 g, vec4 h, vec4 i, vec4 j, vec4 k, vec4 l, vec4 n, vec4 o) {\n"
+    "    float bl = video_luma(b), cl = video_luma(c), el = video_luma(e), fl = video_luma(f), gl = video_luma(g),\n"
+    "          hl = video_luma(h), il = video_luma(i), jl = video_luma(j), kl = video_luma(k), ll = video_luma(l),\n"
+    "          nl = video_luma(n), ol = video_luma(o);\n"
+    "    vec2 dir = vec2(0.0);\n"
+    "    float len = 0.0;\n"
+    "    easu_dir(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bl, el, fl, gl, jl);\n"
+    "    easu_dir(dir, len, pp.x * (1.0 - pp.y), cl, fl, gl, hl, kl);\n"
+    "    easu_dir(dir, len, (1.0 - pp.x) * pp.y, fl, il, jl, kl, nl);\n"
+    "    easu_dir(dir, len, pp.x * pp.y, gl, jl, kl, ll, ol);\n"
+    "    float dr = dot(dir, dir);\n"
+    "    dir = dr < 1.0 / 32768.0 ? vec2(1.0, 0.0) : dir * inversesqrt(dr);\n"
+    "    len *= 0.5;\n"
+    "    len *= len;\n"
+    "    float stretch = 1.0 / max(abs(dir.x), abs(dir.y));\n"
+    "    vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);\n"
+    "    float lob = 0.5 - 0.29 * len, clp = 1.0 / lob;\n"
+    "    vec4 ac = vec4(0.0);\n"
+    "    float aw = 0.0;\n"
+    "    easu_tap(ac, aw, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);\n"
+    "    easu_tap(ac, aw, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);\n"
+    "    easu_tap(ac, aw, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);\n"
+    "    easu_tap(ac, aw, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);\n"
+    "    easu_tap(ac, aw, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);\n"
+    "    easu_tap(ac, aw, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);\n"
+    "    easu_tap(ac, aw, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, i);\n"
+    "    easu_tap(ac, aw, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);\n"
+    "    easu_tap(ac, aw, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);\n"
+    "    easu_tap(ac, aw, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);\n"
+    "    easu_tap(ac, aw, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);\n"
+    "    easu_tap(ac, aw, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, o);\n"
+    "    vec4 r = aw > 1e-5 ? ac / aw : mix(mix(f, g, pp.x), mix(j, k, pp.x), pp.y);\n"
+    "    return clamp(r, min(min(f, g), min(j, k)), max(max(f, g), max(j, k)));\n"
+    "}\n"
+    "vec4 sample_video(sampler2D s, vec2 uv) {\n"
+    "  ivec2 size = textureSize(s, 0), m = size - 1;\n"
+    "  vec2 p = uv * vec2(size), fw = fwidth(p);\n"
+    "  if (max(fw.x, fw.y) > 1.0) return texture(s, uv);\n"
+    "  vec2 pp = p - 0.5, fp = floor(pp);\n"
+    "  ivec2 q = ivec2(fp);\n"
+    "  pp -= fp;\n"
+    "#define T(x, y) texelFetch(s, clamp(q + ivec2(x, y), ivec2(0), m), 0)\n"
+    "  return easu(pp, T(0, -1), T(1, -1), T(-1, 0), T(0, 0), T(1, 0), T(2, 0), T(-1, 1), T(0, 1), T(1, 1), T(2, 1), T(0, 2), T(1, 2));\n"
+    "#undef T\n"
+    "}\n"
     "vec4 sample_map(int m, vec2 uv) {\n"
+    "  if (((u_video >> m) & 1) != 0) {\n"
+    "    if (m == 0) return sample_video(u_tex0, uv); if (m == 1) return sample_video(u_tex1, uv);\n"
+    "    if (m == 2) return sample_video(u_tex2, uv); if (m == 3) return sample_video(u_tex3, uv);\n"
+    "    if (m == 4) return sample_video(u_tex4, uv); if (m == 5) return sample_video(u_tex5, uv);\n"
+    "    if (m == 6) return sample_video(u_tex6, uv); return sample_video(u_tex7, uv);\n"
+    "  }\n"
     "  if (m == 0) return texture(u_tex0, uv); if (m == 1) return texture(u_tex1, uv);\n"
     "  if (m == 2) return texture(u_tex2, uv); if (m == 3) return texture(u_tex3, uv);\n"
     "  if (m == 4) return texture(u_tex4, uv); if (m == 5) return texture(u_tex5, uv);\n"
@@ -293,8 +372,14 @@ static const char* kFragmentShader =
     "  if (m == 4) return textureSize(u_tex4, 0); if (m == 5) return textureSize(u_tex5, 0);\n"
     "  if (m == 6) return textureSize(u_tex6, 0); return textureSize(u_tex7, 0);\n"
     "}\n"
-    "/* A map sampled at a coordinate in texels with 7 fractional bits. */\n"
-    "vec4 sample_at(int m, ivec2 c) { return sample_map(m, vec2(c) / (vec2(map_size(m)) * 128.0)); }\n"
+    "/* A map sampled at a coordinate in texels with 7 fractional bits, of the\n"
+    " * size GX gives texture coordinate n (the map's own, if none): a copy of\n"
+    " * the screen is bigger than the game's texels. */\n"
+    "vec4 sample_at(int m, ivec2 c, int n) {\n"
+    "  ivec4 sz = u_tc_size[n >> 1]; vec2 d = vec2((n & 1) != 0 ? sz.zw : sz.xy);\n"
+    "  if (d.x <= 0.0 || d.y <= 0.0) d = vec2(map_size(m));\n"
+    "  return sample_map(m, vec2(c) / (d * 128.0));\n"
+    "}\n"
     "ivec2 fixpoint_uv(int n) {\n"
     "  vec3 tc = v_tex[n]; ivec4 sz = u_tc_size[n >> 1];\n"
     "  return ivec2(tc.xy / (tc.z == 0.0 ? 1.0 : tc.z) * vec2((n & 1) != 0 ? sz.zw : sz.xy) * 128.0);\n"
@@ -327,7 +412,7 @@ static const char* kFragmentShader =
     "  if (u_ind.y != 0) {\n"
     "    for (int k = 0; k < u_ind.x && k < 4; k++) {\n"
     "      ivec4 is = u_ind_stage[k];\n"
-    "      ind_tex[k] = ivec3(floor(sample_at(is.x, fixpoint_uv(is.y) >> is.zw).abg * 255.0 + 0.5));\n"
+    "      ind_tex[k] = ivec3(floor(sample_at(is.x, fixpoint_uv(is.y) >> is.zw, is.y).abg * 255.0 + 0.5));\n"
     "    }\n"
     "  }\n"
     "  for (int i = 0; i < u_num_stages; i++) {\n"
@@ -358,7 +443,7 @@ static const char* kFragmentShader =
     "    }\n"
     "    vec4 tex = vec4(1.0);\n"
     "    if (map.z != 0) {\n"
-    "      if (cmd != 0) tex = sample_at(map.x, ind_coord);\n"
+    "      if (cmd != 0) tex = sample_at(map.x, ind_coord, map.y);\n"
     "      else { vec3 tc = v_tex[map.y]; tex = sample_map(map.x, tc.xy / (tc.z == 0.0 ? 1.0 : tc.z)); }\n"
     "    }\n"
     "    tex = swizzle(tex, sel.w & 3);\n"
@@ -436,8 +521,12 @@ static const char* kFragmentShader =
     "}\n";
 
 static GLuint sProgram, sVao, sVbo, sIbo, sXfUbo;
+/* Two of each, the recorded frame's and the frame before's: sVao is the one
+ * in use, the other's sVaos[sFrameSlot ^ 1]. */
+static GLuint sVaos[2], sVbos[2], sIbos[2];
+static int sFrameSlot;
 static GLint uNumStages, uCin, uAin, uCop, uAop, uMap, uSel, uReg, uKonst, uSwap, uAlpha, uAlphaRef, uFog, uFogF, uFogColor;
-static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize, uFogRange;
+static GLint uInd, uIndCmd, uIndStage, uIndMtx, uTcSize, uFogRange, uVideo;
 
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = p_glCreateShader(type);
@@ -458,7 +547,7 @@ static void build_program(void) {
     static const char* attribs[] = {"a_mtx0", "a_mtx1", "a_mtx2", "a_pos", "a_nrm", "a_col0",
                                     "a_col1", "a_tex01", "a_tex23", "a_tex45", "a_tex67"};
     GLint ok;
-    int i;
+    int i, k;
     sProgram = p_glCreateProgram();
     p_glAttachShader(sProgram, compile(GL_VERTEX_SHADER, kVertexShader));
     p_glAttachShader(sProgram, compile(GL_FRAGMENT_SHADER, kFragmentShader));
@@ -497,29 +586,36 @@ static void build_program(void) {
     uIndStage = p_glGetUniformLocation(sProgram, "u_ind_stage");
     uIndMtx = p_glGetUniformLocation(sProgram, "u_ind_mtx");
     uTcSize = p_glGetUniformLocation(sProgram, "u_tc_size");
+    uVideo = p_glGetUniformLocation(sProgram, "u_video");
     uFogRange = p_glGetUniformLocation(sProgram, "u_fog_range");
 
-    p_glGenVertexArrays(1, &sVao);
-    p_glBindVertexArray(sVao);
-    p_glGenBuffers(1, &sVbo);
-    p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    p_glGenBuffers(1, &sIbo);
-    p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sIbo); /* part of the vertex array's state */
-    for (i = 0; i < 3; i++) {
-        p_glEnableVertexAttribArray(i);
-        p_glVertexAttribPointer(i, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, mtx) + i * 4));
-    }
-    p_glEnableVertexAttribArray(3);
-    p_glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, pos));
-    p_glEnableVertexAttribArray(4);
-    p_glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, nrm));
-    p_glEnableVertexAttribArray(5);
-    p_glVertexAttribPointer(5, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
-    p_glEnableVertexAttribArray(6);
-    p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
-    for (i = 0; i < 4; i++) {
-        p_glEnableVertexAttribArray(7 + i);
-        p_glVertexAttribPointer(7 + i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, tex) + i * 4 * sizeof(float)));
+    for (k = 1; k >= 0; k--) {
+        p_glGenVertexArrays(1, &sVao);
+        p_glBindVertexArray(sVao);
+        p_glGenBuffers(1, &sVbo);
+        p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
+        p_glGenBuffers(1, &sIbo);
+        p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sIbo); /* part of the vertex array's state */
+        for (i = 0; i < 3; i++) {
+            p_glEnableVertexAttribArray(i);
+            p_glVertexAttribPointer(i, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GXVertex), (void*)(offsetof(GXVertex, mtx) + i * 4));
+        }
+        p_glEnableVertexAttribArray(3);
+        p_glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, pos));
+        p_glEnableVertexAttribArray(4);
+        p_glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(GXVertex), (void*)offsetof(GXVertex, nrm));
+        p_glEnableVertexAttribArray(5);
+        p_glVertexAttribPointer(5, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[0]));
+        p_glEnableVertexAttribArray(6);
+        p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GXVertex), (void*)offsetof(GXVertex, color[1]));
+        for (i = 0; i < 4; i++) {
+            p_glEnableVertexAttribArray(7 + i);
+            p_glVertexAttribPointer(7 + i, 4, GL_FLOAT, GL_FALSE, sizeof(GXVertex),
+                                    (void*)(offsetof(GXVertex, tex) + i * 4 * sizeof(float)));
+        }
+        sVaos[k] = sVao;
+        sVbos[k] = sVbo;
+        sIbos[k] = sIbo;
     }
 
     /* The XF state, for the vertex shader. */
@@ -1242,6 +1338,13 @@ static void apply_draw_state(const GXDrawState* st) {
     fogc[2] = st->fog_color[2];
     fogc[3] = 1;
 
+    {
+        static int lvideo = -1;
+        if (lvideo != st->video_maps) {
+            p_glUniform1i(uVideo, st->video_maps);
+            lvideo = st->video_maps;
+        }
+    }
     if (!sUniformsSet || lstages != st->num_stages) {
         p_glUniform1i(uNumStages, st->num_stages);
         lstages = st->num_stages;
@@ -1446,7 +1549,7 @@ static void gl_draw(const GXDrawState* st, const GXVertex* v, int first_vertex, 
  * different every frame (24 MB of vertices in the park), the driver kept
  * the old ones' memory: RAM and GPU memory grew by 24 MB at a time, to
  * gigabytes. */
-static GLsizeiptr sFrameVbSize, sFrameIbSize;
+static GLsizeiptr sFrameVbSize[2], sFrameIbSize[2];
 
 static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, const void* data) {
     if (bytes > *size) *size = (bytes + bytes / 4 + 0xFFFFF) & ~(GLsizeiptr)0xFFFFF;
@@ -1455,10 +1558,14 @@ static void frame_buffer(GLenum target, GLsizeiptr* size, GLsizeiptr bytes, cons
 }
 
 static void gl_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+    sFrameSlot ^= 1;
+    sVao = sVaos[sFrameSlot];
+    sVbo = sVbos[sFrameSlot];
+    sIbo = sIbos[sFrameSlot];
     p_glBindVertexArray(sVao);
     p_glBindBuffer(GL_ARRAY_BUFFER, sVbo);
-    frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize, (GLsizeiptr)vertices * sizeof(GXVertex), v);
-    frame_buffer(GL_ELEMENT_ARRAY_BUFFER, &sFrameIbSize, (GLsizeiptr)count * sizeof(uint32_t), index);
+    frame_buffer(GL_ARRAY_BUFFER, &sFrameVbSize[sFrameSlot], (GLsizeiptr)vertices * sizeof(GXVertex), v);
+    frame_buffer(GL_ELEMENT_ARRAY_BUFFER, &sFrameIbSize[sFrameSlot], (GLsizeiptr)count * sizeof(uint32_t), index);
 }
 
 /* Sends the words of xf that differ from what the buffer holds. */
@@ -1475,10 +1582,13 @@ static void upload_xf(const uint32_t* xf) {
     sXfStale = 1;
 }
 
-static void gl_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count) {
+static void gl_draw_recorded(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count,
+                             int before) {
     apply_draw_state(st);
     upload_xf(xf);
+    if (before) p_glBindVertexArray(sVaos[sFrameSlot ^ 1]);
     p_glDrawElementsBaseVertex(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void*)((size_t)first_index * 4), first_vertex);
+    if (before) p_glBindVertexArray(sVao);
 }
 
 static void gl_clear(int color, int alpha, int depth, uint32_t rgba, uint32_t z) {

@@ -69,14 +69,14 @@ static void format_guest(ppc_t* c, uint32_t fmt, int first_gpr, char* out, size_
 }
 
 /* void OSReport(const char* fmt, ...) */
-void f_80209600(ppc_t* c) {
+void F_OSReport(ppc_t* c) {
     char msg[1024];
     format_guest(c, c->r[3], 4, msg, sizeof(msg));
     fprintf(stderr, "OSReport: %s%s", msg, msg[0] && msg[strlen(msg) - 1] == '\n' ? "" : "\n");
 }
 
 /* void OSPanic(const char* file, int line, const char* fmt, ...) */
-void f_80209690(ppc_t* c) {
+void F_OSPanic(ppc_t* c) {
     char msg[1024], file[128];
     hle_read_str(c->r[3], file, sizeof(file));
     format_guest(c, c->r[5], 6, msg, sizeof(msg));
@@ -87,9 +87,9 @@ void f_80209690(ppc_t* c) {
 
 /* void* MEMAllocFromAllocator(MEMAllocator* allocator, u32 size): failed
  * allocations are logged. */
-void f_80235A40(ppc_t* c) {
+void F_MEMAllocFromAllocator(ppc_t* c) {
     uint32_t allocator = c->r[3], size = c->r[4];
-    f_80235A40_orig(c);
+    F_MEMAllocFromAllocator_orig(c);
     if (size >= 0x80000 && hle_log_enabled()) {
         HLE_LOG("MEMAllocFromAllocator(%08X, %u KB) = %08X, from %s", allocator, size >> 10, c->r[3], ppc_func_name(c->lr));
         if (hle_log_enabled() > 2) ppc_backtrace(c);
@@ -97,7 +97,7 @@ void f_80235A40(ppc_t* c) {
     if (!c->r[3]) {
         uint32_t heap = LD32(allocator + 4);
         /* MEMGetAllocatableSizeForExpHeapEx(heap, 4): the largest block. */
-        uint32_t largest = heap ? hle_call(c, 0x80235470, heap, 4) : 0;
+        uint32_t largest = heap && A_MEMGetAllocatableSizeForExpHeapEx ? hle_call(c, A_MEMGetAllocatableSizeForExpHeapEx, heap, 4) : 0;
         HLE_WARN("MEMAllocFromAllocator(%08X, %u) failed; heap %08X, largest free block %u", allocator, size, heap,
                  largest);
         if (hle_log_enabled()) ppc_backtrace(c);

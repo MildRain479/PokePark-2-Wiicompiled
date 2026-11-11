@@ -50,6 +50,7 @@ static void QueryPerformanceCounter(LARGE_INTEGER* t) {
 static void QueryPerformanceFrequency(LARGE_INTEGER* f) { f->QuadPart = 1000000000; }
 #endif
 
+#include "game.h"
 #include "gx_device.h"
 #include "host_settings.h"
 
@@ -122,7 +123,7 @@ static void report(void) {
         double secs = (double)(now.QuadPart - since.QuadPart) / freq.QuadPart;
         double busy = 100.0 * (1.0 - (double)(g_wait_ticks - lastWait) / PPC_TB_HZ / secs);
         lastWait = g_wait_ticks;
-        snprintf(title, sizeof(title), "PokePark (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
+        snprintf(title, sizeof(title), GAME_NAME " (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
                  worst, busy);
         win_set_title(title);
         if (e && *e == '1')
@@ -164,10 +165,11 @@ int gxb_texture_generation(void) { return g_settings.aniso; }
 /* Textures are deleted after the frame is presented: a draw earlier in the
  * frame may still refer to one, and a device may hand a deleted handle
  * straight to the next texture made. Freed while a frame was recorded,
- * they are still drawn by its replays until the next frame is complete. */
+ * they are still drawn by its replays until two more frames are complete
+ * (it is replayed as the frame before, render_frame). */
 #define MAX_PENDING_FREES 1024
-static uint32_t sPendingFree[MAX_PENDING_FREES], sFreeLater[MAX_PENDING_FREES];
-static int sPendingFreeCount, sFreeLaterCount;
+static uint32_t sPendingFree[MAX_PENDING_FREES], sFreeLater[2][MAX_PENDING_FREES];
+static int sPendingFreeCount, sFreeLaterCount[2];
 
 static void free_textures(uint32_t* list, int* count) {
     if (*count) {
@@ -186,7 +188,8 @@ typedef struct RecOp {
     GXDrawState st;   /* OP_DRAW (st.xf unused) */
     int xf;           /* OP_DRAW: its XF state, at words xf of the frame's */
     int match;        /* OP_DRAW: the last frame's op of the same draw, or -1 */
-    int a[8];         /* the other ops' arguments; OP_DRAW: first vertex, vertices, first index, count */
+    int a[8];         /* the other ops' arguments; OP_DRAW: first vertex, vertices, first index, count,
+                       * and the row of the matrix that places it (pos_row) */
 } RecOp;
 
 typedef struct Frame {
@@ -200,6 +203,10 @@ typedef struct Frame {
 static Frame sFrames[3];
 static Frame *sRec = &sFrames[0], *sCur = &sFrames[1], *sPrev = &sFrames[2];
 static int sOutputRate = 60, sHaveFrame;
+/* sPrev can be drawn: the device has its vertices as the frame before's
+ * (each of the two handed over once, at its end: not so after
+ * gxb_copy_sync). */
+static int sPrevDrawable, sFrameDataCalls, sPrevDataCalls;
 static uint64_t sCurAt, sNextOut, sFramePeriod; /* time base */
 static double sLastT = -1;
 
@@ -215,7 +222,27 @@ static RecOp* rec_op(int op) {
     return r;
 }
 
-static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int first_index, int count) {
+/* The matrix index of each vertex of the arena, as written (gxb_arena_write):
+ * the arena itself is on the GPU. */
+static uint8_t* sArenaMtx;
+static int sArenaMtxCap;
+
+/* The row of XF memory where the matrix that places a draw starts: MATINDEX_A's,
+ * or with a matrix per vertex (a skinned model's), its first vertex's. Of a
+ * model drawn piece by piece, MATINDEX_A is whatever was left there: nuts of a
+ * row, alike, were paired across holes by it and blended half way, a nut
+ * showing between two. */
+static int pos_row(const GXDrawState* st, const GXVertex* v, int vertices, const uint32_t* index, int first_index,
+                   int count) {
+    if ((st->mtx_per_vertex & 1) && count > 0) {
+        uint32_t i = index[first_index];
+        if (v) return (int)i < vertices ? v[i].mtx[0] : 0;
+        if ((int)i < sArenaMtxCap) return sArenaMtx[i];
+    }
+    return (int)(st->xf[GX_XF_MEM_WORDS + 0x18] & 0x3F);
+}
+
+static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int first_index, int count, int row) {
     RecOp* r = rec_op(OP_DRAW);
     r->st = *st;
     r->st.xf = NULL;
@@ -230,6 +257,7 @@ static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int 
     r->a[1] = vertices;
     r->a[2] = first_index;
     r->a[3] = count;
+    r->a[4] = row;
 }
 
 /* How far apart two draws are: the sum of the differences of their
@@ -248,9 +276,9 @@ static float matrix_distance(const uint32_t* a, const uint32_t* b, float limit) 
     return d;
 }
 
-/* A draw's position matrix (MATINDEX_A's), 3x4, in its XF state. */
-static const uint32_t* pos_matrix(const uint32_t* xf) {
-    return xf + 4 * (xf[GX_XF_MEM_WORDS + 0x18] & 0x3F) % 0x100;
+/* A draw's position matrix (pos_row's), 3x4, in its XF state. */
+static const uint32_t* pos_matrix(const Frame* f, const RecOp* r) {
+    return f->xf + r->xf + 4 * (r->a[4] & 0x3F) % 0x100;
 }
 
 static int perspective(const uint32_t* xf) { return xf[GX_XF_MEM_WORDS + 0x26] == 0; }
@@ -337,7 +365,9 @@ static void camera_motion(const int* uniqueMatch) {
         cur = sCur->xf + sCur->ops[i].xf;
         prev = sPrev->xf + sPrev->ops[uniqueMatch[i]].xf;
         if (!perspective(cur) || !perspective(prev)) continue;
-        if (!load_mtx(&c, pos_matrix(cur)) || !load_mtx(&p, pos_matrix(prev)) || !mtx_inverse(&pi, &p)) continue;
+        if (!load_mtx(&c, pos_matrix(sCur, &sCur->ops[i])) || !load_mtx(&p, pos_matrix(sPrev, &sPrev->ops[uniqueMatch[i]])) ||
+            !mtx_inverse(&pi, &p))
+            continue;
         mtx_mul(&d[n++], &c, &pi);
     }
     for (i = 0; i < n; i++) {
@@ -356,8 +386,8 @@ static float wordf(uint32_t w);
 
 /* How far apart a draw of sPrev, moved as the camera moved, and one of
  * sCur are: their position matrices' translations. */
-static float camera_distance(const uint32_t* prev, const uint32_t* cur) {
-    const uint32_t *p = pos_matrix(prev), *c = pos_matrix(cur);
+static float camera_distance(const RecOp* prev, const RecOp* cur) {
+    const uint32_t *p = pos_matrix(sPrev, prev), *c = pos_matrix(sCur, cur);
     float t[3], d = 0;
     int i;
     t[0] = wordf(p[3]);
@@ -370,9 +400,27 @@ static float camera_distance(const uint32_t* prev, const uint32_t* cur) {
     return d == d ? d : 1e30f;
 }
 
-static float draw_distance(const uint32_t* prev, const uint32_t* cur, float limit) {
-    if (sCameraValid && perspective(prev) && perspective(cur)) return camera_distance(prev, cur);
-    return matrix_distance(prev, cur, limit);
+static float draw_distance(const RecOp* prev, const RecOp* cur, float limit) {
+    const uint32_t *p = sPrev->xf + prev->xf, *c = sCur->xf + cur->xf;
+    if (sCameraValid && perspective(p) && perspective(c)) return camera_distance(prev, cur);
+    return matrix_distance(p, c, limit);
+}
+
+/* Whether a match can be one object moving. Of many alike, one going as
+ * another comes up elsewhere (the targets of a shooting game) pair up as
+ * the nearest: blended, a copy slides across between them. In a game frame
+ * nothing crosses this much of its distance from the eye. */
+#define FARTHEST_STEP 0.1f
+
+static int same_object(const RecOp* prev, const RecOp* cur) {
+    const uint32_t *c = pos_matrix(sCur, cur), *p = pos_matrix(sPrev, prev);
+    float x = wordf(c[3]), y = wordf(c[7]), z = wordf(c[11]), d;
+    if (prev->a[4] != cur->a[4]) return 0; /* placed by another of its matrices */
+    if (!perspective(sPrev->xf + prev->xf) || !perspective(sCur->xf + cur->xf)) return 1;
+    /* (With too few draws to tell the camera's motion by, as it is here.) */
+    d = sCameraValid ? camera_distance(prev, cur)
+                     : fabsf(x - wordf(p[3])) + fabsf(y - wordf(p[7])) + fabsf(z - wordf(p[11]));
+    return d <= FARTHEST_STEP * sqrtf(x * x + y * y + z * z);
 }
 
 /* Pairs each draw of sCur with the same draw of sPrev: of the first few
@@ -382,13 +430,83 @@ static float draw_distance(const uint32_t* prev, const uint32_t* cur, float limi
  * those, and taken in order they swapped places. Nearest without the
  * camera's motion, a row of crates matched each crate with its neighbour
  * whenever the camera moved further in a frame than they stand apart.) */
+#define CROSSED 0.5f /* another draw nearer than this much of the match's distance */
+
+/* Takes back a match when another draw of the same key in sCur is plainly
+ * nearer the draw of sPrev it was paired with: that one is the same object,
+ * this one is new or a piece left over. Taken first come, the leftovers
+ * paired with what remained, a neighbour: a nut's shell opening in a row of
+ * holes alike (two halves and the nut instead of one shell) put a shell
+ * and the nut half way to the next hole for a frame. */
+static void unmatch_crossed(void) {
+    enum { CANDIDATES = 48, SLOTS = 8192 };
+    static uint64_t keys[SLOTS];
+    static uint8_t used[SLOTS];
+    static int head[SLOTS], *next, nextCap;
+    int i;
+    memset(used, 0, sizeof(used));
+    if (sCur->count > nextCap) {
+        nextCap = sCur->count * 2;
+        next = (int*)realloc(next, (size_t)nextCap * sizeof(int));
+    }
+    for (i = sCur->count - 1; i >= 0; i--) {
+        uint64_t k = sCur->ops[i].st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        if (sCur->ops[i].op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (!used[slot]) {
+            used[slot] = 1;
+            keys[slot] = k;
+            head[slot] = -1;
+        }
+        next[i] = head[slot];
+        head[slot] = i;
+    }
+    for (i = 0; i < sCur->count; i++) {
+        RecOp* r = &sCur->ops[i];
+        uint64_t k = r->st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        const RecOp* p;
+        float d;
+        int j, n;
+        if (r->op != OP_DRAW || r->match < 0) continue;
+        while (keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (next[head[slot]] < 0) continue; /* the only one */
+        p = &sPrev->ops[r->match];
+        d = draw_distance(p, r, 1e30f);
+        if (d <= 0) continue;
+        for (n = 0, j = head[slot]; j >= 0 && n < CANDIDATES; j = next[j], n++) {
+            if (j != i && draw_distance(p, &sCur->ops[j], d) < d * CROSSED) {
+                r->match = -1;
+                break;
+            }
+        }
+    }
+}
+
+/* A draw of sCur and one of sPrev with its key, and how far apart. */
+typedef struct Pair {
+    float d;
+    int cur, prev;
+} Pair;
+
+static int pair_order(const void* a, const void* b) {
+    float x = ((const Pair*)a)->d, y = ((const Pair*)b)->d;
+    return x < y ? -1 : x > y;
+}
+
+/* Pairs of a key up to which they're all weighed, nearest taken first. */
+#define ALL_PAIRS 4096
+
 static void match_draws(void) {
     enum { CANDIDATES = 48 };
     enum { SLOTS = 8192 };
     static uint64_t keys[SLOTS];
     static uint8_t used[SLOTS];
-    static int head[SLOTS], *next, *unique;
+    static int head[SLOTS], curHead[SLOTS], curTail[SLOTS], *next, *curNext, *unique;
     static int nextCap, uniqueCap;
+    static uint8_t* taken;
+    static Pair pairs[ALL_PAIRS];
     int i;
     memset(used, 0, sizeof(used));
     if (sPrev->count > nextCap) {
@@ -423,30 +541,74 @@ static void match_draws(void) {
         if (used[slot] && head[slot] >= 0 && next[head[slot]] < 0) unique[i] = head[slot];
     }
     camera_motion(unique);
+    /* Of a key a few draws in each frame have (nuts in a row of holes):
+     * every pair weighed, the nearest taken first. Each draw in turn taking
+     * the nearest left, a nut jumping out of its hole further than the
+     * holes stand apart took its neighbour's, and the neighbour its place:
+     * blended, a copy of each half way between. */
+    taken = (uint8_t*)realloc(taken, (size_t)sPrev->count + 1);
+    memset(taken, 0, (size_t)sPrev->count + 1);
+    curNext = (int*)realloc(curNext, (size_t)uniqueCap * sizeof(int));
+    for (i = 0; i < SLOTS; i++) curHead[i] = -1;
+    for (i = 0; i < sCur->count; i++) {
+        uint64_t k = sCur->ops[i].st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        sCur->ops[i].match = -1;
+        if (sCur->ops[i].op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (!used[slot] || head[slot] < 0) continue;
+        curNext[i] = -1;
+        if (curHead[slot] < 0) curHead[slot] = i;
+        else curNext[curTail[slot]] = i;
+        curTail[slot] = i;
+    }
+    for (i = 0; i < SLOTS; i++) {
+        int nc = 0, np = 0, c, p, n = 0, j;
+        if (curHead[i] < 0) continue;
+        for (c = curHead[i]; c >= 0; c = curNext[c]) nc++;
+        for (p = head[i]; p >= 0; p = next[p]) np++;
+        if ((nc == 1 && np == 1) || nc * np > ALL_PAIRS) continue; /* below */
+        for (c = curHead[i]; c >= 0; c = curNext[c]) {
+            for (p = head[i]; p >= 0; p = next[p]) {
+                pairs[n].d = draw_distance(&sPrev->ops[p], &sCur->ops[c], 1e30f);
+                pairs[n].cur = c;
+                pairs[n].prev = p;
+                n++;
+            }
+        }
+        qsort(pairs, (size_t)n, sizeof(Pair), pair_order);
+        for (j = 0; j < n; j++) {
+            RecOp* r = &sCur->ops[pairs[j].cur];
+            if (r->match >= 0 || taken[pairs[j].prev]) continue;
+            if (!same_object(&sPrev->ops[pairs[j].prev], r)) continue;
+            r->match = pairs[j].prev;
+            taken[pairs[j].prev] = 1;
+        }
+        curHead[i] = -2; /* done */
+    }
     for (i = 0; i < sCur->count; i++) {
         RecOp* r = &sCur->ops[i];
         uint64_t k = r->st.key;
         unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
-        r->match = -1;
         if (r->op != OP_DRAW) continue;
         while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
-        if (used[slot] && head[slot] >= 0) {
-            const uint32_t* xf = sCur->xf + r->xf;
+        if (used[slot] && head[slot] >= 0 && curHead[slot] != -2) {
             int* link = &head[slot];
             int* best = link;
-            float bestD = next[*link] < 0 ? 0 : draw_distance(sPrev->xf + sPrev->ops[*link].xf, xf, 1e30f);
+            float bestD = next[*link] < 0 ? 0 : draw_distance(&sPrev->ops[*link], r, 1e30f);
             int n;
             for (n = 1, link = &next[*link]; n < CANDIDATES && *link >= 0 && bestD > 0; n++, link = &next[*link]) {
-                float d = draw_distance(sPrev->xf + sPrev->ops[*link].xf, xf, bestD);
+                float d = draw_distance(&sPrev->ops[*link], r, bestD);
                 if (d < bestD) {
                     bestD = d;
                     best = link;
                 }
             }
-            r->match = *best;
+            if (same_object(&sPrev->ops[*best], r)) r->match = *best;
             *best = next[*best];
         }
     }
+    unmatch_crossed();
 }
 
 static float wordf(uint32_t w) {
@@ -461,62 +623,151 @@ static uint32_t fword(float f) {
     return w;
 }
 
+/* out[from..to) blended t of the way from a to b, where they differ (a word
+ * the same in both may not be a float). out is a or b there already. With
+ * no branch, it vectorizes: these were 4% of the Thor's game thread at
+ * 120 fps. */
 static void lerp_words(uint32_t* out, const uint32_t* a, const uint32_t* b, int from, int to, float t) {
     int i;
     for (i = from; i < to; i++) {
-        if (a[i] != b[i]) out[i] = fword(wordf(a[i]) + (wordf(b[i]) - wordf(a[i])) * t);
+        uint32_t l = fword(wordf(a[i]) + (wordf(b[i]) - wordf(a[i])) * t);
+        out[i] = a[i] == b[i] ? a[i] : l;
     }
 }
 
-/* Blends the XF state of a draw from prev (the frame before) to cur. */
-static void blend_xf(uint32_t* out, const uint32_t* prev, const uint32_t* cur, float t) {
-    int m, j;
-    memcpy(out, cur, GX_XF_WORDS * 4);
-    /* Position and texture matrices, 3x4, at multiples of 12 words. */
-    for (m = 0; m + 12 <= 0x100; m += 12) {
-        const uint32_t *a = prev + m, *b = cur + m;
-        float scale = 0, rot = 0, dt = 0, tlen = 0;
-        int same = 1;
-        for (j = 0; j < 12; j++) {
-            float x = wordf(a[j]), y = wordf(b[j]);
-            if (a[j] != b[j]) same = 0;
-            if (!(x == x) || !(y == y)) { same = -1; break; } /* not floats */
-            if ((j & 3) == 3) {
-                dt += (y - x) * (y - x);
-                tlen += y * y;
-            } else {
-                if (fabsf(y) > scale) scale = fabsf(y);
-                if (fabsf(y - x) > rot) rot = fabsf(y - x);
-            }
+/* Matrix m (3x4, 12 words) of out blended from prev's to cur's, if it is
+ * the same object's moving a little; out has own's there. */
+static void blend_matrix(uint32_t* out, const uint32_t* prev, const uint32_t* cur, int m, float t) {
+    const uint32_t *a = prev + m, *b = cur + m;
+    float scale = 0, rot = 0, dt = 0, tlen = 0;
+    int nan = 0, j;
+    if (memcmp(a, b, 48) == 0) return;
+    for (j = 0; j < 12; j++) {
+        float x = wordf(a[j]), y = wordf(b[j]);
+        nan |= !(x == x) | !(y == y);
+        if ((j & 3) == 3) {
+            dt += (y - x) * (y - x);
+            tlen += y * y;
+        } else {
+            scale = fmaxf(scale, fabsf(y));
+            rot = fmaxf(rot, fabsf(y - x));
         }
-        if (same) continue;
-        /* The same object moving turns and moves a little in a frame;
-         * another object (a wrong match, a cut) differs wholesale. */
-        if (rot > 0.3f * scale || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) continue;
-        lerp_words(out, prev, cur, m, m + 12, t);
     }
-    lerp_words(out, prev, cur, 0x400, 0x460, t); /* normal matrices */
-    lerp_words(out, prev, cur, 0x500, 0x600, t); /* post-transform matrices */
-    for (j = 0; j < 8; j++) lerp_words(out, prev, cur, 0x600 + 16 * j + 10, 0x600 + 16 * j + 16, t); /* lights */
-    if (prev[GX_XF_MEM_WORDS + 0x26] == cur[GX_XF_MEM_WORDS + 0x26]) {
-        lerp_words(out, prev, cur, GX_XF_MEM_WORDS + 0x20, GX_XF_MEM_WORDS + 0x26, t); /* projection */
+    if (nan) return; /* not floats */
+    /* The same object moving turns and moves a little in a frame;
+     * another object (a wrong match, a cut) differs wholesale. */
+    if (rot > 0.3f * scale || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) return;
+    lerp_words(out, prev, cur, m, m + 12, t);
+}
+
+static void lerp_clipped(uint32_t* out, const uint32_t* prev, const uint32_t* cur, int from, int to, int lo, int hi,
+                         float t) {
+    if (from < lo) from = lo;
+    if (to > hi) to = hi;
+    if (from < to) lerp_words(out, prev, cur, from, to, t);
+}
+
+/* Words lo..hi of the XF state of a draw blended from prev (the frame
+ * before) to cur, the rest as own (one of the two) has it, the draw's own
+ * frame's; with the matrices and the projection those words are part of
+ * whole. Each word of the result depends on those of its matrix (or
+ * projection) alone, so a draw's is the draw before's but where either
+ * frame's state changed between the two. */
+static void blend_range(uint32_t* out, const uint32_t* prev, const uint32_t* cur, const uint32_t* own, float t, int lo,
+                        int hi) {
+    const int proj = GX_XF_MEM_WORDS + 0x20;
+    int m, j;
+    if (lo >= hi) return;
+    memcpy(out + lo, own + lo, (size_t)(hi - lo) * 4);
+    /* Position and texture matrices, 3x4, at multiples of 12 words. */
+    for (m = lo < 0x100 ? lo / 12 * 12 : 0x100; m + 12 <= 0x100 && m < hi; m += 12) {
+        memcpy(out + m, own + m, 48);
+        blend_matrix(out, prev, cur, m, t);
+    }
+    lerp_clipped(out, prev, cur, 0x400, 0x460, lo, hi, t); /* normal matrices */
+    lerp_clipped(out, prev, cur, 0x500, 0x600, lo, hi, t); /* post-transform matrices */
+    for (j = 0; j < 8; j++) lerp_clipped(out, prev, cur, 0x600 + 16 * j + 10, 0x600 + 16 * j + 16, lo, hi, t); /* lights */
+    if (lo < proj + 7 && hi > proj) { /* the projection, with its kind (word 6) */
+        memcpy(out + proj, own + proj, 6 * 4);
+        if (prev[proj + 6] == cur[proj + 6]) lerp_words(out, prev, cur, proj, proj + 6, t);
     }
 }
 
-/* Draws sCur, its matrices t of the way from sPrev's. */
+/* blend_range over the 32-word chunks set in chunks (GXDrawState's
+ * xf_dirty_chunks), a run of them at a time. */
+static void blend_chunks(uint32_t* out, const uint32_t* prev, const uint32_t* cur, const uint32_t* own, float t,
+                         uint64_t chunks) {
+    int lo = 0, hi;
+    while (lo < 64 && (chunks >> lo)) {
+        if (!((chunks >> lo) & 1)) {
+            lo++;
+            continue;
+        }
+        for (hi = lo; hi < 64 && ((chunks >> hi) & 1); hi++) {}
+        blend_range(out, prev, cur, own, t, 32 * lo, 32 * hi < GX_XF_WORDS ? 32 * hi : GX_XF_WORDS);
+        lo = hi;
+    }
+}
+
+/* For each draw of sPrev, the draw of sCur matched with it; -1 for none. */
+static int* sNext;
+static int sNextCap;
+
+/* Draws sCur or, the first half of the way, sPrev, their matrices t of the
+ * way from sPrev's to sCur's. Each frame's own draws: drawn as sCur, a nut
+ * opening in its shell (two halves and the nut in place of the shell) put
+ * the nut, new, where it is in sCur, and the pieces that match sPrev's
+ * where they were: the nut out of its shell, beside a shell still shut. */
 static void render_frame(float t) {
     static uint32_t xf[GX_XF_WORDS];
+    int before = t < 0.5f && sPrevDrawable;
+    const Frame* f = before ? sPrev : sCur;
+    const Frame* g = before ? sCur : sPrev; /* the other frame, blended with */
+    /* The last draw blended into xf, of f and of g; -1 for none. Two
+     * draws in a row, of both frames, differ only in their XF dirty
+     * chunks (the decoder's words changed since its draw before), so
+     * only those are blended again: blending all of each draw's state,
+     * two 7 KB snapshots, was 9% of the Thor's game thread at 120 fps
+     * (now 2%). */
+    int last = -1, lastOther = -1;
     int i;
-    for (i = 0; i < sCur->count; i++) {
-        const RecOp* r = &sCur->ops[i];
+    for (i = 0; i < f->count; i++) {
+        const RecOp* r = &f->ops[i];
         switch (r->op) {
         case OP_DRAW: {
-            const uint32_t* cur = sCur->xf + r->xf;
-            if (r->match >= 0 && t < 1.0f) {
-                blend_xf(xf, sPrev->xf + sPrev->ops[r->match].xf, cur, t);
-                cur = xf;
+            const uint32_t* own = f->xf + r->xf;
+            const uint32_t* drawn = own;
+            int o = before ? sNext[i] : t < 1.0f ? r->match : -1;
+            if (o >= 0) {
+                const uint32_t* other = g->xf + g->ops[o].xf;
+                const uint32_t* prev = before ? own : other;
+                const uint32_t* cur = before ? other : own;
+                int k = lastOther + 1;
+                while (k < o && g->ops[k].op != OP_DRAW) k++;
+                if (last < 0 || (o != lastOther && k != o) || o < lastOther) {
+                    blend_range(xf, prev, cur, own, t, 0, GX_XF_WORDS);
+                } else {
+                    blend_chunks(xf, prev, cur, own, t, r->st.xf_dirty_chunks | (o != lastOther ? g->ops[o].st.xf_dirty_chunks : 0));
+                }
+                last = i;
+                lastOther = o;
+                drawn = xf;
+            } else {
+                last = -1;
             }
-            sDev->draw_recorded(&r->st, cur, r->a[0], r->a[2], r->a[3]);
+            if (drawn != own && r->st.bounds_ok &&
+                (r->st.bounds_mtx[0] > r->st.bounds_mtx[1] ||
+                 memcmp(drawn + 4 * r->st.bounds_mtx[0], own + 4 * r->st.bounds_mtx[0],
+                        (size_t)(4 * (r->st.bounds_mtx[1] - r->st.bounds_mtx[0]) + 12) * 4) != 0 ||
+                 memcmp(drawn + GX_XF_MEM_WORDS + 0x20, own + GX_XF_MEM_WORDS + 0x20, 7 * 4) != 0)) {
+                /* Its bounds are where its own frame put it, and it moved:
+                 * its position matrices or the projection. */
+                GXDrawState st = r->st;
+                st.bounds_ok = 0;
+                sDev->draw_recorded(&st, drawn, r->a[0], r->a[2], r->a[3], before);
+            } else {
+                sDev->draw_recorded(&r->st, drawn, r->a[0], r->a[2], r->a[3], before);
+            }
             break;
         }
         case OP_CLEAR: sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
@@ -530,11 +781,23 @@ static void render_frame(float t) {
 static void frame_end(void) {
     Frame* f = sPrev;
     uint64_t now = ppc_timebase();
+    int i;
     sPrev = sCur;
     sCur = sRec;
     sRec = f;
     sRec->count = sRec->xf_words = 0;
     match_draws();
+    if (sPrev->count > sNextCap) {
+        sNextCap = sPrev->count * 2;
+        sNext = (int*)realloc(sNext, (size_t)sNextCap * sizeof(int));
+    }
+    for (i = 0; i < sPrev->count; i++) sNext[i] = -1;
+    for (i = 0; i < sCur->count; i++) {
+        if (sCur->ops[i].op == OP_DRAW && sCur->ops[i].match >= 0) sNext[sCur->ops[i].match] = i;
+    }
+    sPrevDrawable = sHaveFrame && sFrameDataCalls == 1 && sPrevDataCalls == 1;
+    sPrevDataCalls = sFrameDataCalls;
+    sFrameDataCalls = 0;
     if (sHaveFrame) {
         /* The game's frame interval, smoothed, within reason. */
         uint64_t d = now - sCurAt, lo = PPC_TB_HZ / 120, hi = PPC_TB_HZ / 20;
@@ -548,9 +811,11 @@ static void frame_end(void) {
     sCurAt = now;
     sHaveFrame = 1;
     sLastT = -1;
-    free_textures(sFreeLater, &sFreeLaterCount);
-    memcpy(sFreeLater, sPendingFree, (size_t)sPendingFreeCount * sizeof(uint32_t));
-    sFreeLaterCount = sPendingFreeCount;
+    free_textures(sFreeLater[1], &sFreeLaterCount[1]);
+    memcpy(sFreeLater[1], sFreeLater[0], (size_t)sFreeLaterCount[0] * sizeof(uint32_t));
+    sFreeLaterCount[1] = sFreeLaterCount[0];
+    memcpy(sFreeLater[0], sPendingFree, (size_t)sPendingFreeCount * sizeof(uint32_t));
+    sFreeLaterCount[0] = sPendingFreeCount;
     sPendingFreeCount = 0;
 }
 
@@ -640,7 +905,8 @@ int gxb_recording(void) {
         /* Stopping: show the newest frame as it is. */
         GL_ENTER();
         render_frame(1.0f);
-        free_textures(sFreeLater, &sFreeLaterCount);
+        free_textures(sFreeLater[0], &sFreeLaterCount[0]);
+        free_textures(sFreeLater[1], &sFreeLaterCount[1]);
         GL_LEAVE(GLK_PRESENT);
     }
     if (want != sRecording) {
@@ -654,6 +920,7 @@ int gxb_recording(void) {
 }
 
 void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+    sFrameDataCalls++;
     GL_ENTER();
     sDev->frame_data(v, vertices, index, count);
     GL_LEAVE(GLK_DRAW);
@@ -670,6 +937,17 @@ int gxb_arena_alloc(int n) {
 }
 
 void gxb_arena_write(int first, const GXVertex* v, int n) {
+    int i;
+    if (first + n > sArenaMtxCap) {
+        int cap = (first + n) * 2;
+        uint8_t* grown = (uint8_t*)realloc(sArenaMtx, (size_t)cap);
+        if (grown) {
+            memset(grown + sArenaMtxCap, 0, (size_t)(cap - sArenaMtxCap));
+            sArenaMtx = grown;
+            sArenaMtxCap = cap;
+        }
+    }
+    for (i = 0; i < n && first + i < sArenaMtxCap; i++) sArenaMtx[first + i] = v[i].mtx[0];
     GL_ENTER();
     sDev->arena_write(first, v, n);
     GL_LEAVE(GLK_DRAW);
@@ -710,7 +988,7 @@ void gxb_texture_free(uint32_t handle) {
 void gxb_draw_triangles(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
                         int first_index, int count) {
     if (sRecording) {
-        rec_draw(st, first_vertex, vertices, first_index, count);
+        rec_draw(st, first_vertex, vertices, first_index, count, pos_row(st, v, first_vertex + vertices, index, first_index, count));
         return;
     }
     GL_ENTER();
@@ -737,11 +1015,13 @@ int gx_register_copy(uint32_t addr, uint32_t handle, int width, int height, int 
 void gx_copy_write_back(uint32_t addr, int fmt, int intensity, int w, int h, int stride, const uint8_t* rgba, int force);
 
 /* Copies to put in guest memory too (gx_register_copy says which), once
- * the frame that makes them has been drawn: read back from the GPU, at
- * the EFB's own size. */
+ * the frame after has been drawn: read back from the GPU, at the EFB's own
+ * size. Made again in that frame, it's an effect starting (PokePark 1's
+ * blur's eight copies held a frame up by 45 ms), so it's dropped. */
 typedef struct WriteBack {
     uint32_t addr;
     int target, w, h, fmt, intensity, stride;
+    int waited;
 } WriteBack;
 static WriteBack sWriteBacks[8];
 static int sWriteBackCount;
@@ -777,9 +1057,16 @@ static void write_back(const WriteBack* b, int force) {
 }
 
 static void write_back_copies(void) {
-    int i;
-    for (i = 0; i < sWriteBackCount; i++) write_back(&sWriteBacks[i], 0);
-    sWriteBackCount = 0;
+    int i, kept = 0;
+    for (i = 0; i < sWriteBackCount; i++) {
+        if (sWriteBacks[i].waited) {
+            write_back(&sWriteBacks[i], 0);
+        } else {
+            sWriteBacks[i].waited = 1;
+            sWriteBacks[kept++] = sWriteBacks[i];
+        }
+    }
+    sWriteBackCount = kept;
 }
 
 /* g_gx_copy_sync: the copy holding addr, made every frame and so never
@@ -807,7 +1094,7 @@ void gxb_copy_sync(uint32_t addr) {
         GL_ENTER();
         for (i = 0; i < sRec->count; i++) {
             const RecOp* r = &sRec->ops[i];
-            if (r->op == OP_DRAW) sDev->draw_recorded(&r->st, sRec->xf + r->xf, r->a[0], r->a[2], r->a[3]);
+            if (r->op == OP_DRAW) sDev->draw_recorded(&r->st, sRec->xf + r->xf, r->a[0], r->a[2], r->a[3], 0);
             else if (r->op == OP_CLEAR) sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]);
             else if (r->op == OP_COPY) sDev->copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]);
         }
@@ -841,6 +1128,7 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         r->a[7] = efb_alpha;
     }
     made.addr = addr;
+    made.waited = 0;
     made.target = t;
     made.w = w;
     made.h = h;
@@ -853,7 +1141,15 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         else i = (int)(addr >> 5) & 31;
     }
     sCopiesMade[i] = made;
-    if (!gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt)) return;
+    if (!gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt)) {
+        for (i = 0; i < sWriteBackCount; i++) {
+            if (sWriteBacks[i].addr == addr && sWriteBacks[i].waited) {
+                sWriteBacks[i] = sWriteBacks[--sWriteBackCount];
+                break;
+            }
+        }
+        return;
+    }
     for (i = 0; i < sWriteBackCount && sWriteBacks[i].addr != addr; i++) {}
     if (i == sWriteBackCount) {
         if (sWriteBackCount == 8) return;

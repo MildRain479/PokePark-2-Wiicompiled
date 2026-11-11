@@ -195,7 +195,9 @@ void main() {
             if (type == 0) {
                 int m = texmtx(i) * 4;
                 stq = vec3(dot(row(m), src), dot(row(m + 4), src), ((info >> 1) & 1u) != 0u ? dot(row(m + 8), src) : 1.0);
-            } else stq = vec3(src.xy, 1.0);
+            } else if (type == 2) stq = vec3(v_col0.rg, 1.0); // the lit color as coordinates: a ramp
+            else if (type == 3) stq = vec3(v_col1.rg, 1.0);
+            else stq = vec3(src.xy, 1.0);
             if (dual) { // post-transform
                 uint pt = xw(0x1050 + i);
                 vec4 v = vec4(stq, 1.0);

@@ -19,18 +19,11 @@ orig/*/*
 
 # Build files
 build/
-.ninja_*
-build.ninja
-
-# decompctx output
-ctx.*
-*.ctx
-
-# Generated configs
-objdiff.json
-compile_commands.json
 
 # Miscellaneous
 /*.txt
 *.exe
 *.class
+
+# Release packages (build.py --public)
+Releases_*/

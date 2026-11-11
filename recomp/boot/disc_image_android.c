@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "game.h"
+#include "disc_verify.h"
 #include "nod.h"
 #include "../patches/hle.h"
 
@@ -67,9 +69,8 @@ int disc_image_open(int fd, char* err, size_t n) {
         snprintf(err, n, "That file isn't a disc image this can read%s%s.", why ? ": " : "", why ? why : "");
         return 1;
     }
-    if (nod_disc_header(sDisc, &header) != NOD_RESULT_OK || memcmp(header.game_id, "R8AE01", 6) != 0) {
-        snprintf(err, n, "That's a disc image of %.6s, not PokePark Wii: Pikachu's Adventure (USA, R8AE01).",
-                 header.game_id[0] ? header.game_id : "something else");
+    if (nod_disc_header(sDisc, &header) != NOD_RESULT_OK ||
+        disc_check_id(header.game_id, header.disc_version, err, n) != DISC_OK) {
         close_image();
         return 1;
     }
@@ -78,6 +79,10 @@ int disc_image_open(int fd, char* err, size_t n) {
         !sMeta.raw_boot.data || sMeta.raw_boot.size < 0x440) {
         why = nod_error_message();
         snprintf(err, n, "The disc image's game data couldn't be read%s%s.", why ? ": " : "", why ? why : "");
+        close_image();
+        return 1;
+    }
+    if (disc_check_dol(sMeta.raw_dol.data, sMeta.raw_dol.size, err, n) != DISC_OK) {
         close_image();
         return 1;
     }

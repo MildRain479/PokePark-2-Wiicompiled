@@ -20,6 +20,8 @@
 #include "hle.h"
 #include "host_input.h"
 
+void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);
+
 static float as_float(uint32_t v) {
     float f;
     memcpy(&f, &v, 4);
@@ -56,9 +58,9 @@ static void left_stick(float* x, float* y) {
 }
 
 /* Vec2 ControlModuleImpl::virt0x8_0x20(void): the direction to move in. */
-void f_800821B0(ppc_t* c) {
+void F_ControlModuleImpl_virt0x8_0x20(ppc_t* c) {
     float x, y, sx, sy, len;
-    f_800821B0_orig(c);
+    F_ControlModuleImpl_virt0x8_0x20_orig(c);
     x = as_float(c->r[3]);
     y = as_float(c->r[4]);
     if ((x == 0.0f && y == 0.0f) || !dpad_component(x) || !dpad_component(y)) return;

@@ -26,6 +26,8 @@
  *     moves the pointer, as two sensor-bar dots in the IR camera; past
  *     the screen's sides it turns Rotom's view.
  *
+ * Which minigame takes what is minigames.h, one for each game.
+ *
  * The d-pad still goes to the game as well. RECOMP_TILT_FLIP=lr, fb or
  * lrfb turns tilting the other way, and RECOMP_POINTER_FLIP=y moves the
  * pointer the other way up, in case a minigame expects it so. */
@@ -37,7 +39,6 @@
 #include "host_input.h"
 
 void (*g_host_pointer_read)(float* dx, float* dy);
-void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);
 
 /* One g in the accelerometer's units (hle_wpad.c's), and a swing. */
 #define G 104
@@ -45,26 +46,9 @@ void (*g_host_sticks_read)(float* lx, float* ly, float* rx, float* ry);
 #define PI 3.14159265f
 
 enum { HOLD_SIDEWAYS, HOLD_UPRIGHT };
-enum { USE_SHAKE = 1, USE_STEER = 2, USE_PITCH = 4, USE_SWING = 8, USE_PUSH = 16, USE_BAT = 32, USE_POINTER = 64 };
+enum { USE_SHAKE = 1, USE_STEER = 2, USE_PITCH = 4, USE_SWING = 8, USE_PUSH = 16, USE_BAT = 32, USE_POINTER = 64, USE_ANY_WAY = 128 };
 
-static const struct {
-    int at, hold, use;
-} kMinigames[] = {
-    {1, HOLD_SIDEWAYS, USE_SHAKE},                          /* Absol's Hurdle Bounce */
-    {2, HOLD_SIDEWAYS, USE_STEER | USE_PITCH | USE_POINTER}, /* Rayquaza's Balloon Panic */
-    {3, HOLD_UPRIGHT, USE_SWING | USE_PUSH},                /* Venusaur's Vine Swing */
-    {4, HOLD_UPRIGHT, USE_SWING | USE_PUSH},                /* Tangrowth's Swing-Along */
-    {5, HOLD_SIDEWAYS, USE_SHAKE},                          /* Dusknoir's Speed Slam */
-    {6, HOLD_SIDEWAYS, USE_STEER},                          /* Gyarados' Aqua Dash: a button for speed */
-    {7, HOLD_SIDEWAYS, USE_STEER | USE_PITCH},              /* Pelipper's Circle Circuit */
-    {9, HOLD_SIDEWAYS, USE_STEER},                          /* Empoleon's Snow Slide */
-    {10, HOLD_SIDEWAYS, 0},                                 /* Bastiodon's Panel Crush: buttons */
-    {11, HOLD_SIDEWAYS, USE_STEER | USE_PITCH},             /* Rhyperior's Bumper Burn */
-    {12, HOLD_UPRIGHT, USE_BAT | USE_SHAKE},                /* Blaziken's Boulder Bash */
-    {13, HOLD_SIDEWAYS, USE_POINTER | USE_SHAKE},           /* Rotom's Spooky Shoot-'em-Up */
-    {15, HOLD_SIDEWAYS, USE_STEER | USE_PITCH},             /* Salamence's Air Race */
-    {16, HOLD_SIDEWAYS, USE_SHAKE},                         /* Bulbasaur's Daring Dash */
-};
+#include "minigames.h"
 
 /* How far the keys and stick tilt the remote, and how quickly it gets
  * there (a share of the way each report: about 30 ms). The minigames'
@@ -150,13 +134,45 @@ static int gesture(Gesture* g, uint32_t held, uint32_t mask, uint32_t report, in
     return g->on ? (int)(report - g->began) : -1;
 }
 
+/* The pointer, as the IR camera sees the sensor bar: the dots move the
+ * other way to the pointer (pointing right puts the bar to the left of the
+ * view, pointing up puts it lower). */
+static void pointer_dots(float rx, float ry, int16_t dots[4][2]) {
+    static float px, py;
+    float dx = 0, dy = 0, yUp;
+    int mx, my;
+    if (g_host_pointer_read) g_host_pointer_read(&dx, &dy);
+    px += dx * POINTER_PER_PIXEL + rx * POINTER_PER_STICK_SECOND / 200.0f;
+    py += -dy * POINTER_PER_PIXEL + ry * POINTER_PER_STICK_SECOND / 200.0f;
+    px = px > POINTER_X_LIMIT ? POINTER_X_LIMIT : px < -POINTER_X_LIMIT ? -POINTER_X_LIMIT : px;
+    py = py > 1 ? 1 : py < -1 ? -1 : py;
+    yUp = flip("RECOMP_POINTER_FLIP", "y") ? -py : py;
+    /* Measured against KPAD's pointer (pos, -1 to 1, y down): x moves 1/225
+     * of the view per pixel; y 1/182, and with the sensor bar below the
+     * screen (SYSCONF) the middle is 102 pixels lower. */
+    mx = (int)(512 - px * 225);
+    my = (int)(486 + yUp * 226);
+    dots[0][0] = (int16_t)(mx - DOT_SPREAD);
+    dots[0][1] = (int16_t)my;
+    dots[1][0] = (int16_t)(mx + DOT_SPREAD);
+    dots[1][1] = (int16_t)my;
+}
+
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]) {
-    static float steer, pitch, px, py;
+    static float steer, pitch;
     static Gesture push, bat;
     static KeyPair leftRight, upDown;
     int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing;
     float lx = 0, ly = 0, rx = 0, ry = 0, x, y, z, wantSteer = 0, wantPitch = 0;
-    if (!at) return 0;
+    if (!at) {
+        /* Outside minigames: the pointer alone, where the game asks for it. */
+        if (!hle_pointer_wanted(held)) return 0;
+        if (g_host_sticks_read) g_host_sticks_read(&lx, &ly, &rx, &ry);
+        pointer_dots(rx, ry, dots);
+        acc[0] = acc[1] = 0;
+        acc[2] = G;
+        return 2;
+    }
     for (i = 0; i < (int)(sizeof(kMinigames) / sizeof(kMinigames[0])); i++) {
         if (kMinigames[i].at == at) {
             use = kMinigames[i].use;
@@ -211,7 +227,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     }
 
     /* Bursts of acceleration on top. */
-    swing = (use & (USE_SHAKE | USE_SWING | USE_BAT)) ? shake_swing(held, report) : 0;
+    swing = (use & (USE_SHAKE | USE_SWING | USE_BAT | USE_ANY_WAY)) ? shake_swing(held, report) : 0;
     if (swing) {
         /* Up and down, out of its face, whichever way it is held: running
          * reads only that (in Bulbasaur's dash, a shake along its length
@@ -220,6 +236,12 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
          * a boulder) goes from side to side. */
         if (use & USE_BAT) x += swing * G * 5 / 2;
         else z += swing * G * 5 / 2;
+        /* PokePark 2's Power Bash goes by the swing's size whatever its
+         * direction, along the remote's length included. */
+        if (use & USE_ANY_WAY) {
+            x += swing * G * 5 / 2;
+            y += swing * G * 5 / 2;
+        }
     }
     if (use & USE_PUSH) {
         /* A push toward the screen: a thrust, then the stop. */
@@ -238,27 +260,6 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     acc[2] = clamp16(z);
 
     if (!(use & USE_POINTER)) return 1;
-    /* The pointer, as the IR camera sees the sensor bar: the dots move
-     * the other way to the pointer (pointing right puts the bar to the left
-     * of the view, pointing up puts it lower). */
-    {
-        float dx = 0, dy = 0;
-        if (g_host_pointer_read) g_host_pointer_read(&dx, &dy);
-        px += dx * POINTER_PER_PIXEL + rx * POINTER_PER_STICK_SECOND / 200.0f;
-        py += -dy * POINTER_PER_PIXEL + ry * POINTER_PER_STICK_SECOND / 200.0f;
-        px = px > POINTER_X_LIMIT ? POINTER_X_LIMIT : px < -POINTER_X_LIMIT ? -POINTER_X_LIMIT : px;
-        py = py > 1 ? 1 : py < -1 ? -1 : py;
-    }
-    {
-        float yUp = flip("RECOMP_POINTER_FLIP", "y") ? -py : py;
-        /* Measured against KPAD's pointer (pos, -1 to 1, y down): x moves
-         * 1/225 of the view per pixel; y 1/182, and with the sensor bar
-         * below the screen (SYSCONF) the middle is 102 pixels lower. */
-        int mx = (int)(512 - px * 225), my = (int)(486 + yUp * 226);
-        dots[0][0] = (int16_t)(mx - DOT_SPREAD);
-        dots[0][1] = (int16_t)my;
-        dots[1][0] = (int16_t)(mx + DOT_SPREAD);
-        dots[1][1] = (int16_t)my;
-    }
+    pointer_dots(rx, ry, dots);
     return 3;
 }

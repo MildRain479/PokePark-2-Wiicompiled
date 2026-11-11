@@ -2,13 +2,30 @@ package io.github.pokeparkrecomp;
 
 import android.app.AlertDialog;
 import android.app.NativeActivity;
+import android.app.Presentation;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
+import android.view.Display;
+import android.view.InputDevice;
+import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -20,13 +37,56 @@ import java.net.URL;
  * permission to read the file, remembers it, and hands the native side an
  * open file descriptor (disc_image_android.c reads the game from it).
  * And for the update check (update.c): fetching the latest release's
- * details, and opening its page in the browser.
+ * details, and opening its page in the browser. And on a device with a
+ * second screen (the AYN Thor's lower one, or a touch screen plugged in, as
+ * Retroid's Dual Screen Add-On), a window there whose surface and touches
+ * go to the native side (second_screen_android.c), shown and hidden as its
+ * settings say.
  */
 public class PokeParkActivity extends NativeActivity {
     private static final int PICK = 1;
     private static final String DISC = "disc";
     private volatile int pickedFd = -1;
     private String asking;
+
+    /** A file's last bytes, or "" (the log native code keeps in some builds). */
+    private String tail(File f, int max) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            long skip = f.length() - max;
+            if (skip > 0) in.skip(skip);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toString("UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** The last run's log, read before this run starts its own. */
+    @Override
+    protected void onCreate(Bundle state) {
+        String log = "";
+        if (state == null) {
+            log = tail(new File(getFilesDir(), "last_run.old.log"), 60000)
+                + tail(new File(getFilesDir(), "last_run.log"), 60000);
+            if (log.length() > 60000) log = log.substring(log.length() - 60000);
+        }
+        super.onCreate(state);
+        if (!log.isEmpty()) showLog(log);
+    }
+
+    private void showLog(final String log) {
+        int cut = log.length() > 2500 ? log.length() - 2500 : 0;
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Last run's log")
+            .setMessage(log.substring(cut))
+            .setPositiveButton("Copy all", (d, w) -> ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
+                .setPrimaryClip(ClipData.newPlainText("PokePark log", log)))
+            .setNegativeButton("Close", null)
+            .show();
+    }
 
     private SharedPreferences prefs() {
         return getSharedPreferences("pokepark", MODE_PRIVATE);
@@ -84,6 +144,178 @@ public class PokeParkActivity extends NativeActivity {
         }
     }
 
+    /** Asks the screen for the mode of its size nearest above fps (from native code). */
+    public void askForRate(final int fps) {
+        runOnUiThread(() -> {
+            android.view.Window w = getWindow();
+            android.view.Display.Mode now = w.getWindowManager().getDefaultDisplay().getMode();
+            android.view.Display.Mode best = null;
+            for (android.view.Display.Mode m : w.getWindowManager().getDefaultDisplay().getSupportedModes()) {
+                if (m.getPhysicalWidth() != now.getPhysicalWidth() || m.getPhysicalHeight() != now.getPhysicalHeight()) continue;
+                if (best == null || (best.getRefreshRate() < fps - 1 ? m.getRefreshRate() > best.getRefreshRate()
+                                     : m.getRefreshRate() >= fps - 1 && m.getRefreshRate() < best.getRefreshRate())) best = m;
+            }
+            if (best == null) return;
+            android.view.WindowManager.LayoutParams p = w.getAttributes();
+            p.preferredDisplayModeId = best.getModeId();
+            w.setAttributes(p);
+        });
+    }
+
+    /** The second screen's surface, or null when it goes, and its size. */
+    private static native void secondSurface(Surface surface, int width, int height);
+    /** A touch on it: 0 down, 1 up, 2 moved, of pointer id, at x, y in its
+     * pixels. */
+    private static native void secondTouch(int action, int id, float x, float y);
+    /** Whether this is a handheld with two screens, again: one was plugged
+     * in or out. */
+    private static native void secondDevice(boolean dual);
+
+    private Presentation second;
+    private DisplayManager.DisplayListener displays;
+
+    /** Whether a display is built in (not HDMI, wireless or virtual):
+     * Display.getType, hidden, is TYPE_INTERNAL (1). Unknown is not. */
+    private static boolean builtIn(Display d) {
+        try {
+            return (Integer) Display.class.getMethod("getType").invoke(d) == 1;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Whether a display is a touch screen plugged in, as Retroid's Dual
+     * Screen Add-On (over USB-C, so to Android an external display, as a TV
+     * or a monitor would be): it has a touch screen of its own, one Android
+     * gives it (InputDevice.getAssociatedDisplayId, hidden), or else one
+     * plugged in too. A TV or a monitor without one isn't. */
+    private static boolean touchScreenPluggedIn(Display d) {
+        try {
+            if ((Integer) Display.class.getMethod("getType").invoke(d) != 2) return false; /* TYPE_EXTERNAL */
+        } catch (Exception e) {
+            return false;
+        }
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice in = InputDevice.getDevice(id);
+            if (in == null || (in.getSources() & InputDevice.SOURCE_TOUCHSCREEN) != InputDevice.SOURCE_TOUCHSCREEN) continue;
+            int on = -1;
+            try {
+                on = (Integer) InputDevice.class.getMethod("getAssociatedDisplayId").invoke(in);
+            } catch (Exception e) {
+                /* not asked: taken as unknown */
+            }
+            if (on == d.getDisplayId() || (on == -1 && in.isExternal())) return true;
+        }
+        return false;
+    }
+
+    /** The second screen to show on, of those apps can present on: a
+     * built-in one, or else a touch screen plugged in. */
+    private Display secondDisplay() {
+        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        Display[] all = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+        for (Display d : all) {
+            if (builtIn(d)) return d;
+        }
+        for (Display d : all) {
+            if (touchScreenPluggedIn(d)) return d;
+        }
+        return null;
+    }
+
+    private boolean dual() {
+        boolean pad = false;
+        if (getPackageManager().hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) return false;
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice d = InputDevice.getDevice(id);
+            if (d != null && (d.getSources() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) pad = true;
+        }
+        boolean dual = pad && secondDisplay() != null;
+        Log.i("PokePark", "dual-screen handheld: " + dual + (pad ? "" : " (no controller)"));
+        return dual;
+    }
+
+    /** Whether this is a handheld with two screens, as the AYN Thor, or one
+     * with Retroid's Dual Screen Add-On on (from native code): a second
+     * screen, built in or a touch screen plugged in, a controller, and no
+     * phone in it. Not a PC, a handheld with one screen, or a phone. Asked
+     * again whenever a screen is plugged in or out. */
+    public boolean dualScreenHandheld() {
+        runOnUiThread(() -> {
+            if (displays != null) return;
+            displays = new DisplayManager.DisplayListener() {
+                public void onDisplayAdded(int id) {
+                    secondDevice(dual());
+                }
+                public void onDisplayRemoved(int id) {
+                    /* Its window went with it. */
+                    if (second != null && second.getDisplay().getDisplayId() == id) second = null;
+                    secondDevice(dual());
+                }
+                public void onDisplayChanged(int id) {}
+            };
+            ((DisplayManager) getSystemService(Context.DISPLAY_SERVICE))
+                .registerDisplayListener(displays, new Handler(Looper.getMainLooper()));
+        });
+        return dual();
+    }
+
+    /** Opens a window on a second screen, if there is one (from native
+     * code, once its methods above are registered). */
+    public void showSecondScreen() {
+        runOnUiThread(() -> {
+            if (second != null) return;
+            Display display = secondDisplay();
+            if (display == null) return;
+            second = new Presentation(this, display);
+            SurfaceView view = new SurfaceView(second.getContext());
+            view.getHolder().addCallback(new SurfaceHolder.Callback() {
+                public void surfaceCreated(SurfaceHolder h) {}
+                public void surfaceChanged(SurfaceHolder h, int format, int w, int hgt) {
+                    secondSurface(h.getSurface(), w, hgt);
+                }
+                public void surfaceDestroyed(SurfaceHolder h) {
+                    secondSurface(null, 0, 0);
+                }
+            });
+            view.setOnTouchListener((v, e) -> {
+                int a = e.getActionMasked(), p = e.getActionIndex();
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) {
+                    secondTouch(0, e.getPointerId(p), e.getX(p), e.getY(p));
+                } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_POINTER_UP) {
+                    secondTouch(1, e.getPointerId(p), e.getX(p), e.getY(p));
+                } else if (a == MotionEvent.ACTION_MOVE || a == MotionEvent.ACTION_CANCEL) {
+                    for (int i = 0; i < e.getPointerCount(); i++)
+                        secondTouch(a == MotionEvent.ACTION_MOVE ? 2 : 1, e.getPointerId(i), e.getX(i), e.getY(i));
+                }
+                return true;
+            });
+            second.setContentView(view);
+            try {
+                second.show();
+            } catch (Exception e) {
+                Log.w("PokePark", "no second screen: " + e);
+                second = null;
+            }
+        });
+    }
+
+    /** Closes the second screen's window, if open (from native code). */
+    public void hideSecondScreen() {
+        runOnUiThread(() -> {
+            if (second != null) second.dismiss();
+            second = null;
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (displays != null) ((DisplayManager) getSystemService(Context.DISPLAY_SERVICE)).unregisterDisplayListener(displays);
+        if (second != null) second.dismiss();
+        second = null;
+        super.onDestroy();
+    }
+
     /** Opens url in the browser (from native code). */
     public void openPage(final String url) {
         runOnUiThread(() -> {
@@ -107,7 +339,7 @@ public class PokeParkActivity extends NativeActivity {
     private void ask(String message) {
         asking = message;
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("PokePark")
+            .setTitle(getApplicationInfo().loadLabel(getPackageManager()))
             .setMessage(message)
             .setCancelable(false)
             .setPositiveButton("Choose disc image", (d, w) -> {
@@ -138,7 +370,7 @@ public class PokeParkActivity extends NativeActivity {
         }
         int fd = open(uri);
         if (fd < 0) {
-            ask("That file couldn't be opened. Choose your disc image of PokePark Wii again.");
+            ask("That file couldn't be opened. Choose your disc image again.");
             return;
         }
         prefs().edit().putString(DISC, uri.toString()).apply();

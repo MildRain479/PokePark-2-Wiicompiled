@@ -1,7 +1,7 @@
 /* The NAND file system (ISFS), stored in a host directory: the Wii path
  * /title/00010000/52384145/data/x is <root>/title/00010000/52384145/data/x.
  * hle_ios.c routes /dev/fs requests and file descriptors here. The root
- * defaults to "nand" next to the disc directory (orig/R8AE01/nand). */
+ * defaults to "nand" next to the disc directory (orig/S2LE01/nand). */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -110,6 +110,7 @@ FILE* hle_nand_open(const char* nand, int mode, int32_t* err) {
 }
 
 int32_t hle_nand_read(FILE* f, uint32_t dst, uint32_t len) {
+    ppc_mem_host_write(dst, len);
     return (int32_t)fread(MA(dst), 1, len, f);
 }
 
@@ -426,7 +427,7 @@ int hle_widescreen(void) {
 /* u8 SCGetAspectRatio(void): the TV's shape from SYSCONF (IPL.AR), as the
  * game reads it once at start-up. Answered from hle_widescreen() instead,
  * so the setting doesn't depend on a SYSCONF already on the NAND. */
-void f_8023E860(ppc_t* c) { c->r[3] = hle_widescreen() ? 1 : 0; }
+void F_SCGetAspectRatio(ppc_t* c) { c->r[3] = hle_widescreen() ? 1 : 0; }
 
 /* The system menu's setting.txt: text lines, XOR-scrambled with a rotating
  * key, padded to 0x100 bytes. */

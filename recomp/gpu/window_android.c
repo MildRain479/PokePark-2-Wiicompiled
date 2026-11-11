@@ -16,8 +16,8 @@
  * side asks for with Android's file picker and remembers, read in place
  * (disc_image_android.c); or, when it's there, the game extracted as on
  * Windows in the app's folder on shared storage (Android/data/<package>/
- * files/R8AE01, with sys/main.dol and disc; adb push puts it there). Saves
- * (nand) go in R8AE01/nand there either way; settings.ini in the app's
+ * files/<game id>, with sys/main.dol and disc; adb push puts it there). Saves
+ * (nand) go in <game id>/nand there either way; settings.ini in the app's
  * private files. stdout and stderr go to logcat, tagged PokePark. */
 #define _GNU_SOURCE /* cpu_set_t */
 #include <android/choreographer.h>
@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "game.h"
 #include "gx_device.h"
 #include "host_settings.h"
 #include "ppc.h"
@@ -48,6 +49,7 @@ extern struct AAssetManager* g_android_assets; /* prompts.c */
 
 struct android_app* g_android_app;
 
+void second_screen_start(JavaVM* vm, jobject activity); /* second_screen_android.c */
 static pthread_mutex_t sLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sChanged = PTHREAD_COND_INITIALIZER;
 static ANativeWindow* sWindow;
@@ -55,11 +57,97 @@ static int sLeaving;  /* the activity's thread waits for the game to let go of t
 static int sReleased; /* and the game has */
 static double sHz;
 static double sPixelAspect = 1;
+static int sWantedRate;
 
 /* ------------------------------------------------------------------------ */
 /* stdout and stderr to logcat */
 
 static int sLogPipe[2];
+
+#ifdef RECOMP_ANDROID_LOG
+/* While a new game is being brought up, without adb to hand: the log also
+ * goes to a file, with what a crash leaves, for PokeParkActivity to show on
+ * the next start. */
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <ucontext.h>
+#define LOG_ROTATE (512u << 10)
+static int sLogFd = -1;
+static char sLogPath[1024], sLogOld[1024];
+
+static void log_file_open(const char* dir) {
+    snprintf(sLogPath, sizeof(sLogPath), "%s/last_run.log", dir);
+    snprintf(sLogOld, sizeof(sLogOld), "%s/last_run.old.log", dir);
+    unlink(sLogOld);
+    sLogFd = open(sLogPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+}
+
+static void log_file_line(const char* line) {
+    struct stat st;
+    if (sLogFd < 0) return;
+    dprintf(sLogFd, "%s\n", line);
+    if (fstat(sLogFd, &st) == 0 && (size_t)st.st_size > LOG_ROTATE) {
+        close(sLogFd);
+        rename(sLogPath, sLogOld);
+        sLogFd = open(sLogPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    }
+}
+
+static void log_frame(int i, uintptr_t pc) {
+    Dl_info d;
+    if (dladdr((void*)pc, &d) && d.dli_fbase)
+        dprintf(sLogFd, "  #%d %s+0x%lx\n", i, strrchr(d.dli_fname, '/') ? strrchr(d.dli_fname, '/') + 1 : d.dli_fname,
+                (unsigned long)(pc - (uintptr_t)d.dli_fbase));
+    else
+        dprintf(sLogFd, "  #%d %lx\n", i, (unsigned long)pc);
+}
+
+static void on_crash(int sig, siginfo_t* si, void* context) {
+    signal(sig, SIG_DFL);
+    if (sLogFd >= 0) {
+        dprintf(sLogFd, "CRASH: signal %d code %d at address %p\n", sig, si->si_code, si->si_addr);
+#ifdef __aarch64__
+        {
+            const ucontext_t* u = (const ucontext_t*)context;
+            uintptr_t fp = u->uc_mcontext.regs[29];
+            int i;
+            log_frame(0, u->uc_mcontext.pc);
+            log_frame(1, u->uc_mcontext.regs[30]);
+            for (i = 2; i < 24 && fp && !(fp & 7); i++) {
+                const uintptr_t* f = (const uintptr_t*)fp;
+                Dl_info d;
+                if (!dladdr((void*)f[1], &d)) break;
+                log_frame(i, f[1]);
+                if (f[0] <= fp) break;
+                fp = f[0];
+            }
+        }
+#else
+        (void)context;
+#endif
+        fsync(sLogFd);
+    }
+    raise(sig);
+}
+
+static void log_catch_crashes(void) {
+    /* Its own stack, as a thread that overran its stack has none left. */
+    static const int kSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+    struct sigaction sa;
+    stack_t alt;
+    size_t i;
+    alt.ss_sp = malloc(64 << 10);
+    alt.ss_size = 64 << 10;
+    alt.ss_flags = 0;
+    sigaltstack(&alt, NULL);
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_crash;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    for (i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++) sigaction(kSignals[i], &sa, NULL);
+}
+#endif
 
 static void* log_thread(void* arg) {
     char buf[1024], line[1024];
@@ -72,6 +160,9 @@ static void* log_thread(void* arg) {
             if (buf[i] == '\n' || used == sizeof(line) - 1) {
                 line[used] = 0;
                 __android_log_write(ANDROID_LOG_INFO, "PokePark", line);
+#ifdef RECOMP_ANDROID_LOG
+                log_file_line(line);
+#endif
                 used = 0;
             }
             if (buf[i] != '\n') line[used++] = buf[i];
@@ -99,13 +190,18 @@ static void log_to_logcat(void) {
  * cores at half their clock, and a frame that takes 7 ms on a PC took
  * over 33 ms, half the game's frame rate. So the thread keeps to the
  * fastest cores, and tells Android (its performance hints, ADPF, on
- * Android 13 and later) how long each frame's work took against a 60 fps
- * budget, which raises the clocks to meet it. */
+ * Android 13 and later) how long each frame's work took against a target,
+ * which raises the clocks to meet it. The target is under a 60 fps frame:
+ * Android also lowers them until the work just fits, and with no room left
+ * a frame every so often missed its retrace, for as long as that lasted. */
 typedef struct APerformanceHintSession APerformanceHintSession;
 static APerformanceHintSession* sHint;
 static int (*sReportWork)(APerformanceHintSession* session, int64_t ns);
 
-#define FRAME_BUDGET_NS 16666667
+#define WORK_TARGET_NS 14000000
+
+static cpu_set_t sFastCores;
+static int sHaveFastCores;
 
 /* The fastest cores alone (the prime ones): on a Snapdragon 8 Gen 2 the
  * next fastest run at 88% of the prime core's clock but do far less work
@@ -134,6 +230,8 @@ static void keep_to_fast_cores(void) {
             count++;
         }
     }
+    sFastCores = set;
+    sHaveFastCores = 1;
     if (sched_setaffinity(0, sizeof(set), &set) == 0)
         fprintf(stderr, "PokePark: game thread on the %d fastest cores (%ld MHz)\n", count, top / 1000);
 }
@@ -150,7 +248,7 @@ static void start_hints(void) {
         dlsym(lib, "APerformanceHint_createSession");
     sReportWork = (int (*)(APerformanceHintSession*, int64_t))dlsym(lib, "APerformanceHint_reportActualWorkDuration");
     if (!getManager || !createSession || !sReportWork || !(manager = getManager())) return;
-    sHint = createSession(manager, &tid, 1, FRAME_BUDGET_NS);
+    sHint = createSession(manager, &tid, 1, WORK_TARGET_NS);
     fprintf(stderr, "PokePark: performance hints %s\n", sHint ? "on" : "unavailable");
 }
 
@@ -160,7 +258,15 @@ void android_frame_done(void) {
     extern uint64_t g_wait_ticks; /* hle_irq.c */
     static int started;
     static uint64_t last, lastWait;
+    static unsigned frames;
     uint64_t now = ppc_timebase();
+    /* The system undoes this for the first 20 s or so of a game, and left
+     * alone the thread then wanders onto cores that are clocked down. */
+    if (sHaveFastCores && ++frames % 30 == 0) {
+        cpu_set_t set;
+        if (sched_getaffinity(0, sizeof(set), &set) == 0 && !CPU_EQUAL(&set, &sFastCores))
+            sched_setaffinity(0, sizeof(sFastCores), &sFastCores);
+    }
     if (!started) {
         started = 1;
         keep_to_fast_cores();
@@ -193,6 +299,30 @@ void win_size(int* w, int* h) {
 /* The game always fills the screen. */
 void win_set_fullscreen(int on) { (void)on; }
 void win_set_title(const char* title) { (void)title; }
+/* Left alone a phone's screen stays at what it was doing, 60 here, whatever
+ * the game can draw: the frame rate setting is said out loud. */
+static void ask_for_rate(void) {
+    JavaVM* vm;
+    JNIEnv* env;
+    jclass cls;
+    jmethodID m;
+    if (!g_android_app || !sWantedRate) return;
+    vm = g_android_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return;
+    cls = (*env)->GetObjectClass(env, g_android_app->activity->clazz);
+    m = (*env)->GetMethodID(env, cls, "askForRate", "(I)V");
+    if (m) (*env)->CallVoidMethod(env, g_android_app->activity->clazz, m, sWantedRate);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+void win_set_frame_rate(int fps) {
+    pthread_mutex_lock(&sLock);
+    sWantedRate = fps;
+    ask_for_rate();
+    pthread_mutex_unlock(&sLock);
+}
+
 double win_display_hz(void) { return sHz; }
 int gxb_display_hz(void) { return (int)(sHz + 0.5); }
 
@@ -224,8 +354,15 @@ static char sDol[1024];
 
 static void* game_thread(void* arg) {
     char* argv[2] = {"pokepark", sDol};
+    int code;
     (void)arg;
-    exit(boot_main(2, argv));
+#ifdef RECOMP_ANDROID_LOG
+    log_catch_crashes();
+#endif
+    code = boot_main(2, argv);
+    fprintf(stderr, "PokePark: the game ended, code %d\n", code);
+    usleep(200000); /* for the log to get it */
+    exit(code);
     return NULL;
 }
 
@@ -243,6 +380,7 @@ static void on_command(struct android_app* app, int32_t cmd) {
     case APP_CMD_INIT_WINDOW:
         pthread_mutex_lock(&sLock);
         sWindow = app->window;
+        ask_for_rate();
         sLeaving = 0;
         pthread_cond_broadcast(&sChanged);
         pthread_mutex_unlock(&sLock);
@@ -332,10 +470,10 @@ static void on_refresh_rate(int64_t vsyncPeriodNanos, void* data) {
     if (vsyncPeriodNanos > 0) sHz = 1e9 / (double)vsyncPeriodNanos;
 }
 
-/* The game's main.dol, in R8AE01 (or R8AE01/disc, as dtk extracts a
+/* The game's main.dol, in its ID's folder (or that folder's disc, as dtk extracts a
  * disc) in the app's shared folder. */
 static int find_game(const char* dir) {
-    static const char* const kPlaces[] = {"R8AE01/sys/main.dol", "R8AE01/disc/sys/main.dol"};
+    static const char* const kPlaces[] = {GAME_ID "/sys/main.dol", GAME_ID "/disc/sys/main.dol"};
     struct stat st;
     size_t i;
     for (i = 0; i < sizeof(kPlaces) / sizeof(kPlaces[0]); i++) {
@@ -346,11 +484,12 @@ static int find_game(const char* dir) {
 }
 
 /* RECOMP_* settings for test runs, which Android has no other way to
- * give: env.txt in the shared folder, a NAME=value a line. */
-static void read_env(const char* dir) {
+ * give: env.txt in the shared folder, a NAME=value a line, then
+ * env_test.txt, for a second test run's own. */
+static void read_env_file(const char* dir, const char* name) {
     char path[1024], line[512];
     FILE* f;
-    snprintf(path, sizeof(path), "%s/env.txt", dir);
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
     if (!(f = fopen(path, "r"))) return;
     while (fgets(line, sizeof(line), f)) {
         char* eq = strchr(line, '=');
@@ -363,12 +502,17 @@ static void read_env(const char* dir) {
     fclose(f);
 }
 
+static void read_env(const char* dir) {
+    read_env_file(dir, "env.txt");
+    read_env_file(dir, "env_test.txt");
+}
+
 /* Otherwise the player's disc image (disc_image_android.c), which the
  * activity's Java side (PokeParkActivity.java) asks for and opens. */
 int disc_image_open(int fd, char* err, size_t n);
 
 static const char kAsk[] =
-    "PokePark plays from your own copy of the game: a disc image of PokePark Wii: Pikachu's Adventure (USA), "
+    GAME_NAME " plays from your own copy of the game: a disc image of " GAME_FULL_NAME " (USA), "
     "such as an .rvz, .iso or .wbfs file. Choose it on this device.";
 static int sAsking; /* waiting for a disc image to be chosen */
 
@@ -409,7 +553,7 @@ static void use_image(struct android_app* app, int fd) {
     }
     fprintf(stderr, "PokePark: %s\n", err);
     java(app, "forgetGame", NULL);
-    snprintf(msg, sizeof(msg), "%s\n\nChoose your disc image of PokePark Wii: Pikachu's Adventure (USA).", err);
+    snprintf(msg, sizeof(msg), "%s\n\nChoose your disc image of " GAME_FULL_NAME " (USA).", err);
     sAsking = 1;
     java(app, "chooseGame", msg);
 }
@@ -417,6 +561,11 @@ static void use_image(struct android_app* app, int fd) {
 void android_main(struct android_app* app) {
     const char* shared = app->activity->externalDataPath;
     char path[1024];
+#ifdef RECOMP_ANDROID_LOG
+    log_file_open(app->activity->internalDataPath);
+    log_catch_crashes();
+    setenv("RECOMP_FPS", "1", 0);
+#endif
     log_to_logcat();
     g_android_app = app;
     g_android_assets = app->activity->assetManager;
@@ -440,7 +589,7 @@ void android_main(struct android_app* app) {
         /* The saves go where they would beside an extracted game. */
         int fd;
         if (shared) mkdir(shared, 0770);
-        snprintf(sDol, sizeof(sDol), "%s/R8AE01/sys/main.dol", shared ? shared : app->activity->internalDataPath);
+        snprintf(sDol, sizeof(sDol), "%s/" GAME_ID "/sys/main.dol", shared ? shared : app->activity->internalDataPath);
         if ((fd = java(app, "savedGameFd", NULL)) >= 0) {
             use_image(app, fd);
         } else {
@@ -449,6 +598,7 @@ void android_main(struct android_app* app) {
         }
     }
     AChoreographer_registerRefreshRateCallback(AChoreographer_getInstance(), on_refresh_rate, NULL);
+    second_screen_start(app->activity->vm, app->activity->clazz);
     for (;;) {
         int events, fd;
         struct android_poll_source* source;

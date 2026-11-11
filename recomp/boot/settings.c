@@ -12,6 +12,9 @@
 #include "host_settings.h"
 
 void hle_set_frame_rate(int fps);   /* hle_game.c */
+#ifdef __ANDROID__
+void win_set_frame_rate(int fps);   /* window_android.c */
+#endif
 void gxb_set_output_rate(int fps);  /* gx_frames.c */
 
 /* The frame rates offered. Above 60 the game still draws 60 frames a
@@ -61,6 +64,9 @@ static void apply_gameplay(void) {
 static void apply_frame_rate(void) {
     hle_set_frame_rate(g_settings.frame_rate);
     gxb_set_output_rate(g_settings.frame_rate);
+#ifdef __ANDROID__
+    win_set_frame_rate(g_settings.frame_rate);
+#endif
 }
 
 HostSettings g_settings;
@@ -203,8 +209,13 @@ void settings_save(void) {
     fprintf(f, "fov = %d ; field of view in the park, percent of the game's: %d-%d\n", g_settings.fov, FOV_MIN,
             FOV_MAX);
     fprintf(f, "aniso = %d ; anisotropic texture filtering: 1 (off), 2, 4, 8 or 16\n", g_settings.aniso);
+    fprintf(f, "movies = %d ; movie upscaling: 0 (the game's), 1 (sharpened edges), 2 (AI, Vulkan)\n",
+            g_settings.movie_upscale);
 #ifdef __ANDROID__
-    fprintf(f, "\n");
+    fprintf(f, "\n[dual_screen] ; only on a handheld with two screens; elsewhere all off\n");
+    fprintf(f, "on = %d ; the second screen used, for the Pad's pages and the map\n", g_settings.dual_screen);
+    fprintf(f, "swap = %d ; the game on the second screen, the Pad's pages on the main one\n", g_settings.swap_screens);
+    fprintf(f, "minimap_top = %d ; the minimap on the game's screen too\n\n", g_settings.minimap_top);
 #else
     fprintf(f, "renderer = %s ; opengl or vulkan, from the next start\n\n",
             g_settings.renderer == RENDERER_VULKAN ? "vulkan" : "opengl");
@@ -255,6 +266,8 @@ void settings_load(void) {
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
     g_settings.aniso = 1;
+    g_settings.movie_upscale = MOVIE_UPSCALE_AI;
+    g_settings.dual_screen = 1;
     g_settings.renderer = RENDERER_VULKAN; /* OpenGL draws if it can't start */
     g_settings.rumble = 2;
     g_settings.touch_controls = 1;
@@ -288,11 +301,18 @@ void settings_load(void) {
         *c = '\0';
         if (sscanf(p, "%31s", name) != 1) continue;
         p = c + 1;
+        if (!strcmp(section, "dual_screen")) {
+            if (!strcmp(name, "on")) g_settings.dual_screen = atoi(p) != 0;
+            if (!strcmp(name, "swap")) g_settings.swap_screens = atoi(p) != 0;
+            if (!strcmp(name, "minimap_top")) g_settings.minimap_top = atoi(p) != 0;
+        }
         if (!strcmp(section, "display")) {
             if (!strcmp(name, "fullscreen")) g_settings.fullscreen = atoi(p) != 0;
             if (!strcmp(name, "scale")) g_settings.scale = atoi(p) < 0 ? 0 : atoi(p) > MAX_SCALE ? MAX_SCALE : atoi(p);
             if (!strcmp(name, "msaa")) g_settings.msaa = valid_msaa(atoi(p));
             if (!strcmp(name, "aniso")) g_settings.aniso = valid_aniso(atoi(p));
+            if (!strcmp(name, "movies"))
+                g_settings.movie_upscale = atoi(p) < 0 ? 0 : atoi(p) > MOVIE_UPSCALE_AI ? MOVIE_UPSCALE_AI : atoi(p);
             if (!strcmp(name, "renderer")) g_settings.renderer = strstr(p, "vulkan") ? RENDERER_VULKAN : RENDERER_OPENGL;
             if (!strcmp(name, "frame_rate")) g_settings.frame_rate = valid_frame_rate(atoi(p));
             if (!strcmp(name, "fov")) {
@@ -397,6 +417,10 @@ void settings_step(int which, int d) {
         break;
     }
     case SET_RENDERER: g_settings.renderer = !g_settings.renderer; break;
+    case SET_MOVIES: g_settings.movie_upscale = (g_settings.movie_upscale + d + 3) % 3; break;
+    case SET_DUAL_SCREEN: g_settings.dual_screen = !g_settings.dual_screen; break;
+    case SET_SWAP_SCREENS: g_settings.swap_screens = !g_settings.swap_screens; break;
+    case SET_MINIMAP_TOP: g_settings.minimap_top = !g_settings.minimap_top; break;
     case SET_TOUCH: g_settings.touch_controls = !g_settings.touch_controls; break;
     case SET_RUMBLE:
         g_settings.rumble = (g_settings.rumble + d + 4) % 4;

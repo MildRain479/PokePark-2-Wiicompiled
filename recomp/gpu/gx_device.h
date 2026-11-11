@@ -33,11 +33,12 @@ typedef struct GXDevice {
     void (*draw)(const GXDrawState* st, const GXVertex* v, int first_vertex, int vertices, const uint32_t* index,
                  int first_index, int count);
     /* A recorded frame's vertices and indices, which draw_recorded draws
-     * from until the next frame's. */
+     * from until the next frame's; the frame before's kept as well. */
     void (*frame_data)(const GXVertex* v, int vertices, const uint32_t* index, int count);
     /* A draw of the recorded frame, with its XF state as xf (GX_XF_WORDS
      * words) gives it. */
-    void (*draw_recorded)(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count);
+    void (*draw_recorded)(const GXDrawState* st, const uint32_t* xf, int first_vertex, int first_index, int count,
+                          int before);
     void (*clear)(int color, int alpha, int depth, uint32_t rgba, uint32_t z);
     /* The texture copies of a w x h rectangle to addr go to: a number for
      * copy, made the first time; -1 if there is no room for more. Its

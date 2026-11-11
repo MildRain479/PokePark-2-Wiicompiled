@@ -26,6 +26,9 @@ enum {
 
 #define MAX_SCALE 6
 enum { RENDERER_OPENGL, RENDERER_VULKAN };
+/* Movies: drawn as the game does, upscaled along their edges, or upscaled by
+ * a network (Vulkan; OpenGL draws those upscaled along their edges). */
+enum { MOVIE_UPSCALE_OFF, MOVIE_UPSCALE_FILTER, MOVIE_UPSCALE_AI };
 #define MAX_MSAA 8
 
 typedef struct {
@@ -35,6 +38,12 @@ typedef struct {
     int frame_rate;          /* 30 (the game's own), 60, or 120-240 (interpolated) */
     int fov;                 /* field of view, percent of the game's (tangent of half the angle) */
     int aniso;               /* anisotropic filtering: 1 (off), 2, 4, 8 or 16 */
+    int movie_upscale;       /* MOVIE_UPSCALE_* */
+    /* Android, on a handheld with two screens (second_screen_device):
+     * otherwise all taken as off. */
+    int dual_screen;         /* the second screen used: the Pad's pages there */
+    int swap_screens;        /* the game on the second screen, the Pad's pages on the main one */
+    int minimap_top;         /* the minimap on the game's screen too */
     int renderer;            /* RENDERER_*: what draws, from the next start */
     int rumble;              /* controller rumble: 0 off, 1 light, 2 normal, 3 strong */
     int touch_controls;      /* Android: the touch screen's controls, shown while it was used last; 0 never */
@@ -73,7 +82,8 @@ void prompts_init(void);
 /* What settings_step changes. */
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
-       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH, SET_UPDATES };
+       SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH, SET_UPDATES, SET_MOVIES,
+       SET_DUAL_SCREEN, SET_SWAP_SCREENS, SET_MINIMAP_TOP };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);
@@ -127,3 +137,21 @@ const uint32_t* menu_draw(int w, int h);
 /* Android: changes whenever menu_draw's image may have, so a device can
  * leave an unchanged one where it is (input_android.c). */
 unsigned menu_generation(void);
+/* The second screen's picture (options.c): the PokéPark Pad's open pages
+ * over the pause menu's dark, the friends list on the left one, w x h,
+ * NULL if there are none yet (the Pad's pictures not read); changed[0] 1
+ * if all of it isn't the image last given, 2 if only changed[1..4]
+ * (x, y, w, h) isn't; map (x, y, w, h) where the minimap goes on it, at its
+ * shape map_aspect. A touch on that screen (0 down, 1 up, 2 moved, at its
+ * pixels) scrolls the list. */
+const uint32_t* pad_pages_draw(int w, int h, double map_aspect, int* changed, int* map);
+void pad_pages_touch(int action, float x, float y);
+#ifdef __ANDROID__
+/* A second screen (second_screen_android.c): whether this is a handheld
+ * with two (a second built-in screen to show on, a controller, and no
+ * phone in it), whether the second is used (the setting, on one), and
+ * whether the screens are swapped (the game there). */
+int second_screen_device(void);
+int second_screen_used(void);
+int second_screens_swapped(void);
+#endif

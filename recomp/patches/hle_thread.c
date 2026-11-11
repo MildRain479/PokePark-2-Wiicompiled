@@ -189,9 +189,9 @@ static Fiber* sCurrent;
 static ppc_t* sCpu;
 
 /* SDK addresses. */
-static const uint32_t kOSExitThread = 0x802109B0;
-static const uint32_t kIdleLoopReturn = 0x802105FC; /* SelectThread, after OSEnableInterrupts */
-static const uint32_t kRunQueueBits = 0x80486B20;
+static const uint32_t kOSExitThread = A_OSExitThread;
+static const uint32_t kIdleLoopReturn = A_SelectThread + 0x14C; /* SelectThread, after OSEnableInterrupts */
+static const uint32_t kRunQueueBits = A_RUN_QUEUE_BITS;
 static const uint32_t kCurrentContext = 0x800000D4;
 
 static Fiber* fiber_for(uint32_t ctx) {
@@ -264,7 +264,7 @@ static void switch_to(Fiber* f) {
 }
 
 /* static BOOL SelectThread(BOOL yield) */
-void f_802104B0(ppc_t* c) {
+void F_SelectThread(ppc_t* c) {
     Resume frame;
     Fiber* self;
     ensure_main_fiber(c);
@@ -280,14 +280,14 @@ void f_802104B0(ppc_t* c) {
         c->r[3] = 0;
         return;
     }
-    f_802104B0_orig(c);
+    F_SelectThread_orig(c);
     self->select = frame.outer;
 }
 
 /* u32 OSSaveContext(OSContext* context): binds the context to the
  * running fiber and makes the enclosing SelectThread its resume point,
  * then saves as usual (returns 0). */
-void f_80209000(ppc_t* c) {
+void F_OSSaveContext(ppc_t* c) {
     uint32_t ctx = c->r[3];
     ensure_main_fiber(c);
     if (!sCurrent->ctx) sCurrent->ctx = ctx;
@@ -299,12 +299,12 @@ void f_80209000(ppc_t* c) {
         }
     }
     else HLE_LOG("OSSaveContext(%08X) outside a thread switch", ctx);
-    f_80209000_orig(c);
+    F_OSSaveContext_orig(c);
     c->r[3] = 0;
 }
 
 /* void OSLoadContext(OSContext* context) */
-void f_80209080(ppc_t* c) {
+void F_OSLoadContext(ppc_t* c) {
     uint32_t ctx = c->r[3];
     Fiber* f;
     ensure_main_fiber(c);
@@ -358,10 +358,10 @@ void f_80209080(ppc_t* c) {
  * then played its buffer's old contents: the music repeated bits.) The
  * decrementer's handler does that itself (DecrementerExceptionCallback
  * sets up its own context). */
-static const uint32_t kOSDisableScheduler = 0x80210180;
-static const uint32_t kOSEnableScheduler = 0x802101C0;
-static const uint32_t kOSReschedule = 0x802106E0;            /* __OSReschedule */
-static const uint32_t kDecrementerHandler = 0x80207B30;      /* DecrementerExceptionHandler */
+static const uint32_t kOSDisableScheduler = A_OSDisableScheduler;
+static const uint32_t kOSEnableScheduler = A_OSEnableScheduler;
+static const uint32_t kOSReschedule = A___OSReschedule;            /* __OSReschedule */
+static const uint32_t kDecrementerHandler = A_DecrementerExceptionHandler;      /* DecrementerExceptionHandler */
 static int sSchedulerOff[MAX_NESTED_INTERRUPTS]; /* by depth: still to turn back on */
 
 void hle_interrupt(ppc_t* c, uint32_t fn, uint32_t r3, uint32_t r4) {
@@ -450,8 +450,8 @@ void hle_dump_threads(void) {
  * void* stack, u32 stackSize, OSPriority priority, u16 attr): a thread
  * created where an earlier one ran (one that exited or was cancelled)
  * must start on a new fiber, not continue the old one's. */
-void f_80210740(ppc_t* c) {
+void F_OSCreateThread(ppc_t* c) {
     Fiber* f = fiber_for(c->r[3]);
     if (f && f != sCurrent) f->exited = 1;
-    f_80210740_orig(c);
+    F_OSCreateThread_orig(c);
 }

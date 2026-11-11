@@ -32,7 +32,9 @@
 
 int hle_font_metrics(int* cellW, int* cellH, int* baseline); /* hle_prompts.c */
 int hle_font_glyph(uint16_t code, uint8_t* cov, int* left, int* advance);
-void win_size(int* w, int* h); /* window_android.c */
+void game_screen_size(int* w, int* h); /* second_screen_android.c */
+int second_screens_swapped(void);
+void second_touch_push(int action, int id, float x, float y);
 
 static pthread_mutex_t sLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -98,33 +100,63 @@ static Touch* touch_of(int id) {
     return NULL;
 }
 
+static void touch_down(int id, float x, float y) {
+    int k;
+    for (k = 0; k < MAX_TOUCHES && sTouch[k].role != ROLE_FREE; k++) {}
+    if (k < MAX_TOUCHES) {
+        Touch* t = &sTouch[k];
+        memset(t, 0, sizeof(*t));
+        t->id = id;
+        t->role = ROLE_NEW;
+        t->down = now_ms();
+        t->x0 = t->x = t->lastX = x;
+        t->y0 = t->y = t->lastY = y;
+    }
+}
+
+static void touch_move(int id, float x, float y) {
+    Touch* t = touch_of(id);
+    if (!t) return;
+    t->x = x;
+    t->y = y;
+}
+
+static void touch_up(int id) {
+    Touch* t = touch_of(id);
+    if (t) t->gone = 1;
+}
+
+/* A touch on the screen the game is on: the second one, swapped
+ * (second_screen_android.c): 0 down, 1 up, 2 moved. */
+void input_android_touch(int action, int id, float x, float y) {
+    pthread_mutex_lock(&sLock);
+    if (action == 0) touch_down(id, x, y);
+    else touch_move(id, x, y);
+    if (action == 1) touch_up(id);
+    pthread_mutex_unlock(&sLock);
+}
+
 static void touch_event(AInputEvent* e) {
     int32_t action = AMotionEvent_getAction(e), kind = action & AMOTION_EVENT_ACTION_MASK;
     size_t p = (size_t)((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
     size_t i, n = AMotionEvent_getPointerCount(e);
-    if (kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN) {
-        int k;
-        for (k = 0; k < MAX_TOUCHES && sTouch[k].role != ROLE_FREE; k++) {}
-        if (k < MAX_TOUCHES) {
-            Touch* t = &sTouch[k];
-            memset(t, 0, sizeof(*t));
-            t->id = AMotionEvent_getPointerId(e, p);
-            t->role = ROLE_NEW;
-            t->down = now_ms();
-            t->x0 = t->x = t->lastX = AMotionEvent_getX(e, p);
-            t->y0 = t->y = t->lastY = AMotionEvent_getY(e, p);
+    /* Swapped, this screen has the Pad's pages: its touches are theirs. */
+    if (second_screens_swapped()) {
+        int down = kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN;
+        int up = kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP;
+        if (down || up) {
+            second_touch_push(down ? 0 : 1, AMotionEvent_getPointerId(e, p), AMotionEvent_getX(e, p), AMotionEvent_getY(e, p));
+        } else {
+            for (i = 0; i < n; i++)
+                second_touch_push(kind == AMOTION_EVENT_ACTION_CANCEL ? 1 : 2, AMotionEvent_getPointerId(e, i),
+                                  AMotionEvent_getX(e, i), AMotionEvent_getY(e, i));
         }
+        return;
     }
-    for (i = 0; i < n; i++) {
-        Touch* t = touch_of(AMotionEvent_getPointerId(e, i));
-        if (!t) continue;
-        t->x = AMotionEvent_getX(e, i);
-        t->y = AMotionEvent_getY(e, i);
-    }
-    if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP) {
-        Touch* t = touch_of(AMotionEvent_getPointerId(e, p));
-        if (t) t->gone = 1;
-    }
+    if (kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN)
+        touch_down(AMotionEvent_getPointerId(e, p), AMotionEvent_getX(e, p), AMotionEvent_getY(e, p));
+    for (i = 0; i < n; i++) touch_move(AMotionEvent_getPointerId(e, i), AMotionEvent_getX(e, i), AMotionEvent_getY(e, i));
+    if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP) touch_up(AMotionEvent_getPointerId(e, p));
     if (kind == AMOTION_EVENT_ACTION_CANCEL) {
         for (i = 0; i < MAX_TOUCHES; i++) {
             if (sTouch[i].role != ROLE_FREE) sTouch[i].gone = 1;
@@ -349,7 +381,7 @@ static int read_pad(int chan, uint32_t* held) {
     uint32_t buttons, stick, pad;
     int w, h;
     if (chan != 0) return 0;
-    win_size(&w, &h);
+    game_screen_size(&w, &h);
     pthread_mutex_lock(&sLock);
     controller_state(&buttons, &stick);
     touches(w, h);
@@ -456,7 +488,7 @@ static void disc(float cx, float cy, float r, float ring, uint32_t c) {
     int x, y, x0 = (int)(cx - r - 1), x1 = (int)(cx + r + 1), y0 = (int)(cy - r - 1), y1 = (int)(cy + r + 1);
     for (y = y0 < 0 ? 0 : y0; y <= y1 && y < sH; y++) {
         for (x = x0 < 0 ? 0 : x0; x <= x1 && x < sW; x++) {
-            float d = hypotf(x + 0.5f - cx, y + 0.5f - cy), a = r - d + 0.5f;
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d = sqrtf(dx * dx + dy * dy), a = r - d + 0.5f;
             if (ring > 0 && d < r - ring) a = d - (r - ring) + 0.5f;
             if (a <= 0) continue;
             blend(&sPx[(size_t)y * sW + x], c, a > 1 ? 1 : a);

@@ -150,6 +150,7 @@ static void* check_thread(void* arg) {
 }
 
 void update_check(void) {
+    return; /* no releases of its own yet: the first game's would be offered */
     if (!g_settings.check_updates || sStarted || sState == UPDATE_CURRENT || sState == UPDATE_NEWER) return;
     sStarted = 1;
     sState = UPDATE_CHECKING;

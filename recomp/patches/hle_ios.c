@@ -15,11 +15,11 @@ enum { REQ_OPEN = 1, REQ_CLOSE, REQ_READ, REQ_WRITE, REQ_SEEK, REQ_IOCTL, REQ_IO
 #define IPC_ENOENT (-106)
 #define IPC_PENDING 0x7FFFFFFF /* internal: never completes (event hooks) */
 
-static const uint32_t kIosFree = 0x802420B0;   /* iosFree(hid, ptr) */
-static const uint32_t kIosHeapSda = 0xFFFFA79C; /* r13-relative: hid of the IPC heap */
+static const uint32_t kIosFree = A_iosFree;   /* iosFree(hid, ptr) */
+static const uint32_t kIosHeapSda = A_IOS_HEAP_SDA; /* r13-relative: hid of the IPC heap */
 
-/* Title ID of PokePark Wii (USA): 00010000-R8AE. */
-static const uint32_t kTitleHi = 0x00010000, kTitleLo = 0x52384145;
+/* Title ID: 00010000-<first four letters of the game ID>. */
+static const uint32_t kTitleHi = 0x00010000, kTitleLo = GAME_TITLE_LO;
 
 /* NAND files (hle_nand.c). */
 FILE* hle_nand_open(const char* nand, int mode, int32_t* err);
@@ -159,7 +159,7 @@ static int32_t ios_ioctlv(uint32_t req, const char* dev) {
             }
             break;
         case 29: { /* GetDataDir */
-            static const char kDir[] = "/title/00010000/52384145/data";
+            static const char kDir[] = "/title/00010000/" GAME_TITLE_LO_STR "/data";
             if (nout >= 1) {
                 memcpy(MA(VEC_BASE(nin)), kDir, sizeof(kDir));
                 return IPC_OK;
@@ -236,7 +236,7 @@ static void free_request(ppc_t* c, uint32_t req) {
 /* s32 __ios_Ipc2(IPCRequestEx* req, IPCAsyncCallback cb): sends a
  * request. Without a callback it waits and returns the result; with one
  * it returns 0 and the callback gets (result, callbackArg) later. */
-void f_802408F0(ppc_t* c) {
+void F___ios_Ipc2(ppc_t* c) {
     uint32_t req = c->r[3], cb = c->r[4];
     int32_t ret;
     if (!req) {

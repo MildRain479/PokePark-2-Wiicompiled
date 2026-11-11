@@ -14,7 +14,12 @@ float bits(float v, int n) {
 }
 
 void main() {
-    vec4 c = texture(textures[q.tex], v_uv);
+    // Only the EFB's pixels wholly inside the rectangle are read: at a scale
+    // that isn't whole, filtering at its edges would take in the pixels past
+    // them, which a copy of part of the EFB (the glow's) must not show.
+    vec2 ts = vec2(textureSize(textures[q.tex], 0));
+    vec2 lo = (ceil(q.src.xy * ts - 0.01) + 0.5) / ts, hi = (floor(q.src.zw * ts + 0.01) - 0.5) / ts;
+    vec4 c = texture(textures[q.tex], clamp(v_uv, lo, max(lo, hi)));
     int f = q.mode.x;
     float i;
     if (q.mode.z == 0) c.a = 1.0;

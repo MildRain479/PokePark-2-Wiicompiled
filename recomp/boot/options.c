@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game.h"
 #include "host_input.h"
 #include "host_settings.h"
 
@@ -41,14 +42,17 @@ int gxb_display_hz(void);
 /* What's on it */
 
 #ifdef __ANDROID__
-/* No keyboard: its section isn't there. */
-enum { SEC_DISPLAY, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS, SEC_KEYBOARD = -1 };
-static const char* const kSection[SECTIONS] = {"Display", "Controller", "Gameplay"};
-static const int kSectionColor[SECTIONS] = {0, 2, 3}; /* which of the Pad's button colors */
+/* No keyboard: its section isn't there. Dual screen is, in its place,
+ * only on a handheld with two screens. */
+enum { SEC_DISPLAY, SEC_CONTROLLER, SEC_GAMEPLAY, SEC_DUAL, SECTIONS, SEC_KEYBOARD = -1 };
+static const char* const kSection[SECTIONS] = {"Display", "Controller", "Gameplay", "Dual screen"};
+static const int kSectionColor[SECTIONS] = {0, 2, 3, 1}; /* which of the Pad's button colors */
+static int sections(void) { return second_screen_device() ? SECTIONS : SEC_DUAL; }
 #else
-enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS };
+enum { SEC_DISPLAY, SEC_KEYBOARD, SEC_CONTROLLER, SEC_GAMEPLAY, SECTIONS, SEC_DUAL = -1 };
 static const char* const kSection[SECTIONS] = {"Display", "Keyboard", "Controller", "Gameplay"};
 static const int kSectionColor[SECTIONS] = {0, 1, 2, 3};
+static int sections(void) { return SECTIONS; }
 #endif
 
 /* A row: a setting (settings_step), a binding (an action), resetting the
@@ -68,6 +72,7 @@ static const Row kDisplay[] = {
     {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
     {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
+    {ROW_SETTING, SET_MOVIES, "Movies"},
 #ifndef __ANDROID__
     {ROW_SETTING, SET_RENDERER, "Renderer"},
 #endif
@@ -82,8 +87,13 @@ static const Row kGameplay[] = {
     {ROW_SETTING, SET_DAMAGE_TAKEN, "Damage taken"},
     {ROW_SETTING, SET_CHASE_SPEED, "Chase speed"},
 };
+static const Row kDual[] = {
+    {ROW_SETTING, SET_DUAL_SCREEN, "Dual screen"},
+    {ROW_SETTING, SET_SWAP_SCREENS, "Swap screens"},
+    {ROW_SETTING, SET_MINIMAP_TOP, "Map on main"},
+};
 static const char* const kAction[ACT_COUNT] = {
-    "Up", "Down", "Left", "Right", "2: Jump", "1: Dash", "A: Thunderbolt", "B: Camera", "+: Pad", "-: Map", "HOME",
+    "Up", "Down", "Left", "Right", "2: Jump", "1: Dash", "A: Call", "B: Look", "+: Pad", "-: Photos", "HOME",
     "Shake", "Shake 2",
 };
 
@@ -98,6 +108,7 @@ static const char* const kAction[ACT_COUNT] = {
 static int row_count(int sec) {
     return sec == SEC_DISPLAY    ? (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))
            : sec == SEC_GAMEPLAY ? (int)(sizeof(kGameplay) / sizeof(kGameplay[0]))
+           : sec == SEC_DUAL     ? (int)(sizeof(kDual) / sizeof(kDual[0]))
            : sec == SEC_KEYBOARD ? ACT_COUNT + 3 /* camera speed, invert, reset */
                                  : TOUCH_ROW + ACT_COUNT + 2; /* (touch controls,) rumble, reset */
 }
@@ -106,6 +117,7 @@ static Row row_at(int sec, int i) {
     Row r = {ROW_RESET, 0, "Reset all controls"};
     if (sec == SEC_DISPLAY) return kDisplay[i];
     if (sec == SEC_GAMEPLAY) return kGameplay[i];
+    if (sec == SEC_DUAL) return kDual[i];
     if (TOUCH_ROW && sec == SEC_CONTROLLER && i-- == 0) {
         r.kind = ROW_SETTING;
         r.which = SET_TOUCH;
@@ -150,7 +162,15 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_SENSITIVITY: snprintf(out, n, "%.1f", g_settings.mouse_sensitivity); break;
     case SET_INVERT: snprintf(out, n, g_settings.invert_tilt ? "On" : "Off"); break;
     case SET_TOUCH: snprintf(out, n, g_settings.touch_controls ? "On" : "Off"); break;
+    case SET_MINIMAP_TOP: snprintf(out, n, g_settings.minimap_top ? "On" : "Off"); break;
+    case SET_DUAL_SCREEN: snprintf(out, n, g_settings.dual_screen ? "On" : "Off"); break;
+    case SET_SWAP_SCREENS: snprintf(out, n, g_settings.swap_screens ? "On" : "Off"); break;
     case SET_ANISO: snprintf(out, n, g_settings.aniso == 1 ? "Original" : "%dx", g_settings.aniso); break;
+    case SET_MOVIES: {
+        static const char* const kMovies[3] = {"Original", "Sharpened", "AI upscaled"};
+        snprintf(out, n, "%s", kMovies[g_settings.movie_upscale % 3]);
+        break;
+    }
     case SET_RENDERER:
         snprintf(out, n, "%s%s", g_settings.renderer == RENDERER_VULKAN ? "Vulkan" : "OpenGL",
                  g_settings.renderer != display_renderer() ? " (restart)" : "");
@@ -233,7 +253,7 @@ static void show_row(void) {
 
 static void up_down(int d) {
     if (!sOnRows) {
-        sSection = (sSection + d + SECTIONS) % SECTIONS;
+        sSection = (sSection + d + sections()) % sections();
         sRow = sTop = sSlot = 0;
     } else {
         sRow = (sRow + d + row_count(sSection)) % row_count(sSection);
@@ -325,15 +345,17 @@ typedef struct {
     float x0, y0, x1, y1;
 } Rect;
 
-static const Rect kTab = {810, 46, 1046, 120};            /* the other tab, at the right page's top */
-static const Rect kButton[4] = {
-    {333, 150, 748, 230}, {320, 262, 737, 342}, {328, 374, 746, 454}, {328, 487, 746, 562}};
-static const Rect kPage = {845, 40, 1325, 765};           /* the right page's writing */
-#define ROWS_TOP 140.0f
-#define ROW_PITCH 72.0f
-#define ROW_HEIGHT 60.0f
-#define BAR_TOP 771.0f /* the game's button bar, left clear */
-#define BAR_BOTTOM 859.0f
+/* Its Pad, from its layouts (below, draw_pages). */
+static const Rect kTab = {960, 38, 1262, 100}; /* the other tab, over the right page's top */
+/* the sections' buttons' frames (MnPsTop's Frame0n, at LX, LY below) */
+static const Rect kButton[4] = {{330.6f, 167.2f, 747.8f, 250.8f},
+                                {349.0f, 269.8f, 766.2f, 353.4f},
+                                {330.6f, 374.3f, 747.8f, 457.9f},
+                                {349.0f, 476.9f, 766.2f, 560.5f}};
+static const Rect kPage = {846, 110, 1300, 800}; /* the right page's writing */
+#define ROWS_TOP 236.0f
+#define ROW_PITCH 64.0f
+#define ROW_HEIGHT 54.0f
 
 static float sScale, sOffX, sOffY;
 
@@ -346,7 +368,7 @@ static Rect row_rect(int visible) {
 }
 
 /* Where a binding row's slot k is centred. */
-static float slot_x(int k) { return k ? 1262.0f : 1140.0f; }
+static float slot_x(int k) { return k ? 1238.0f : 1122.0f; }
 
 /* ------------------------------------------------------------------------ */
 /* Drawing: an image, top row first, 0xAARRGGBB, not premultiplied */
@@ -424,29 +446,59 @@ static void draw_picture(const char* name, const char* alpha, Rect src, Rect dst
     draw_image(img, w, h, src, dst, tint, 0);
 }
 
-/* A rounded box of colour c (0xAARRGGBB), its edge softened. */
-static void draw_box(Rect r, float radius, uint32_t c) {
-    float rx0 = X(r.x0), ry0 = Y(r.y0), rx1 = X(r.x1), ry1 = Y(r.y1), rad = radius * sScale;
-    int x, y;
-    for (y = (int)ry0 < 0 ? 0 : (int)ry0; y < (int)ceilf(ry1) && y < sH; y++) {
-        for (x = (int)rx0 < 0 ? 0 : (int)rx0; x < (int)ceilf(rx1) && x < sW; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            float cx = px < rx0 + rad ? rx0 + rad : px > rx1 - rad ? rx1 - rad : px;
-            float cy = py < ry0 + rad ? ry0 + rad : py > ry1 - rad ? ry1 - rad : py;
-            float d = sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy)) - rad;
-            float a = d < -1.5f ? 1.0f : d > 0 ? 0.0f : -d / 1.5f;
-            if (a > 0) blend(&sPx[y * sW + x], c, a);
+/* How far window pixel (px, py) is outside rounded box r (negative
+ * inside), and (qx, qy), how far past its straight part on each axis. */
+static float box_distance(Rect r, float radius, float px, float py, float* qx, float* qy) {
+    float rad = radius * sScale, hx = (X(r.x1) - X(r.x0)) / 2, hy = (Y(r.y1) - Y(r.y0)) / 2;
+    float ax, ay;
+    if (rad > hx) rad = hx;
+    if (rad > hy) rad = hy;
+    *qx = fabsf(px - (X(r.x0) + hx)) - (hx - rad);
+    *qy = fabsf(py - (Y(r.y0) + hy)) - (hy - rad);
+    ax = *qx > 0 ? *qx : 0;
+    ay = *qy > 0 ? *qy : 0;
+    return sqrtf(ax * ax + ay * ay) + (*qx > *qy ? (*qx < 0 ? *qx : 0) : (*qy < 0 ? *qy : 0)) - rad;
+}
+
+/* A rounded box shaded from c0 to c1 (0xAARRGGBB), top to bottom or, if
+ * across, left to right; its edge softened. */
+static void draw_box_shaded(Rect r, float radius, uint32_t c0, uint32_t c1, int across) {
+    int x, y, k;
+    for (y = (int)Y(r.y0) < 0 ? 0 : (int)Y(r.y0); y < (int)ceilf(Y(r.y1)) && y < sH; y++) {
+        for (x = (int)X(r.x0) < 0 ? 0 : (int)X(r.x0); x < (int)ceilf(X(r.x1)) && x < sW; x++) {
+            float qx, qy, d = box_distance(r, radius, x + 0.5f, y + 0.5f, &qx, &qy);
+            float a = d < -1.5f ? 1.0f : d > 0 ? 0.0f : -d / 1.5f, t;
+            uint32_t c = c0;
+            if (a <= 0) continue;
+            if (c1 != c0) {
+                t = across ? (x + 0.5f - X(r.x0)) / (X(r.x1) - X(r.x0)) : (y + 0.5f - Y(r.y0)) / (Y(r.y1) - Y(r.y0));
+                c = 0;
+                for (k = 0; k < 32; k += 8)
+                    c |= (uint32_t)((c0 >> k & 255) + ((float)(c1 >> k & 255) - (c0 >> k & 255)) * t + 0.5f) << k;
+            }
+            blend(&sPx[y * sW + x], c, a);
         }
     }
 }
 
-/* A triangle pointing up or down (dir 1, -1), centred at (cx, cy). */
+/* A rounded box of colour c (0xAARRGGBB), its edge softened. */
+static void draw_box(Rect r, float radius, uint32_t c) { draw_box_shaded(r, radius, c, c, 0); }
+
+/* A triangle pointing up or down (dir 1, -1), or left or right (-2, 2),
+ * centred at (cx, cy). */
 static void draw_triangle(float cx, float cy, float size, int dir, uint32_t c) {
     int x, y;
     for (y = (int)Y(cy - size); y < (int)Y(cy + size) + 1; y++) {
         for (x = (int)X(cx - size); x < (int)X(cx + size) + 1; x++) {
-            float u = ((x + 0.5f) - X(cx)) / (size * sScale), v = ((y + 0.5f) - Y(cy)) / (size * sScale) * dir;
+            float u = ((x + 0.5f) - X(cx)) / (size * sScale), v = ((y + 0.5f) - Y(cy)) / (size * sScale), t;
             if (x < 0 || y < 0 || x >= sW || y >= sH) continue;
+            if (dir == 2 || dir == -2) {
+                t = u;
+                u = v;
+                v = -t * dir / 2;
+            } else {
+                v *= dir;
+            }
             if (v >= -0.6f && v <= 0.6f && fabsf(u) <= (v + 0.6f) / 1.2f) blend(&sPx[y * sW + x], c, 1.0f);
         }
     }
@@ -594,128 +646,337 @@ static int draw_button_icon(uint32_t button, Rect dst, uint32_t edge) {
     return 1;
 }
 
-/* Beside the save file screen's Arcade plank, a plank like it: Options,
+/* The book as the Pad is: its pieces are its layouts' (MnPsBook, MnPsTop,
+ * MnPsCaption in Archive/MenuField.dac), drawn from their textures
+ * (hle_pad_art.c) where the layouts put them. Layout units are 878 x 480,
+ * y up, about the picture's middle; the Pad sits ~5 units left of it. */
+#define LX(x) (801.3f + (x) * 1.846f)
+#define LY(y) (456.0f - (y) * 1.9f)
+#define LW(w) ((w) * 1.846f)
+#define LH(h) ((h) * 1.9f)
+
+#define WORDS 0xFF645032u      /* a button's words: the layout's (100, 80, 50) */
+#define WORDS_SOFT 0xFF9A8470u
+#define RED 0xFFE02818u
+#define BUTTON_MINT 0xFF8CFFB4u   /* Bg0n's colour */
+#define BUTTON_ORANGE 0xFFFF8C19u /* the cursor's (CursorOnColor: green 128-190) */
+#define ROW_TAN 0xFFE6C8AAu       /* the counts' bars (CountBgKado's colour) */
+
+static const Rect kLeftPage = {LX(-316), LY(200), LX(-16), LY(-200)}, kRightPage = {LX(16), LY(200), LX(316), LY(-200)};
+
+/* Beside the save file screen's buttons, one like the Pad's: Options,
  * with the icon of what opens it (the - button's key). */
-static const Rect kFileButton = {1332, 655, 1602, 748}; /* as tall as Arcade's */
+#ifdef __ANDROID__
+static const Rect kFileButton = {1332, 60, 1602, 153}; /* clear of the touch buttons, at the bottom right */
+#else
+static const Rect kFileButton = {1332, 655, 1602, 748};
+#endif
+
+/* Texture img (w x h) on the parallelogram from (ox, oy) along (ax, ay)
+ * for its width and (bx, by) for its height, in picture units; us and vs
+ * times across it (over 1 repeats it), clamped at its edges if clamp. A
+ * texel is coloured from c0 where it's black to c1 where it's white (a
+ * layout material's two colours: 0xFF000000 and 0xFFFFFFFF leave it be),
+ * its alpha times c1's. */
+static void draw_quad(const uint32_t* img, int w, int h, float ox, float oy, float ax, float ay, float bx, float by,
+                      float us, float vs, int clamp, uint32_t c0, uint32_t c1) {
+    float px[4] = {X(ox), X(ox + ax), X(ox + bx), X(ox + ax + bx)}, py[4] = {Y(oy), Y(oy + ay), Y(oy + by), Y(oy + ay + by)};
+    float wax = ax * sScale, way = ay * sScale, wbx = bx * sScale, wby = by * sScale, det = wax * wby - way * wbx;
+    float minx = px[0], maxx = px[0], miny = py[0], maxy = py[0];
+    int i, x, y, k;
+    if (!img || fabsf(det) < 1e-6f) return;
+    for (i = 1; i < 4; i++) {
+        minx = px[i] < minx ? px[i] : minx;
+        maxx = px[i] > maxx ? px[i] : maxx;
+        miny = py[i] < miny ? py[i] : miny;
+        maxy = py[i] > maxy ? py[i] : maxy;
+    }
+    for (y = miny < 0 ? 0 : (int)miny; y < (int)ceilf(maxy) && y < sH; y++) {
+        for (x = minx < 0 ? 0 : (int)minx; x < (int)ceilf(maxx) && x < sW; x++) {
+            float dx = x + 0.5f - px[0], dy = y + 0.5f - py[0];
+            float u = (dx * wby - dy * wbx) / det, v = (wax * dy - way * dx) / det, tu, tv;
+            uint32_t c, o;
+            if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+            tu = u * us;
+            tv = v * vs;
+            if (clamp) {
+                tu = tu > 1 ? 1 : tu;
+                tv = tv > 1 ? 1 : tv;
+            } else {
+                tu -= floorf(tu);
+                tv -= floorf(tv);
+            }
+            c = sample(img, w, h, tu * w, tv * h);
+            if (!(c >> 24)) continue;
+            o = (uint32_t)((c >> 24) * (c1 >> 24) / 255) << 24;
+            for (k = 0; k < 24; k += 8) {
+                int a = c0 >> k & 255, b = c1 >> k & 255;
+                o |= (uint32_t)(a + (b - a) * (int)(c >> k & 255) / 255) << k;
+            }
+            blend(&sPx[y * sW + x], o, 1.0f);
+        }
+    }
+}
+
+/* A picture pane: texture name, w x h layout units, its position (x, y)
+ * at its origin (0-8: left/centre/right of top/middle/bottom), rotated
+ * deg anticlockwise and scaled (sx, sy, negative flips it) about it. */
+static void draw_pane(const char* name, float x, float y, float w, float h, int origin, float deg, float sx, float sy,
+                      float us, float vs, uint32_t c0, uint32_t c1) {
+    int tw, th;
+    const uint32_t* img = hle_pause_image(name, NULL, &tw, &th);
+    float l = -(origin % 3) * w / 2, t = (origin / 3) * h / 2, r = (float)(deg * 3.14159265 / 180), cs = cosf(r), sn = sinf(r);
+    /* corners in layout units: top-left, and the top and left edges */
+    float ox = l * sx, oy = t * sy, axl = w * sx, byl = -h * sy;
+    float Ox = x + ox * cs - oy * sn, Oy = y + ox * sn + oy * cs;
+    float Ax = axl * cs, Ay = axl * sn, Bx = -byl * sn, By = byl * cs;
+    if (!img) return;
+    draw_quad(img, tw, th, LX(Ox), LY(Oy), LW(Ax), -LH(Ay), LW(Bx), -LH(By), us, vs, 0, c0, c1);
+}
+
+#define PLAIN 0xFF000000u, 0xFFFFFFFFu
+
+/* A window pane of four frames (nw4r::lyt::Window): from (x0, y0) to
+ * (x1, y1), y up, mirrored left to right if mirror. The top-left frame's
+ * texture runs along the top, the top-right's down the right, the
+ * bottom-left's up the left and the bottom-right's along the bottom, each
+ * from its rect's top-left, clamped past its size; flip, the layout's: 0
+ * none, 1 across, 2 up and down, 4 both. The content fills between. */
+static void draw_window(float x0, float y0, float x1, float y1, int mirror, const char* content, const char* const frame[4],
+                        const int flip[4]) {
+    int i, fw[4], fh[4], cw, ch;
+    const uint32_t* img[4];
+    const uint32_t* fill = hle_pause_image(content, NULL, &cw, &ch);
+    for (i = 0; i < 4; i++) {
+        img[i] = hle_pause_image(frame[i], NULL, &fw[i], &fh[i]);
+        if (!img[i]) return;
+    }
+    if (fill) {
+        float l = x0 + fw[2], r = x1 - fw[1], t = y0 - fh[0], b = y1 + fh[3];
+        if (mirror) {
+            float m = l;
+            l = x0 + x1 - r;
+            r = x0 + x1 - m;
+        }
+        draw_quad(fill, cw, ch, LX(l), LY(t), LW(r - l), 0, 0, LH(t - b), 1, 1, 1, PLAIN);
+    }
+    for (i = 0; i < 4; i++) {
+        /* the frame's rect, its texture's corner at (cx, cy) */
+        float rx0, ry0, rx1, ry1, cx, cy, ax, ay, bx, by, w, h;
+        int fx, fy;
+        switch (i) {
+        case 0: rx0 = x0; rx1 = x1 - fw[1]; ry0 = y0; ry1 = y0 - fh[0]; break;           /* top */
+        case 1: rx0 = x1 - fw[1]; rx1 = x1; ry0 = y0; ry1 = y1 + fh[3]; break;           /* right */
+        case 2: rx0 = x0; rx1 = x0 + fw[2]; ry0 = y0 - fh[0]; ry1 = y1; break;           /* left */
+        default: rx0 = x0 + fw[2]; rx1 = x1; ry0 = y1 + fh[3]; ry1 = y1; break;          /* bottom */
+        }
+        /* the texture from the rect's top-left, from its right if flipped
+         * across, from its bottom if flipped up and down */
+        fx = flip[i] == 1 || flip[i] == 4;
+        fy = flip[i] == 2 || flip[i] == 4;
+        if (mirror) {
+            float m = rx0;
+            rx0 = x0 + x1 - rx1;
+            rx1 = x0 + x1 - m;
+            fx ^= 1;
+        }
+        w = rx1 - rx0;
+        h = ry0 - ry1;
+        cx = fx ? rx1 : rx0;
+        cy = fy ? ry1 : ry0;
+        ax = fx ? -w : w;
+        ay = 0;
+        bx = 0;
+        by = fy ? h : -h;
+        draw_quad(img[i], fw[i], fh[i], LX(cx), LY(cy), LW(ax), -LH(ay), LW(bx), -LH(by), w / fw[i], h / fh[i], 1,
+                  PLAIN);
+    }
+}
+
+/* The Pad's caption: its dark green line with the leaves about it, and
+ * name on it, the line's left end at (x, y), k its size. */
+static void draw_caption(const char* name, float x, float y, float k, int leaves) {
+    if (leaves) {
+        draw_pane("PauseCaptionLeaf", x + 5 * k, y - 17 * k, 78 * k, 128 * k, 7, 30, 0.6f, 0.6f, 1, 1, 0xFF96460Au, 0xFFF0E60Au);
+        draw_pane("PauseCaptionLeaf", x + 1 * k, y - 14 * k, 78 * k, 128 * k, 7, 60, 0.8f, 0.8f, 1, 1, 0xFF0A6414u, 0xFF96E628u);
+    }
+    draw_pane("PauseCaptionLine", x, y, 210 * k, 26 * k, 3, 0, 1, 1, 1, 1, PLAIN);
+    if (leaves)
+        draw_pane("PauseCaptionLeaf", x + 198 * k, y - 16 * k, 78 * k, 128 * k, 7, -40, 0.5f, 0.5f, 1, 1, 0xFF0A823Cu,
+                  0xFFD2DC14u);
+    draw_text(name, LX(x + 105 * k), LY(y) + 1, LH(21 * k), ALIGN_CENTRE, 0xFFF4F4E8u, 0, 0, 1, LW(180 * k));
+}
+
+/* A button as the Pad's: a rounded bar of colour c, shaded to yellow
+ * across (Grad: (255, 255, 85), 0 to 140 alpha), its icon and words; from
+ * layout x at y, 220 x 40. */
+static void draw_button(float x, float y, uint32_t c, const char* icon, const char* words, int lit) {
+    Rect bar = {LX(x), LY(y + 19), LX(x + 220), LY(y - 19)};
+    Rect grad = {LX(x + 7), LY(y + 19), LX(x + 217), LY(y - 19)};
+    draw_box(bar, 12, c);
+    draw_box_shaded(grad, 12, 0x00FFFF55u, 0x8CFFFF55u, 1);
+    if (icon) draw_pane(icon, x + 23, y, 32, 32, 4, 0, 1, 1, 1, 1, PLAIN);
+    if (lit) draw_text(words, LX(x + 42), LY(y) + 2, LH(24), ALIGN_LEFT, 0xFFFFFFFFu, 0xFFB04A10u, 3.0f, 1, LW(165));
+    else draw_text(words, LX(x + 42), LY(y) + 2, LH(24), ALIGN_LEFT, WORDS, 0xFFF4FFF0u, 2.0f, 1, LW(165));
+}
+
+/* The stitched frame over a button (Frame0n), open on its left, from
+ * layout x at y, 226 x 44: the band's open end (PauseTopListBg01), the
+ * band (Bg02, seamless) and its corner (Bg00), each in the top half of
+ * its tile, drawn F units square, as thick as the Pad shows them. */
+static void draw_button_frame(float x, float y) {
+    const float F = 11;
+    float t = y + 22, b = y - 22, r = x + 226, run = r - x - 2 * F, side = t - b - 2 * F;
+    int k;
+    for (k = 0; k < 2; k++) { /* along the top, and flipped along the bottom */
+        float at = k ? b : t, sy = k ? -1.0f : 1.0f;
+        draw_pane("PauseTopListBg01", x, at, F, F, 0, 0, 1, sy, 1, 1, PLAIN);
+        draw_pane("PauseTopListBg02", x + F, at, run, F, 0, 0, 1, sy, run / F, 1, PLAIN);
+        draw_pane("PauseTopListBg00", r - F, at, F, F, 0, 0, 1, sy, 1, 1, PLAIN);
+    }
+    draw_pane("PauseTopListBg02", r, t - F, side, F, 0, -90, 1, 1, side / F, 1, PLAIN); /* down the right */
+}
 
 static void draw_file_button(void) {
-    /* The plank in three: its ends, and a piece of its middle stretched,
-     * past the Pikachu at its right. */
-    static const Rect kLeft = {2, 5, 70, 58}, kMiddle = {100, 5, 140, 58}, kRight = {200, 5, 256, 58};
-    float k = (kFileButton.y1 - kFileButton.y0) / (kLeft.y1 - kLeft.y0);
-    float lx = kFileButton.x0 + (kLeft.x1 - kLeft.x0) * k, rx = kFileButton.x1 - (kRight.x1 - kRight.x0) * k;
-    Rect l = {kFileButton.x0, kFileButton.y0, lx, kFileButton.y1}, m = {lx, kFileButton.y0, rx, kFileButton.y1};
-    Rect r = {rx, kFileButton.y0, kFileButton.x1, kFileButton.y1};
-    Rect icon = {kFileButton.x0 + 18, 676, kFileButton.x0 + 70, 728};
+    float x = (kFileButton.x0 - 801.3f) / 1.846f + 6, y = (456.0f - (kFileButton.y0 + kFileButton.y1) / 2) / 1.9f;
+    Rect icon = {kFileButton.x0 + 22, kFileButton.y0 + 21, kFileButton.x0 + 74, kFileButton.y0 + 73};
     int hasIcon;
-    draw_picture("MaAtMenu", NULL, kLeft, l, 0xFFFFFF);
-    draw_picture("MaAtMenu", NULL, kMiddle, m, 0xFFFFFF);
-    draw_picture("MaAtMenu", NULL, kRight, r, 0xFFFFFF);
-    hasIcon = draw_button_icon(HOST_PAD_MINUS, icon, 0xFF7A2020u);
-    draw_text("Options", hasIcon ? (icon.x1 + kFileButton.x1) / 2 : (kFileButton.x0 + kFileButton.x1) / 2, 703, 56,
-              ALIGN_CENTRE, 0xFFFFFFFFu, 0xFF7A2020u, 4.0f, 1, hasIcon ? 175 : 220);
+    draw_box(kFileButton, 18, 0xFFFFFFFFu);
+    {
+        Rect in = {kFileButton.x0 + 5, kFileButton.y0 + 5, kFileButton.x1 - 5, kFileButton.y1 - 5};
+        draw_box(in, 14, BUTTON_MINT);
+        draw_box_shaded(in, 14, 0x00FFFF55u, 0x8CFFFF55u, 1);
+    }
+    (void)x;
+    (void)y;
+    hasIcon = draw_button_icon(HOST_PAD_MINUS, icon, 0xFF645032u);
+    draw_text("Options", hasIcon ? (icon.x1 + kFileButton.x1) / 2 : (kFileButton.x0 + kFileButton.x1) / 2,
+              kFileButton.y0 + 48, 52, ALIGN_CENTRE, WORDS, 0xFFF4FFF0u, 3.0f, 1, hasIcon ? 170 : 220);
     /* Over it, a newer release's news (Options' Updates row opens its page). */
     if (update_state() == UPDATE_NEWER) {
         char news[64];
         snprintf(news, sizeof(news), "Update: %s", update_tag());
-        draw_text(news, (kFileButton.x0 + kFileButton.x1) / 2, 632, 40, ALIGN_CENTRE, 0xFFFFFFFFu, 0xFF7A2020u, 3.0f,
-                  1, kFileButton.x1 - kFileButton.x0);
+        draw_text(news, (kFileButton.x0 + kFileButton.x1) / 2, kFileButton.y0 - 23, 40, ALIGN_CENTRE, 0xFFFFFFFFu,
+                  0xFF2E6A1Eu, 3.0f, 1, kFileButton.x1 - kFileButton.x0);
     }
 }
 
-/* The other tab: a piece of the title strip, a little darker, with an
- * arrowhead pointing the way to it. */
+/* The other tab: a caption line, with an arrowhead pointing the way. */
 static void draw_tab(const char* name, int right) {
-    static const Rect kStrip = {40, 18, 270, 72}, kArrow = {3, 8, 28, 54};
-    int w, h;
-    const uint32_t* arrow;
-    draw_picture("PmPocketbookL01", "PmPocketbookL01A", kStrip, kTab, 0xD8D0C0);
-    draw_text(name, (kTab.x0 + kTab.x1) / 2 + (right ? -14 : 14), (kTab.y0 + kTab.y1) / 2 + 2, 38, ALIGN_CENTRE,
-              BROWN, 0, 0, 1, kTab.x1 - kTab.x0 - 70);
-    arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &w, &h);
-    {
-        Rect d = {right ? kTab.x1 - 34 : kTab.x0 + 14, kTab.y0 + 20, right ? kTab.x1 - 14 : kTab.x0 + 34, kTab.y1 - 16};
-        draw_image(arrow, w, h, kArrow, d, 0xFFFFFF, right);
-    }
+    float x = (kTab.x0 - 801.3f) / 1.846f, y = (456.0f - (kTab.y0 + kTab.y1) / 2) / 1.9f;
+    float k = (kTab.x1 - kTab.x0) / 1.846f / 210;
+    draw_pane("PauseCaptionLine", x, y, 210 * k, 26 * k * 1.25f, 3, 0, 1, 1, 1, 1, PLAIN);
+    draw_text(name, (kTab.x0 + kTab.x1) / 2 + (right ? -12 : 12), (kTab.y0 + kTab.y1) / 2 + 2, 36, ALIGN_CENTRE,
+              0xFFF4F4E8u, 0, 0, 1, kTab.x1 - kTab.x0 - 80);
+    draw_triangle(right ? kTab.x1 - 26 : kTab.x0 + 26, (kTab.y0 + kTab.y1) / 2, 11, right ? 2 : -2, 0xFFF4F4E8u);
 }
 
-/* What doesn't change: the pages, the title and the other tab. */
-/* The left page reaches under the right one: from the save file screen
- * there's no Pad beneath to fill the spine between them. */
-static const Rect kRightPage = {774, 7, 1499, 893}, kLeftPage = {205, 9, 840, 897};
-static const Rect kLeaves = {1, 4, 63, 232}, kLeavesAt = {1342, 46, 1466, 504};
+/* The book (MnPsBook, its SRT at (16, 0)) and the right page's paper
+ * (MnPsTop's PageBgR). */
+static void draw_book_pages(void) {
+    static const char* const kPage4[4] = {"PauseTopBookBg00", "PauseTopBookBg01", "PauseTopBookBg00", "PauseTopBookBg01"};
+    static const int kPageFlip[4] = {0, 0, 2, 2};
+    static const char* const kNaka4[4] = {"PauseTopBookBg04", "PauseTopBookBg04", "PauseTopBookBg03", "PauseTopBookBg04"};
+    static const int kNakaFlip[4] = {0, 0, 2, 2};
+    static const char* const kSpine4[4] = {"PauseTopBookBg06", "PauseTopBookBg06", "PauseTopBookBg06", "PauseTopBookBg06"};
+    static const char* const kSpineNaka4[4] = {"PauseTopBookBg09", "PauseTopBookBg09", "PauseTopBookBg09", "PauseTopBookBg09"};
+    static const int kSpineFlip[4] = {0, 1, 2, 4};
+    int side;
+    /* The right page (mirrored), with its seams and corners and leaves. */
+    draw_window(16, 200, 316, -200, 1, "PauseTopBookBg02", kPage4, kPageFlip);
+    draw_window(16, 193, 310, -193, 1, "PauseTopBookBg05", kNaka4, kNakaFlip);
+    draw_pane("PauseTopBg", 0, 0, 294, 361, 3, 0, 1, 1, 1, 1, PLAIN); /* the paper, as MnPsTop has it */
+    draw_pane("PauseTopBookKanagu", 290, 174, 60, 60, 4, 0, -1, 1, 1, 1, PLAIN);
+    draw_pane("PauseTopBookKanagu", 290, -173, 60, 60, 4, 0, -1, -1, 1, 1, PLAIN);
+    draw_pane("PauseTopObj00", 335, 80, 90, 222, 4, 0, 1, 1, 1, 1, PLAIN);
+    /* The spine, and the left page. */
+    draw_window(-16, 200, 16, -200, 0, "PauseTopBookBg08", kSpine4, kSpineFlip);
+    draw_window(-16, 193, 16, -193, 0, "PauseTopBookBg11", kSpineNaka4, kSpineFlip);
+    draw_window(-316, 200, -16, -200, 0, "PauseTopBookBg02", kPage4, kPageFlip);
+    draw_window(-310, 193, -16, -193, 0, "PauseTopBookBg05", kNaka4, kNakaFlip);
+    for (side = 0; side < 2; side++) { /* the seams: top, outer edge, bottom */
+        float s = side ? 1.0f : -1.0f;
+        draw_pane("PauseTopBookNuime", s * 161, 182, 16, 290, 4, 90, 1, 1, 1, 290 / 16.0f, PLAIN);
+        draw_pane("PauseTopBookNuime", s * (side ? 297 : 298), -5, 16, 380, 4, 0, 1, 1, 1, 380 / 16.0f, PLAIN);
+        draw_pane("PauseTopBookNuime", s * 161, -183, 16, 290, 4, 90, 1, 1, 1, 290 / 16.0f, PLAIN);
+    }
+    draw_pane("PauseTopBookBg12", -272, -2, 32, 340, 4, 0, 1, 1, 1, 5, PLAIN); /* footprints */
+    draw_pane("PauseTopBookKanagu", -290, 174, 60, 60, 4, 0, 1, 1, 1, 1, PLAIN);
+    draw_pane("PauseTopBookKanagu", -290, -173, 60, 60, 4, 0, 1, -1, 1, 1, PLAIN);
+}
 
+/* What doesn't change: the book, the caption and the other tab. */
 static void draw_pages(void) {
-    draw_picture("PmPocketbookR", "PmPocketbookRA", kWhole, kRightPage, 0xFFFFFF);
-    draw_picture("PmReaf01", "PmReaf01A", kLeaves, kLeavesAt, 0xFFFFFF);
+    draw_book_pages();
+    draw_caption("Options", -276, 186, 0.9f, 1);
     if (sFrom == FROM_PAD) draw_tab("Pok\xE9Park Pad", 0); /* the font's Latin-1 */
-    draw_picture("PmPocketbookL01", "PmPocketbookL01A", kWhole, kLeftPage, 0xFFFFFF);
-    draw_text("Options", 450, 104, 54, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
 }
 
 static void draw_book(void) {
-    static const Rect kPocket[4] = {{8, 13, 295, 104}, {21, 113, 303, 218}, {21, 113, 303, 218}, {27, 223, 297, 327}};
-    static const Rect kPocketAt[4] = {
-        {262, 230, 778, 394}, {272, 342, 780, 534}, {272, 454, 780, 646}, {290, 560, 780, 760}};
-    static const Rect kBlue[4] = {{8, 10, 120, 69}, {9, 90, 119, 145}, {8, 10, 120, 69}, {8, 170, 120, 229}};
-    static const Rect kArrow = {3, 8, 28, 54};
-    int i, n = row_count(sSection), aw, ah;
-    const uint32_t* arrow = hle_pause_image("PmArrowheadMat", "PmArrowheadMatAlp", &aw, &ah);
+    /* The sections' icons: the Pad's. */
+#ifdef __ANDROID__
+    static const char* const kIcon[SECTIONS] = {"PauseTopListIcon04", "PauseTopListIcon01", "PauseTopListIcon00"};
+#else
+    static const char* const kIcon[SECTIONS] = {"PauseTopListIcon04", "PauseTopListIcon06", "PauseTopListIcon01",
+                                                "PauseTopListIcon00"};
+#endif
+    static const float kListX[2] = {-238, -228}, kListY[4] = {130, 76, 21, -33};
+    int i, n = row_count(sSection);
     char buf[64];
 
-
-    /* The sections, as the Pad's buttons: each in its pocket, the chosen
-     * one orange. */
-    for (i = 0; i < SECTIONS; i++) {
-        Rect src = kBlue[kSectionColor[i]];
-        Rect at = kButton[i];
-        if (i == sSection) {
-            src.x0 += 128;
-            src.x1 += 128;
-        }
-        draw_picture("PmMenuButton", NULL, src, at, sOnRows && i == sSection ? 0xE8E0E0 : 0xFFFFFF);
-        draw_text(kSection[i], (at.x0 + at.x1) / 2 + 8, (at.y0 + at.y1) / 2 + 2, 60, ALIGN_CENTRE, 0xFFFFFFFFu, PURPLE,
-                  3.5f, 1, at.x1 - at.x0 - 60);
-        draw_picture("PmButtonPocket", NULL, kPocket[i], kPocketAt[i], 0xFFFFFF);
+    /* The sections, as the Pad's buttons (List0n, Frame0n): the chosen one
+     * orange and slid left out of its frame, paler while its settings are
+     * being chosen. */
+    for (i = 0; i < sections(); i++) {
+        int lit = i == sSection;
+        float x = kListX[i & 1] + (lit ? -40 : -14), y = kListY[i];
+        draw_button(x, y, lit ? (sOnRows ? 0xFFFFB45Au : BUTTON_ORANGE) : BUTTON_MINT, kIcon[i], kSection[i], lit);
+        draw_button_frame(kListX[i & 1] - 17, y);
     }
 
-    /* The section's settings, a bar each as the Pad's counts are shown. */
-    draw_text(kSection[sSection], 1192, 88, 52, ALIGN_CENTRE, BROWN, 0, 0, 1, 0);
+    /* The section's settings, as the Pad's counts are (CountBg0n). */
+    draw_caption(kSection[sSection], 37, 166, 0.95f, 0);
     if (sSection != SEC_DISPLAY && sSection != SEC_GAMEPLAY) {
-        draw_text("Slot 1", slot_x(0), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
-        draw_text("Slot 2", slot_x(1), 124, 24, ALIGN_CENTRE, 0xFF8A7458u, 0, 0, 0, 0);
+        draw_text("Slot 1", slot_x(0), 214, 24, ALIGN_CENTRE, WORDS_SOFT, 0, 0, 0, 0);
+        draw_text("Slot 2", slot_x(1), 214, 24, ALIGN_CENTRE, WORDS_SOFT, 0, 0, 0, 0);
     }
     for (i = sTop; i < n && i < sTop + VISIBLE_ROWS; i++) {
         Row r = row_at(sSection, i);
         Rect bar = row_rect(i - sTop);
         float my = (bar.y0 + bar.y1) / 2;
         int chosen = sOnRows && i == sRow;
-        draw_box(bar, 10, chosen ? 0xE0FFC070u : 0xB6CCBB99u);
-        draw_text(r.label, bar.x0 + 14, my + 2, r.kind == ROW_BINDING ? 40 : 42, ALIGN_LEFT, GREEN, CREAM, 2.0f, 1,
-                  r.kind == ROW_SETTING ? 215 : 210);
+        uint32_t fill = chosen ? 0xFFFFFFFFu : WORDS, edge = chosen ? 0xFFB04A10u : 0;
+        float outline = chosen ? 3.0f : 0;
+        if (chosen) {
+            draw_box(bar, 14, BUTTON_ORANGE);
+            draw_box_shaded(bar, 14, 0x00FFFF55u, 0x8CFFFF55u, 1);
+        } else {
+            draw_box(bar, 14, ROW_TAN);
+        }
+        draw_text(r.label, bar.x0 + 18, my + 2, r.kind == ROW_BINDING ? 36 : 38, ALIGN_LEFT, fill, edge, outline, 1,
+                  r.kind == ROW_SETTING ? 196 : 190);
         if (r.kind == ROW_SETTING) {
-            float cx = 1190;
+            float cx = 1180;
             setting_text(r.which, buf, sizeof(buf));
-            draw_text(buf, cx, my + 2, 40, ALIGN_CENTRE, INK, 0, 0, 1, 170);
+            draw_text(buf, cx, my + 2, 36, ALIGN_CENTRE, fill, edge, outline, 1, 180);
             if (chosen) {
-                Rect l = {cx - 112, my - 16, cx - 96, my + 16}, rr = {cx + 96, my - 16, cx + 112, my + 16};
-                draw_image(arrow, aw, ah, kArrow, l, 0xFFFFFF, 0);
-                draw_image(arrow, aw, ah, kArrow, rr, 0xFFFFFF, 1);
+                draw_triangle(cx - 104, my, 11, -2, RED);
+                draw_triangle(cx + 104, my, 11, 2, RED);
             }
         } else if (r.kind == ROW_CLOSE) {
-            if (close_armed()) draw_text("Again to close", 1190, my + 2, 34, ALIGN_CENTRE, WAIT, 0, 0, 1, 230);
+            if (close_armed()) draw_text("Again to close", 1180, my + 2, 34, ALIGN_CENTRE, RED, 0xFFFFFFFFu, 2.0f, 1, 220);
         } else if (r.kind == ROW_BINDING) {
             int k;
             for (k = 0; k < BIND_SLOTS; k++) {
                 float cx = slot_x(k);
-                int none;
-                if (chosen && k == sSlot) {
-                    Rect b = {cx - 58, bar.y0 + 7, cx + 58, bar.y1 - 7};
-                    draw_box(b, 8, 0xE6FFFFFFu);
+                int none, on = chosen && k == sSlot;
+                if (on) {
+                    Rect b = {cx - 54, bar.y0 + 7, cx + 54, bar.y1 - 7};
+                    draw_box(b, 8, 0xF0FFFFFFu);
                 }
-                if (chosen && k == sSlot && sCapture != CAPTURE_NONE) {
-                    draw_text(sCapture == CAPTURE_KEY ? "Press a key" : "Press a button", cx, my + 2, 30, ALIGN_CENTRE,
-                              WAIT, 0, 0, 1, 112);
+                if (on && sCapture != CAPTURE_NONE) {
+                    draw_text(sCapture == CAPTURE_KEY ? "Press a key" : "Press a button", cx, my + 2, 28, ALIGN_CENTRE,
+                              RED, 0, 0, 1, 104);
                     continue;
                 }
                 if (sSection == SEC_CONTROLLER) {
@@ -724,23 +985,26 @@ static void draw_book(void) {
                     settings_key_name(g_settings.key[r.which][k], buf, sizeof(buf));
                 }
                 none = !strcmp(buf, "-");
-                draw_text(buf, cx, my + 2, 34, ALIGN_CENTRE, none ? 0xFF9A8A70u : INK, 0, 0, !none, 112);
+                if (none) draw_text(buf, cx, my + 2, 32, ALIGN_CENTRE, WORDS_SOFT, 0, 0, 0, 104);
+                else if (chosen && !on) draw_text(buf, cx, my + 2, 32, ALIGN_CENTRE, fill, edge, outline, 1, 104);
+                else draw_text(buf, cx, my + 2, 32, ALIGN_CENTRE, WORDS, 0, 0, 1, 104);
             }
         }
     }
     /* More above or below. */
-    if (sTop > 0) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP - 8, 9, 1, PURPLE);
-    if (sTop + VISIBLE_ROWS < n) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP + VISIBLE_ROWS * ROW_PITCH - 4, 9, -1, PURPLE);
+    if (sTop > 0) draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP - 10, 9, 1, 0xFF8A6040u);
+    if (sTop + VISIBLE_ROWS < n)
+        draw_triangle((kPage.x0 + kPage.x1) / 2, ROWS_TOP + VISIBLE_ROWS * ROW_PITCH - 2, 9, -1, 0xFF8A6040u);
     /* What the keys do here, when it's not plain. */
     if (sOnRows && row_at(sSection, sRow).kind == ROW_SETTING && row_at(sSection, sRow).which == SET_UPDATES &&
         update_state() == UPDATE_NEWER) {
-        draw_text("Select: open its download page", (kPage.x0 + kPage.x1) / 2, 752, 28, ALIGN_CENTRE, 0xFF7A6448u, 0,
-                  0, 0, 0);
+        draw_text("Select: open its download page", (kPage.x0 + kPage.x1) / 2, 768, 26, ALIGN_CENTRE, WORDS_SOFT, 0, 0,
+                  0, 0);
     }
     if (sOnRows && row_at(sSection, sRow).kind == ROW_BINDING) {
         draw_text(sCapture != CAPTURE_NONE ? "Esc: cancel" : input_controller_last() ? "Select: rebind    Y: clear"
                                                                                    : "Select: rebind    Delete: clear",
-                  (kPage.x0 + kPage.x1) / 2, 752, 28, ALIGN_CENTRE, 0xFF7A6448u, 0, 0, 0, 0);
+                  (kPage.x0 + kPage.x1) / 2, 768, 26, ALIGN_CENTRE, WORDS_SOFT, 0, 0, 0, 0);
     }
 }
 
@@ -751,14 +1015,14 @@ unsigned options_draws(void) { return sDraws; }
 const uint32_t* options_draw(int w, int h) {
     static unsigned drawn = ~0u;
     static int drawnW, drawnH, drawnWhat, drawnUpdate, cw;
-    int what = sOpen ? 2 : hle_pause_main_page() ? 1 : hle_file_select_shown() ? 3 : 0, y;
+    int what = sOpen ? 2 : hle_pause_main_page() ? 1 : hle_file_select_shown() ? 3 : 0;
     if (sOpen && !shown(sFrom)) { /* what it was opened from went (the scene changed) */
         set_open(0);
         what = 0;
     }
-    if (!what || w <= 0 || h <= 0 || !hle_font_metrics(&sCellW, &sCellH, &sBaseline) ||
-        !hle_pause_image("PmPocketbookL01", NULL, &cw, &cw))
+    if (!what || w <= 0 || h <= 0 || !hle_font_metrics(&sCellW, &sCellH, &sBaseline))
         return NULL;
+    if (!hle_pause_image("PauseTopBg", NULL, &cw, &cw)) return NULL; /* the Pad's pictures aren't read yet */
     /* (The update check's answer comes in by itself.) */
     if (what == drawnWhat && drawn == sChanges && w == drawnW && h == drawnH && drawnUpdate == update_state() && sPx)
         return sPx;
@@ -804,10 +1068,306 @@ const uint32_t* options_draw(int w, int h) {
         }
     }
     draw_book();
-    for (y = (int)Y(BAR_TOP); y < (int)ceilf(Y(BAR_BOTTOM)) && y < h; y++) {
-        if (y >= 0) memset(sPx + (size_t)y * w, 0, (size_t)w * 4);
-    }
     return sPx;
+}
+
+/* ------------------------------------------------------------------------ */
+/* A second screen's picture (vk_backend.c): the Pad open, its title on the
+ * left page and the minimap on the right one's paper, on a photo; over
+ * the dark the pause menu lays over the game. Drawn into an image of its
+ * own, with the Options' drawing (sPx and its place) put back after. */
+
+#define PAGES_BEHIND 0xFF10141Au
+#define PHOTO 0xFFFBF7EEu
+#define PHOTO_EDGE 14.0f
+
+/* The friends list (hle_friends.c), on the left page: a row each, its
+ * icon and name, dark and unnamed until befriended; scrolled by touch. */
+int hle_friends_rows(void);
+const char* hle_friends_name(int i);
+int hle_friends_is_friend(int i);
+const uint32_t* hle_friends_icon(int i, int* w, int* h);
+unsigned hle_friends_changes(void);
+
+static const Rect kList = {LX(-264), LY(144), LX(-28), LY(-176)}; /* the rows and their bar */
+#define LIST_BAR 16.0f
+#define LIST_PITCH 62.0f
+#define LIST_ROW 54.0f
+#define STRIPS 40         /* rows kept drawn */
+#define NEW_STRIPS 3      /* rows drawn afresh a frame, at most */
+#define UNKNOWN 0xFF6E5A46u /* a friend not made yet: its icon's place */
+
+static struct {
+    uint32_t* px;
+    int row;
+    unsigned used;
+} sStrips[STRIPS];
+static int sStripW, sStripH;
+static unsigned sStripClock;
+static float sListScale = 1, sListOffX, sListOffY; /* the pages' picture's place, for touches */
+static float sScroll, sVelocity, sDragY, sLastY, sDragScroll;
+static int sDragging;
+static unsigned sMoves;
+
+static float list_limit(int rows) {
+    float limit = rows * LIST_PITCH - (LIST_PITCH - LIST_ROW) - (kList.y1 - kList.y0);
+    return limit > 0 ? limit : 0;
+}
+
+static void forget_strips(void) {
+    int i;
+    for (i = 0; i < STRIPS; i++) sStrips[i].row = -1;
+}
+
+/* Row i drawn alone into a strip as wide as the rows, clear about it. */
+static void draw_strip(uint32_t* px, int i) {
+    uint32_t* keepPx = sPx;
+    int keepW = sW, keepH = sH, w, h, friend_ = hle_friends_is_friend(i);
+    float keepX = sOffX, keepY = sOffY;
+    const uint32_t* icon = hle_friends_icon(i, &w, &h);
+    Rect bar = {kList.x0, 0, kList.x1 - LIST_BAR - 8, LIST_ROW};
+    memset(px, 0, (size_t)sStripW * sStripH * 4);
+    sPx = px;
+    sW = sStripW;
+    sH = sStripH;
+    sOffX -= floorf(X(kList.x0));
+    sOffY = 0;
+    Rect frame = {bar.x0 + 6, 3, bar.x0 + 6 + LIST_ROW - 6, LIST_ROW - 3};
+    Rect in = {frame.x0 + 4, frame.y0 + 4, frame.x1 - 4, frame.y1 - 4};
+    draw_box(bar, 14, friend_ ? ROW_TAN : 0xFFDCCAB4u);
+    /* The icon in its frame, as the Pad's list has it (CharaIconFrame);
+     * a question mark there until it's a friend. */
+    draw_box(frame, 8, friend_ ? 0xFFFFFFFFu : 0xFFF4ECE0u);
+    if (friend_ && icon) {
+        Rect src = {0, 0, (float)w, (float)h};
+        draw_image(icon, w, h, src, in, 0xFFFFFF, 0);
+    } else {
+        draw_box(in, 5, UNKNOWN);
+        draw_text("?", (in.x0 + in.x1) / 2, (in.y0 + in.y1) / 2 + 2, 34, ALIGN_CENTRE, 0xFFF4ECE0u, 0, 0, 1, 0);
+    }
+    draw_text(friend_ ? hle_friends_name(i) : "?????", frame.x1 + 16, LIST_ROW / 2 + 2, 34, ALIGN_LEFT,
+              friend_ ? WORDS : WORDS_SOFT, 0, 0, friend_, bar.x1 - frame.x1 - 28);
+    sPx = keepPx;
+    sW = keepW;
+    sH = keepH;
+    sOffX = keepX;
+    sOffY = keepY;
+}
+
+/* Row i's strip, drawn if it isn't kept (and fresh allows: else NULL). */
+static const uint32_t* strip(int i, int* fresh) {
+    int k, oldest = 0;
+    for (k = 0; k < STRIPS; k++) {
+        if (sStrips[k].row == i && sStrips[k].px) {
+            sStrips[k].used = ++sStripClock;
+            return sStrips[k].px;
+        }
+        if (sStrips[k].used < sStrips[oldest].used) oldest = k;
+    }
+    if (*fresh <= 0) return NULL;
+    if (!sStrips[oldest].px && !(sStrips[oldest].px = (uint32_t*)malloc((size_t)sStripW * sStripH * 4))) return NULL;
+    --*fresh;
+    draw_strip(sStrips[oldest].px, i);
+    sStrips[oldest].row = i;
+    sStrips[oldest].used = ++sStripClock;
+    return sStrips[oldest].px;
+}
+
+/* A strip laid on the picture with its top at y, inside y0 to y1. */
+static void lay(const uint32_t* s, int x, int y, int y0, int y1) {
+    int j, i;
+    for (j = 0; j < sStripH; j++) {
+        uint32_t* d;
+        const uint32_t* p = s + (size_t)j * sStripW;
+        if (y + j < y0 || y + j >= y1 || y + j >= sH) continue;
+        d = sPx + (size_t)(y + j) * sW + x;
+        for (i = 0; i < sStripW && x + i < sW; i++) {
+            uint32_t c = p[i];
+            if (c >> 24 == 255) d[i] = c;
+            else if (c >> 24) blend(&d[i], c, 1.0f);
+        }
+    }
+}
+
+/* A touch on the second screen (0 down, 1 up, 2 moved), at its pixels. */
+void pad_pages_touch(int action, float x, float y) {
+    x = (x - sListOffX) / sListScale;
+    y = (y - sListOffY) / sListScale;
+    if (action == 0) {
+        if (x < kList.x0 - 40 || x >= kList.x1 + 40 || y < kList.y0 - 40 || y >= kList.y1 + 40) return;
+        sDragging = 1;
+        sDragY = sLastY = y;
+        sDragScroll = sScroll;
+        sVelocity = 0;
+    } else if (sDragging) {
+        float scroll = sDragScroll - (y - sDragY);
+        sVelocity = sVelocity * 0.5f + (sLastY - y) * 0.5f;
+        sLastY = y;
+        if (scroll != sScroll) {
+            sScroll = scroll;
+            sMoves++;
+        }
+        if (action == 1) sDragging = 0;
+    }
+}
+
+/* changed: 1 if all of it changed, 2 if only the part changed[1..4]
+ * (x, y, w, h) did, else 0. */
+const uint32_t* pad_pages_draw(int w, int h, double map_aspect, int* changed, int* map) {
+    static uint32_t *px, *pages;
+    static int drawnW, drawnH, drawnRows = -1, drawnFriends = -1;
+    static unsigned drawnChanges = ~0u, drawnMoves = ~0u;
+    static int at[4];
+    Rect m;
+    uint32_t* keepPx = sPx;
+    int keepW = sW, keepH = sH, i, cw, rows, all = 0, fresh = NEW_STRIPS, friends = 0, lx, ly0, ly1;
+    float keepScale = sScale, keepX = sOffX, keepY = sOffY, limit, top;
+    *changed = 0;
+    if (w <= 0 || h <= 0 || !hle_font_metrics(&sCellW, &sCellH, &sBaseline) || !hle_pause_image("PauseTopBg", NULL, &cw, &cw))
+        return NULL;
+    rows = hle_friends_rows();
+    /* Thrown, it slows. */
+    if (!sDragging && (sVelocity > 0.5f || sVelocity < -0.5f)) {
+        sScroll += sVelocity;
+        sVelocity *= 0.92f;
+        sMoves++;
+    }
+    limit = list_limit(rows);
+    if (sScroll < 0 || sScroll > limit) {
+        sScroll = sScroll < 0 ? 0 : limit;
+        sVelocity = 0;
+    }
+    if (px && w == drawnW && h == drawnH && rows == drawnRows && drawnChanges == hle_friends_changes() &&
+        drawnMoves == sMoves)
+        goto done;
+    if (!px || w != drawnW || h != drawnH) {
+        free(px);
+        free(pages);
+        px = (uint32_t*)malloc((size_t)w * h * 4);
+        pages = (uint32_t*)malloc((size_t)w * h * 4);
+        if (!px || !pages) {
+            free(px);
+            free(pages);
+            px = pages = NULL;
+            return NULL;
+        }
+        for (i = 0; i < STRIPS; i++) {
+            free(sStrips[i].px);
+            sStrips[i].px = NULL;
+        }
+        forget_strips();
+        drawnW = w;
+        drawnH = h;
+        drawnFriends = -1;
+        /* The book (layout x -335 to 335, y -212 to 212) as large as fits. */
+        sScale = 0.97f * ((float)w / LW(670) < (float)h / LH(424) ? (float)w / LW(670) : (float)h / LH(424));
+        sOffX = w / 2.0f - LX(0) * sScale;
+        sOffY = h / 2.0f - LY(0) * sScale;
+        sListScale = sScale;
+        sListOffX = sOffX;
+        sListOffY = sOffY;
+        sStripW = (int)ceilf(X(kList.x1)) - (int)floorf(X(kList.x0)) + 1;
+        sStripH = (int)ceilf(LIST_ROW * sScale) + 2;
+        sPx = pages;
+        sW = w;
+        sH = h;
+        for (i = 0; i < w * h; i++) pages[i] = PAGES_BEHIND;
+        draw_book_pages();
+        draw_pane("PauseTopBg", -16, 0, 294, 361, 3, 0, -1, 1, 1, 1, PLAIN); /* the left page's paper (PageBgL) */
+        draw_caption("Friends", -276, 186, 0.9f, 1);
+        draw_caption("Map", 37, 166, 0.95f, 0);
+        {
+            /* The photo, at the map's shape, in the paper below the caption. */
+            Rect in = {LX(22), LY(140), LX(288), LY(-168)};
+            float pw = in.x1 - in.x0 - 2 * PHOTO_EDGE, ph = in.y1 - in.y0 - 2 * PHOTO_EDGE;
+            if (pw > ph * map_aspect) pw = (float)(ph * map_aspect);
+            else ph = (float)(pw / map_aspect);
+            m.x0 = (in.x0 + in.x1 - pw) / 2;
+            m.y0 = (in.y0 + in.y1 - ph) / 2;
+            m.x1 = m.x0 + pw;
+            m.y1 = m.y0 + ph;
+            {
+                Rect shadow = {m.x0 - PHOTO_EDGE + 6, m.y0 - PHOTO_EDGE + 8, m.x1 + PHOTO_EDGE + 6, m.y1 + PHOTO_EDGE + 8};
+                Rect border = {m.x0 - PHOTO_EDGE, m.y0 - PHOTO_EDGE, m.x1 + PHOTO_EDGE, m.y1 + PHOTO_EDGE};
+                draw_box(shadow, 6, 0x50A48D62u);
+                draw_box(border, 4, PHOTO); /* the map drawn on it as on paper (vk_backend.c's kMapColor) */
+            }
+        }
+        at[0] = (int)X(m.x0);
+        at[1] = (int)Y(m.y0);
+        at[2] = (int)(X(m.x1) - X(m.x0));
+        at[3] = (int)(Y(m.y1) - Y(m.y0));
+        all = 1;
+    } else {
+        sScale = sListScale;
+        sOffX = sListOffX;
+        sOffY = sListOffY;
+        sW = w;
+        sH = h;
+    }
+    if (drawnChanges != hle_friends_changes() || rows != drawnRows) {
+        forget_strips();
+        for (i = 0; i < rows; i++) friends += hle_friends_is_friend(i);
+        if (friends != drawnFriends) all = 1; /* the count, by the caption */
+        drawnFriends = friends;
+    }
+    drawnRows = rows;
+    drawnChanges = hle_friends_changes();
+    drawnMoves = sMoves;
+    sPx = px;
+    lx = (int)floorf(X(kList.x0));
+    ly0 = (int)floorf(Y(kList.y0));
+    ly1 = (int)ceilf(Y(kList.y1));
+    if (all) {
+        memcpy(px, pages, (size_t)w * h * 4);
+        *changed = 1;
+    } else {
+        int y, cw2 = sStripW < w - lx ? sStripW : w - lx;
+        for (y = ly0 < 0 ? 0 : ly0; y < ly1 && y < h; y++)
+            memcpy(px + (size_t)y * w + lx, pages + (size_t)y * w + lx, (size_t)cw2 * 4);
+        *changed = 2;
+        changed[1] = lx;
+        changed[2] = ly0 < 0 ? 0 : ly0;
+        changed[3] = cw2;
+        changed[4] = (ly1 < h ? ly1 : h) - changed[2];
+    }
+    if (all && rows) {
+        char text[16];
+        snprintf(text, sizeof(text), "%d/%d", drawnFriends, rows);
+        draw_text(text, kList.x1, LY(160), 28, ALIGN_RIGHT, WORDS, 0, 0, 1, 0);
+    }
+    /* The rows: at most a few drawn afresh a frame, the rest next frame. */
+    top = kList.y0 - sScroll;
+    {
+        int first = (int)(sScroll / LIST_PITCH), last = (int)((sScroll + kList.y1 - kList.y0) / LIST_PITCH) + 1;
+        for (i = first < 0 ? 0 : first; i <= last && i < rows; i++) {
+            const uint32_t* s = strip(i, &fresh);
+            if (s) lay(s, lx, (int)floorf(Y(top + i * LIST_PITCH)), ly0, ly1);
+            else sMoves++; /* (drawn next frame) */
+        }
+    }
+    /* The scroll bar. */
+    if (limit > 0) {
+        float x1 = kList.x1, x0 = x1 - LIST_BAR, y0 = kList.y0, y1 = kList.y1;
+        float size = (y1 - y0) * (y1 - y0) / (rows * LIST_PITCH), thumbAt;
+        Rect track = {x0 + 5, y0, x1 - 5, y1};
+        if (size < 60) size = 60;
+        thumbAt = y0 + (y1 - y0 - size) * sScroll / limit;
+        {
+            Rect thumb = {x0, thumbAt, x1, thumbAt + size};
+            draw_box(track, 3, 0x40645032u);
+            draw_box(thumb, LIST_BAR / 2, BUTTON_ORANGE);
+        }
+    }
+    sPx = keepPx;
+    sW = keepW;
+    sH = keepH;
+    sScale = keepScale;
+    sOffX = keepX;
+    sOffY = keepY;
+done:
+    memcpy(map, at, sizeof(at));
+    return px;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -843,7 +1403,7 @@ static int click(int mx, int my) {
         set_open(0);
         return 1;
     }
-    for (i = 0; i < SECTIONS; i++) {
+    for (i = 0; i < sections(); i++) {
         if (in(kButton[i], x, y)) {
             sSection = i;
             sOnRows = 0;

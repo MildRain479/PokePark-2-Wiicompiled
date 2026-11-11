@@ -207,8 +207,7 @@ static const struct Kind {
     int spotCount;
     uint32_t line; /* the key's outline, 0xRRGGBB, or ~0u for the button's colour */
 } kKinds[] = {
-    {"KeyButton", 256, 256, kBarSpots, (int)(sizeof(kBarSpots) / sizeof(kBarSpots[0])), ~0u},
-    {"FukidashiMini", 256, 128, kBubbleSpots, (int)(sizeof(kBubbleSpots) / sizeof(kBubbleSpots[0])), 0x414141},
+    {"", 0, 0, NULL, 0, 0}, /* its pictures aren't mapped yet: glyphs only */
 };
 #define KINDS ((int)(sizeof(kKinds) / sizeof(kKinds[0])))
 
@@ -223,9 +222,10 @@ typedef struct {
 static Picture sPictures[MAX_PICTURES];
 static int sPictureCount;
 
-/* A texel of an 8-bit (CI8) texture w wide: 8x4 tiles of 32 bytes, row by row. */
+/* A texel of an 8-bit (CI8) texture w wide: 8x4 tiles of 32 bytes, row by
+ * row (the last of a row part blank if w is not a multiple of 8). */
 static uint32_t ci8_byte(uint32_t image, int w, int x, int y) {
-    return image + (uint32_t)(((y / 4) * (w / 8) + x / 8) * 32 + (y % 4) * 8 + x % 8);
+    return image + (uint32_t)(((y / 4) * ((w + 7) / 8) + x / 8) * 32 + (y % 4) * 8 + x % 8);
 }
 
 static int name_is(uint32_t at, const char* s) {
@@ -368,12 +368,12 @@ static void draw_pictures(void) {
 
 /* void ResTex::Init(): a texture of a model file (TEX0), as the file is
  * set up after loading. */
-void f_801B3090(ppc_t* c) {
+void F_ResTex_Init(ppc_t* c) {
     uint32_t tex = c->r[3] ? LD32(c->r[3]) : 0, file, size, pos, plt = 0, pal;
     const struct Kind* kind;
     Picture* b;
     int i, x, y;
-    f_801B3090_orig(c);
+    F_ResTex_Init_orig(c);
     if (tex) hle_pause_texture(tex);
     if (!tex || !(kind = kind_of(tex))) return;
     for (i = 0; i < sPictureCount; i++) {
@@ -425,26 +425,176 @@ void f_801B3090(ppc_t* c) {
     sGeneration = 0xFFFFFFFFu; /* draw it */
 }
 
+/* ------------------------------------------------------------------------ */
+/* Pictures in layouts' textures (TPL), with a button drawn on them: the
+ * field's action bubble (MenuField.dac, ActionWin.tpl: "Talk", "Search" and
+ * so on, over a 2 in a grey disc). A controller's button: the disc keeps
+ * its ring; inside it the 2 is wiped and the icon for what is bound to the
+ * button drawn in the ring's dark grey. A key: the ring wiped too, and the
+ * key drawn larger on the bubble's white. Found as the game binds the TPL (TPLBind), by its size
+ * and format; its CI8 colours from its palette. */
+
+typedef struct {
+    int w, h, colours;   /* the texture: CI8, this many RGB5A3 colours */
+    int cx, cy, r;       /* the disc inside the ring: centre and radius */
+    int ring;            /* the ring's outer radius */
+    int kw, kh;          /* the box a key is drawn in, about the centre */
+    uint32_t button, ink, fill; /* 0xRRGGBB */
+} TplKind;
+
+static const TplKind kTplKinds[] = {
+    {110, 71, 80, 54, 23, 7, 11, 22, 16, HOST_PAD_2, 0x505050, 0xE8E8E8}, /* ActionWin.tpl */
+};
+#define TPL_KINDS ((int)(sizeof(kTplKinds) / sizeof(kTplKinds[0])))
+#define MAX_TPLS 4
+
+typedef struct {
+    const TplKind* kind;
+    uint32_t tpl, header, image;
+    uint8_t rgba[MAX_COLOURS][4];
+    uint8_t* original;
+} TplPicture;
+
+static TplPicture sTpls[MAX_TPLS];
+static int sTplCount;
+
+static int tpl_nearest(const TplPicture* t, int r, int g, int b) {
+    int i, best = 0;
+    long bestD = -1;
+    for (i = 0; i < t->kind->colours; i++) {
+        const uint8_t* p = t->rgba[i];
+        long dr = p[0] - r, dg = p[1] - g, db = p[2] - b, d;
+        if (p[3] < 250) continue; /* opaque ones only */
+        d = dr * dr + dg * dg + db * db;
+        if (bestD < 0 || d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Whether the picture is still where it was (its memory may have been
+ * freed and reused since). */
+static int tpl_here(const TplPicture* t) {
+    return LD32(t->tpl) == 0x0020AF30 && LD32(t->tpl + 4) == 1 && LD32(LD32(t->tpl + 8)) == t->header &&
+           LD32(t->header + 8) == t->image;
+}
+
+static void draw_tpl(TplPicture* t) {
+    enum { MAX_S = 24 };
+    static uint8_t cov[MAX_S * MAX_S];
+    const TplKind* k = t->kind;
+    /* A key (the generation's low bit clear: the keyboard was used last)
+     * is drawn as itself, on the bubble's white with the ring wiped: keys
+     * like Space are wide, and a keycap in a circle looks out of place. A
+     * controller's button stays in the disc, as the game draws its 2. */
+    int key = !(sGeneration & 1), R = key ? k->ring : k->r;
+    int bw = key ? k->kw : 2 * k->r, bh = key ? k->kh : 2 * k->r;
+    int x0 = k->cx - bw / 2, y0 = k->cy - bh / 2, x, y, drew = 0;
+    uint32_t bg = key ? 0xFFFFFFu : k->fill;
+    int fr = (int)(bg >> 16 & 255), fg = (int)(bg >> 8 & 255), fb = (int)(bg & 255);
+    int ir = (int)(k->ink >> 16 & 255), ig = (int)(k->ink >> 8 & 255), ib = (int)(k->ink & 255);
+    if (bw > MAX_S || bh > MAX_S) return;
+    if (g_host_prompt_icon) drew = g_host_prompt_icon(k->button, cov, bw, bh);
+    for (y = k->cy - k->ring - 1; y <= k->cy + k->ring; y++) {
+        for (x = k->cx - k->ring - 1; x <= k->cx + k->ring; x++) {
+            int dx = 2 * x + 1 - 2 * k->cx, dy = 2 * y + 1 - 2 * k->cy;
+            uint8_t px = t->original[y * k->w + x];
+            if (drew && dx * dx + dy * dy <= 4 * R * R) { /* in the disc, or the ring for a key */
+                int ix = x - x0, iy = y - y0, a = ix >= 0 && iy >= 0 && ix < bw && iy < bh ? cov[iy * bw + ix] : 0;
+                px = (uint8_t)tpl_nearest(t, (fr * (255 - a) + ir * a) / 255, (fg * (255 - a) + ig * a) / 255,
+                                          (fb * (255 - a) + ib * a) / 255);
+            }
+            ST8(ci8_byte(t->image, k->w, x, y), px);
+        }
+    }
+}
+
+static void draw_tpls(void) {
+    int i;
+    for (i = 0; i < sTplCount; i++) {
+        if (!tpl_here(&sTpls[i])) {
+            free(sTpls[i].original);
+            sTpls[i--] = sTpls[--sTplCount];
+            continue;
+        }
+        draw_tpl(&sTpls[i]);
+    }
+}
+
+/* void TPLBind(TPLPalette*): a TPL, its offsets made pointers. */
+void F_TPLBind(ppc_t* c) {
+    uint32_t tpl = c->r[3], header, pal, data;
+    const TplKind* k = NULL;
+    TplPicture* t;
+    int i, x, y;
+    F_TPLBind_orig(c);
+    if (!tpl || LD32(tpl) != 0x0020AF30 || LD32(tpl + 4) != 1) return;
+    header = LD32(LD32(tpl + 8));
+    pal = LD32(LD32(tpl + 8) + 4);
+    if (!header || !pal || LD32(header + 4) != 9 || LD32(pal + 4) != 2) return; /* CI8, RGB5A3 */
+    for (i = 0; i < TPL_KINDS; i++) {
+        if (LD16(header + 2) == kTplKinds[i].w && LD16(header) == kTplKinds[i].h && LD16(pal) == kTplKinds[i].colours)
+            k = &kTplKinds[i];
+    }
+    if (!k) return;
+    for (i = 0; i < sTplCount && sTpls[i].tpl != tpl; i++) {}
+    if (i == sTplCount) {
+        if (sTplCount == MAX_TPLS) return;
+        t = &sTpls[sTplCount];
+        if (!(t->original = (uint8_t*)malloc((size_t)k->w * k->h))) return;
+        sTplCount++;
+    }
+    t = &sTpls[i];
+    t->kind = k;
+    t->tpl = tpl;
+    t->header = header;
+    t->image = LD32(header + 8);
+    data = LD32(pal + 8);
+    for (x = 0; x < k->colours; x++) {
+        uint16_t v = LD16(data + 2 * x);
+        uint8_t* p = t->rgba[x];
+        if (v & 0x8000) {
+            p[0] = (uint8_t)((v >> 10 & 31) * 255 / 31);
+            p[1] = (uint8_t)((v >> 5 & 31) * 255 / 31);
+            p[2] = (uint8_t)((v & 31) * 255 / 31);
+            p[3] = 255;
+        } else {
+            p[0] = (uint8_t)((v >> 8 & 15) * 17);
+            p[1] = (uint8_t)((v >> 4 & 15) * 17);
+            p[2] = (uint8_t)((v & 15) * 17);
+            p[3] = (uint8_t)((v >> 12 & 7) * 255 / 7);
+        }
+    }
+    for (y = 0; y < k->h; y++) {
+        for (x = 0; x < k->w; x++) t->original[y * k->w + x] = LD8(ci8_byte(t->image, k->w, x, y));
+    }
+    HLE_LOG("prompts: layout texture %08X", tpl);
+    sGeneration = 0xFFFFFFFFu; /* draw it */
+}
+
 /* Redraws the glyphs and the pictures if what they should show has changed.
  * Called on each report of the remote (hle_wpad.c). */
 void hle_prompts_update(void) {
     uint32_t gen;
     int i;
-    if ((!sFontCount && !sPictureCount) || !g_host_prompt_generation) return;
+    if ((!sFontCount && !sPictureCount && !sTplCount) || !g_host_prompt_generation) return;
     gen = g_host_prompt_generation();
     if (gen == sGeneration) return;
     sGeneration = gen;
     for (i = 0; i < sFontCount; i++) draw_icons(&sFonts[i]);
     draw_pictures();
+    draw_tpls();
 }
 
 /* void ResFontBase::SetResourceBuffer(void* font, FontInformation*): a
  * font, loaded and its offsets made pointers. */
-void f_801FA730(ppc_t* c) {
+void F_ResFontBase_SetResourceBuffer(ppc_t* c) {
     uint32_t base = c->r[4], size, pos, image;
     Font* f;
     int i, have = 0;
-    f_801FA730_orig(c);
+    F_ResFontBase_SetResourceBuffer_orig(c);
     /* RFNT, or RFNU once unpacked (its offsets made pointers). */
     if (!base || (LD32(base) != 0x52464E54 && LD32(base) != 0x52464E55)) return;
     for (i = 0; i < sFontCount; i++) {

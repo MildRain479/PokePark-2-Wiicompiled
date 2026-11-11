@@ -191,6 +191,11 @@ static inline void ppc_dcbz(uint32_t a) { memset(MA(a & ~31u), 0, 32); }
 
 /* Paired-single quantized loads and stores, inline: the THP decoder
  * runs them for every pixel. */
+#ifdef _MSC_VER
+#define PSQ_FAST static __forceinline
+#else
+#define PSQ_FAST static inline __attribute__((always_inline))
+#endif
 /* 2^k for the GQR's 6-bit signed scale (-32..31), built from the exponent
  * bits: exact, and much cheaper than ldexp. */
 static inline double psq_pow2(int k) { return bits_f64((uint64_t)(1023 + k) << 52); }
@@ -215,7 +220,7 @@ static inline uint32_t psq_quant(double v, int type, int scale, double lo, doubl
     return (uint32_t)(int32_t)v;
 }
 
-static inline void psq_load(ppc_t* c, int fd, uint32_t ea, int w, int i) {
+static inline void psq_load_quant(ppc_t* c, int fd, uint32_t ea, int w, int i) {
     uint32_t gqr = c->gqr[i];
     int type = (gqr >> 16) & 7, scale = (gqr >> 24) & 0x3F;
     int size = type == 4 || type == 6 ? 1 : type == 5 || type == 7 ? 2 : 4;
@@ -227,7 +232,20 @@ static inline void psq_load(ppc_t* c, int fd, uint32_t ea, int w, int i) {
     c->ps1[fd] = w ? 1.0 : psq_dequant(r1, type, scale);
 }
 
-static inline void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i) {
+/* Most are of floats (GQR type 0-3: the game's math): a load or store or
+ * two, made inline at every one; the quantized rest apart. All of it in
+ * one was too big for the compiler to inline, and the calls took 4% of
+ * the game thread on the Thor. */
+PSQ_FAST void psq_load(ppc_t* c, int fd, uint32_t ea, int w, int i) {
+    if (c->gqr[i] & 0x40000) {
+        psq_load_quant(c, fd, ea, w, i);
+        return;
+    }
+    c->f[fd] = (double)bits_f32(LD32(ea));
+    c->ps1[fd] = w ? 1.0 : (double)bits_f32(LD32(ea + 4));
+}
+
+static inline void psq_store_quant(ppc_t* c, int fs, uint32_t ea, int w, int i) {
     uint32_t gqr = c->gqr[i];
     int type = gqr & 7, scale = (gqr >> 8) & 0x3F;
     double v[2];
@@ -243,6 +261,15 @@ static inline void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i) {
         default: st_f32(ea + 4 * n, v[n]); break;
         }
     }
+}
+
+PSQ_FAST void psq_store(ppc_t* c, int fs, uint32_t ea, int w, int i) {
+    if (c->gqr[i] & 4) {
+        psq_store_quant(c, fs, ea, w, i);
+        return;
+    }
+    st_f32(ea, c->f[fs]);
+    if (!w) st_f32(ea + 4, c->ps1[fs]);
 }
 uint32_t ppc_mfspr(ppc_t* c, int spr);
 void ppc_mtspr(ppc_t* c, int spr, uint32_t v);
@@ -265,6 +292,15 @@ void ppc_rfi(ppc_t* c);
 
 /* Runtime setup. */
 int ppc_mem_init(void);
+/* Write tracking of MEM1 and MEM2 by page, where Windows' write watch
+ * isn't (runtime.c). ppc_mem_watch notes writes to [addr, addr + size)
+ * from now on, stamp being the count to compare later ones against (0 if
+ * it can't); ppc_mem_written: whether the range may have been written
+ * since stamp. Host code that writes guest memory by a system call
+ * (read(), fread()) calls ppc_mem_host_write first. */
+int ppc_mem_watch(uint32_t addr, uint32_t size, uint32_t* stamp);
+int ppc_mem_written(uint32_t addr, uint32_t size, uint32_t stamp);
+void ppc_mem_host_write(uint32_t addr, uint32_t size);
 int ppc_load_dol(const char* path, uint32_t* entry);
 int ppc_load_dol_mem(const uint8_t* dol, size_t len, uint32_t* entry); /* a DOL already in memory */
 ppc_func ppc_lookup(uint32_t addr);

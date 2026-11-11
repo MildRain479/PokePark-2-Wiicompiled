@@ -1,9 +1,9 @@
 """Static recompiler proof of concept: main.dol -> C.
 
 Usage:
-    python tools/recomp/recomp.py [--out build/recomp/gen]
+    python tools/recomp/recomp.py [--out build/recomp_S2LE01/gen]
 
-Reads orig/R8AE01/sys/main.dol and config/R8AE01/symbols.txt, and writes
+Reads orig/S2LE01/sys/main.dol and config/S2LE01/symbols.txt, and writes
 one C function per guest function, a header of prototypes, the address
 table used for indirect calls, and coverage.txt. The generated code
 contains no game data; the runtime loads main.dol from the user's own
@@ -23,6 +23,7 @@ from translate import FuncCtx, branch_targets, h32, translate  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 FUNCS_PER_FILE = 200
+GAME = "S2LE01"  # PokePark 2 alone; its output in build/recomp_S2LE01
 
 
 def opcode_key(ins):
@@ -97,7 +98,7 @@ def collect(dol, syms):
 
 
 def load_hooks(path):
-    """Addresses listed in recomp/patches/hooks.txt ("0xADDR name" per line)."""
+    """Addresses listed in recomp/patches/<game>/hooks.txt ("0xADDR name" per line)."""
     hooks = set()
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
@@ -153,18 +154,32 @@ def emit_function(dol, f, entries, switch, stats, hooked=False, regcache=True):
 
 def main():
     ap = argparse.ArgumentParser()
-    dol = os.path.join(ROOT, "orig/R8AE01/sys/main.dol")
-    if not os.path.exists(dol):  # only the disc extracted (dtk disc extract)
-        dol = os.path.join(ROOT, "orig/R8AE01/disc/sys/main.dol")
-    ap.add_argument("--dol", default=dol)
-    ap.add_argument("--symbols", default=os.path.join(ROOT, "config/R8AE01/symbols.txt"))
-    ap.add_argument("--out", default=os.path.join(ROOT, "build/recomp/gen"))
-    ap.add_argument("--hooks", default=os.path.join(ROOT, "recomp/patches/hooks.txt"))
+    ap.add_argument("--game", default=GAME, choices=[GAME], help="PokePark 2 (S2LE01), the only one")
+    ap.add_argument("--dol")
+    ap.add_argument("--symbols")
+    ap.add_argument("--out")
+    ap.add_argument("--hooks")
     ap.add_argument("--no-regcache", action="store_true", help="access guest GPRs through c->r everywhere")
     args = ap.parse_args()
+    if not args.dol:
+        args.dol = os.path.join(ROOT, "orig", args.game, "sys", "main.dol")
+        if not os.path.exists(args.dol):  # only the disc extracted (dtk disc extract)
+            args.dol = os.path.join(ROOT, "orig", args.game, "disc", "sys", "main.dol")
+    args.symbols = args.symbols or os.path.join(ROOT, "config", args.game, "symbols.txt")
+    args.out = args.out or os.path.join(ROOT, "build", "recomp_" + args.game, "gen")
+    args.hooks = args.hooks or os.path.join(ROOT, "recomp", "patches", args.game, "hooks.txt")
 
     dol = Dol(args.dol)
     syms = load_symbols(args.symbols)
+    # Names carried over from another game (port_symbols.py), for traces.
+    ported = os.path.join(ROOT, "config", args.game, "symbols_ported.txt")
+    if os.path.exists(ported):
+        names = {}
+        for line in open(ported, encoding="utf-8"):
+            f = line.split(None, 3)
+            names[int(f[1], 16)] = f[3].strip()
+        for s in syms:
+            s.name = names.get(s.addr, s.name)
     funcs, switch = collect(dol, syms)
     entries = set(funcs)
     hooks = load_hooks(args.hooks)

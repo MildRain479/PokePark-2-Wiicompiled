@@ -29,8 +29,8 @@ void hle_request_minigame(int at); /* hle_game.c */
 #ifdef RECOMP_DEBUG_MENU
 
 static const char* const kActionLabel[ACT_COUNT] = {
-    "Move up", "Move down", "Move left", "Move right", "2: jump, talk", "1: dash",
-    "A: Thunderbolt", "B: recenter camera", "+", "-", "HOME", "Shake", "Shake 2 (minigames)",
+    "Move up", "Move down", "Move left", "Move right", "2: jump, talk", "1: dash, attack",
+    "A: call a friend", "B: look around, recenter camera", "+: PokePark Pad", "-: Photos", "HOME", "Shake", "Shake 2",
 };
 
 /* The minigames, by At number, for the Debug section. */
@@ -38,11 +38,8 @@ static const struct {
     int at;
     const char* name;
 } kMinigames[] = {
-    {1, "Absol's Hurdle Bounce"},         {2, "Rayquaza's Balloon Panic"},   {3, "Venusaur's Vine Swing"},
-    {4, "Tangrowth's Swing-Along"},       {5, "Dusknoir's Speed Slam"},      {6, "Gyarados' Aqua Dash"},
-    {7, "Pelipper's Circle Circuit"},     {9, "Empoleon's Snow Slide"},      {10, "Bastiodon's Panel Crush"},
-    {11, "Rhyperior's Bumper Burn"},      {12, "Blaziken's Boulder Bash"},   {13, "Rotom's Spooky Shoot-'em-Up"},
-    {15, "Salamence's Air Race"},         {16, "Bulbasaur's Daring Dash"},
+    {1, "Cake Contraption"}, {2, "Dance Inferno"},
+    {3, "Power Bash"}, {4, "Flight of Fancy"},
 };
 #define MINIGAMES ((int)(sizeof(kMinigames) / sizeof(kMinigames[0])))
 static int sMinigame;

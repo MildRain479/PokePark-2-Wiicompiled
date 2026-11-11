@@ -97,7 +97,7 @@ static int build_ansi_font(uint32_t font) {
 }
 
 /* static u32 ReadFont(void* img, u16 encode, void* fontData) */
-void f_8020C320(ppc_t* c) {
+void F_ReadFont(ppc_t* c) {
     uint32_t encode = c->r[4] & 0xFFFF, font = c->r[5];
     if (encode == FONT_ENCODE_ANSI && g_host_font_glyph && build_ansi_font(font)) {
         HLE_LOG("system font: built the ANSI font from host glyphs");

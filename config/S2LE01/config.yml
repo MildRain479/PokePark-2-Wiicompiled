@@ -1,0 +1,9 @@
+# See config/R8AE01/config.example.yml for documentation.
+object_base: orig/S2LE01
+object: sys/main.dol
+hash: 34f024f683c8d068020066a07a2a1f939735eff2
+symbols: config/S2LE01/symbols.txt
+splits: config/S2LE01/splits.txt
+detect_objects: true
+detect_strings: false
+write_asm: true

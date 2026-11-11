@@ -2,15 +2,16 @@
  * system menu and apploader leave it, and runs the game's __start.
  *
  * Usage: boot [<main.dol> [time limit, seconds]]: without arguments, the
- * game in an R8AE01 folder beside the program or above it, no time limit.
+ * game in an S2LE01 folder beside the program or above it, no time limit.
  *
  * The disc is read from a "disc" directory next to the directory holding
- * main.dol (orig/R8AE01/disc for orig/R8AE01/sys/main.dol), holding sys/
+ * main.dol (orig/S2LE01/disc for orig/S2LE01/sys/main.dol), holding sys/
  * and files/ as extracted by dtk (see recomp/README.md). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "game.h"
 #include "gx.h"
 #include "recomp_funcs.h"
 
@@ -359,7 +360,7 @@ static DWORD WINAPI watchdog(LPVOID arg) {
 /* What the system menu leaves in low memory before jumping to the game,
  * following Dolphin's HLE boot (Core/Boot/Boot_BS2Emu.cpp). */
 static void setup_low_memory(void) {
-    static const char kDiscId[] = "R8AE01";
+    static const char kDiscId[] = GAME_ID;
     memcpy(MA(0x80000000), kDiscId, 6);
     ST32(0x80000018, 0x5D1C9EA3); /* Wii disc magic */
     ST32(0x80000020, 0x0D15EA5E); /* boot magic */
@@ -396,14 +397,14 @@ static void setup_low_memory(void) {
     ST32(0x80003188, 0x00090204); /* IOS version the apploader saw */
 }
 
-/* The game's main.dol, in an R8AE01 folder (or orig\R8AE01, as in the
+/* The game's main.dol, in an S2LE01 folder (or orig\S2LE01, as in the
  * source tree) beside the program or in a folder above it. */
 int import_game(char* mainDol, size_t n); /* import_win32.c */
 
 static int find_game(char* out, size_t n) {
 #ifdef _WIN32
     char dir[1024], *slash;
-    static const char* const kPlaces[] = {"R8AE01\\sys\\main.dol", "orig\\R8AE01\\sys\\main.dol"};
+    static const char* const kPlaces[] = {GAME_ID "\\sys\\main.dol", "orig\\" GAME_ID "\\sys\\main.dol"};
     size_t i;
     if (!GetModuleFileNameA(NULL, dir, sizeof(dir) - 64)) return 0;
     while ((slash = strrchr(dir, '\\')) != NULL) {
@@ -584,9 +585,9 @@ int main(int argc, char** argv) {
 #endif
     }
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <main.dol> [seconds]\n(or put the game's R8AE01 folder, with sys\\main.dol and disc, beside it)\n", argv[0]);
+        fprintf(stderr, "usage: %s <main.dol> [seconds]\n(or put the game's " GAME_ID " folder, with sys\\main.dol and disc, beside it)\n", argv[0]);
 #ifdef _WIN32
-        MessageBoxA(NULL, "Put the game's R8AE01 folder (with sys\\main.dol and disc) beside the program.", "PokePark",
+        MessageBoxA(NULL, "Put the game's " GAME_ID " folder (with sys\\main.dol and disc) beside the program.", "PokePark",
                     MB_ICONERROR);
 #endif
         return 2;

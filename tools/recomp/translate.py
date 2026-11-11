@@ -155,7 +155,7 @@ def xo31_int(ins, xo, rc):
     elif x == 104:
         out = f"{rd} = 0u - {ra};"
     elif x == 235:
-        out = f"{rd} = (uint32_t)((int32_t){ra} * (int32_t){rb});"
+        out = f"{rd} = {ra} * {rb};"  # unsigned: a signed overflow would let a compiler drop carry tests after it
     elif x == 75:
         out = f"{rd} = (uint32_t)(((int64_t)(int32_t){ra} * (int32_t){rb}) >> 32);"
     elif x == 11:
@@ -495,7 +495,7 @@ def translate(addr, ins, ctx):
     if op == 8:
         return f"{{ uint32_t t = {h32(simm)} - {R(a)}; c->xer_ca = {h32(simm)} >= {R(a)}; {R(d)} = t; }}"
     if op == 7:
-        return f"{R(d)} = (uint32_t)((int32_t){R(a)} * {simm});"
+        return f"{R(d)} = {R(a)} * (uint32_t)({simm});"
     if op == 11:
         return f"cmp_s(c, {(ins >> 23) & 7}, (int32_t){R(a)}, {simm});"
     if op == 10:

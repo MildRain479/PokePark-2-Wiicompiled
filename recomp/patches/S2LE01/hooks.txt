@@ -1,0 +1,79 @@
+# Game functions replaced by hand-written C in recomp/patches/*.c and
+# recomp/patches/S2LE01/*.c. One "0xADDRESS name" per line.
+
+0x8028DD40 __OSInitAudioSystem
+0x8028E9C0 OSSaveContext
+0x8028EA40 OSLoadContext
+0x8028EFB0 OSReport
+0x8028F040 OSPanic
+0x80291E40 ReadFont
+0x80292E30 OSEnableInterrupts
+0x80292E50 OSRestoreInterrupts
+0x80295F40 SelectThread
+0x802961D0 OSCreateThread
+0x8029A070 EXISync
+0x802A6310 GXDrawDone
+0x802ABB60 DVDReadAsyncPrio
+0x802B4560 AIRegisterDMACallback
+0x802B45B0 AIInitDMA
+0x802B4630 AIStartDMA
+0x802B4650 AIStopDMA
+0x802B4970 __AI_SRC_INIT
+0x802B5240 __AXGetAuxAInput
+0x802B5280 __AXGetAuxAOutput
+0x802B5320 __AXGetAuxBInput
+0x802B5360 __AXGetAuxBOutput
+0x802B5400 __AXGetAuxCInput
+0x802B5440 __AXGetAuxCOutput
+0x802B67C0 __AXOutInitDSP
+0x802C0020 MEMAllocFromAllocator
+0x802C3DD0 DSPCheckMailToDSP
+0x802C9A70 SCGetAspectRatio
+0x802CBB10 __ios_Ipc2
+0x802D28B0 WPADGetRadioSensitivity
+0x802D3DE0 WPADGetAccGravityUnit
+0x802D3EF0 WPADDisconnect
+0x802D4050 WPADProbe
+0x802D40E0 WPADSetSamplingCallback
+0x802D4170 WPADSetConnectCallback
+0x802D4200 WPADSetExtensionCallback
+0x802D4260 WPADGetDataFormat
+0x802D42B0 WPADSetDataFormat
+0x802D43D0 WPADGetInfoAsync
+0x802D45F0 WPADControlMotor
+0x802D4740 WPADControlLed
+0x802D49E0 WPADRead
+0x802D4E00 WPADIsSpeakerEnabled
+0x802D4E50 WPADControlSpeaker
+0x802D6620 WPADCanSendStreamData
+0x802D66B0 WPADSendStreamData
+0x802D6900 WPADIsDpdEnabled
+0x802D6950 WPADGetDpdFormat
+0x802D6990 WPADControlDpd
+0x802E4D30 WUDGetStatus
+0x802F3E10 BTA_Init
+0x8031E3E0 fn_8028EF88
+0x803FE8B8 strlen
+0x8000F200 set_frame_limit  # hle_game.c: the frame rate setting
+0x80210660 fn_801741F0  # hle_game.c: logs scene changes
+0x80250220 ResTex_Init  # hle_prompts.c: textures of model files as they are set up
+0x80277510 ResFontBase_SetResourceBuffer  # hle_prompts.c: button prompts as the bound keys
+0x8031E2A0 TPLBind  # hle_prompts.c: the 2 in the field's action bubble as the bound key
+0x80019B20 Camera_ApplyToG3dCamera  # hle_camera.c: field of view
+0x8001A390 FrustumForCamera  # hle_camera.c: the same for culling
+0x8009B6A0 nsDelhi::nsObject::ControlModuleImpl::virt0x8_0x20  # hle_stick.c: 360-degree movement with the stick
+0x8001EFD0 CameraManager_Update  # hle_camera.c: mouse camera
+0x80024EE0 CameraFollow_Update  # hle_camera.c: mouse camera
+0x80024C50 CameraFollow_EasePitch  # hle_camera.c: mouse tilt
+0x80206DC0 AddSceneParameter  # hle_game.c: which attraction is being played
+0x80206A70 SceneManager_RunBegin  # hle_game.c: entering a minigame for testing
+0x800B0200 LifeModuleImpl_virt0x4_0x38  # hle_modifiers.c: battle damage
+0x801E1210 FieldAIActionChallengeChase_virt0x14  # hle_modifiers.c: chase speed
+0x800A9340 KineticEnergyControl_virt0x4_0xC  # hle_modifiers.c: chase speed
+0x80148520 fn_80148520  # hle_modifiers.c: text speed
+0x80206D30 SceneManager::EndScene  # hle_game.c: no second switch to Hold
+0x801795B0 MenuUIPartsPause_Update  # hle_game.c: whether the Pad is on its main page
+0x80157860 MenuScreenSaveData_Update  # hle_game.c: whether the save select screen waits for the player
+0x80187310 MovieManager_Advance  # hle_game.c: a movie frame at the scene's own pace
+0x8013CAC0 fn_8013CAC0  # hle_minimap.c: the minimap's layouts marked, for a second screen
+0x803D7670 fn_803D7670  # hle_text.c: the instructions for the PC's and phone's controls

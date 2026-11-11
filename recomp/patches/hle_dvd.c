@@ -156,6 +156,7 @@ void hle_dvd_boot_setup(void) {
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
     uint64_t end = offset + len;
     int i, ok = 1;
+    ppc_mem_host_write(dst, len);
     if (sImageRead) {
         HLE_LOG("disc read %08llX+%X", (unsigned long long)offset, (unsigned)len);
         if (sImageRead(offset, MA(dst), len)) return 1;
@@ -184,6 +185,51 @@ int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
     return ok;
 }
 
+/* A disc file by its path under files/ ("Archive/MenuField.dac"), read
+ * whole into memory of the host's (free it); NULL if it isn't there. Not
+ * thread-safe with the game's reads: call it from the game's thread. */
+uint8_t* hle_dvd_load(const char* path, uint32_t* size) {
+    uint32_t count, i, end, offset = 0, len = 0;
+    const char *names, *p = path;
+    uint8_t* data;
+    char host[1024];
+    if (!sFst) return NULL;
+    count = be32(sFst + 8);
+    names = (const char*)sFst + count * 12;
+    /* Down the tree a name at a time: a directory's entries run to its end. */
+    for (i = 1, end = count; i < end && *p;) {
+        const uint8_t* e = sFst + i * 12;
+        const char* name = names + (be32(e) & 0xFFFFFF);
+        size_t n = strcspn(p, "/");
+        if (strlen(name) == n && !strncmp(name, p, n)) {
+            if (!e[0]) {
+                if (p[n]) return NULL;
+                offset = be32(e + 4);
+                len = be32(e + 8);
+                break;
+            }
+            end = be32(e + 8);
+            p += n + (p[n] == '/');
+            i++;
+        } else {
+            i = e[0] ? be32(e + 8) : i + 1; /* past this directory, or on */
+        }
+    }
+    if (!len) return NULL;
+    if (!sImageRead) {
+        snprintf(host, sizeof(host), "%s/files/%s", sRoot, path);
+        data = read_file(host, size);
+        return data && *size == len ? data : (free(data), (uint8_t*)NULL);
+    }
+    data = (uint8_t*)malloc(len);
+    if (data && !sImageRead((uint64_t)offset << 2, data, len)) {
+        free(data);
+        return NULL;
+    }
+    *size = len;
+    return data;
+}
+
 /* The partition's TMD, which DVDLowOpenPartition returns. */
 uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max) {
     char path[600];
@@ -207,10 +253,10 @@ const uint8_t* hle_dvd_disc_id(void) { return sBootBin; }
 
 /* BOOL DVDReadAsyncPrio(DVDFileInfo* file, void* addr, s32 length, s32 offset,
  *                       DVDCallback callback, s32 prio): logged only. */
-void f_802262E0(ppc_t* c) {
+void F_DVDReadAsyncPrio(ppc_t* c) {
     if (hle_log_enabled()) {
         HLE_LOG("DVDReadAsyncPrio(file %08X, addr %08X, len %X, offset %X)", c->r[3], c->r[4], c->r[5], c->r[6]);
         if (hle_log_enabled() > 1) ppc_backtrace(c);
     }
-    f_802262E0_orig(c);
+    F_DVDReadAsyncPrio_orig(c);
 }

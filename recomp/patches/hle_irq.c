@@ -18,7 +18,7 @@
 
 #define QUEUE_SIZE 64
 
-static const uint32_t kDecrementerHandler = 0x80207B30; /* DecrementerExceptionHandler */
+static const uint32_t kDecrementerHandler = A_DecrementerExceptionHandler;
 #define EXC_DECREMENTER 8
 
 typedef struct {
@@ -91,7 +91,7 @@ static int dec_expired(void) {
  * another rate, e.g. 59.94 for the original. */
 #define INTERRUPT_PI_VI 24
 #define VI_DI0 0xCC002030u
-static const uint32_t kInterruptHandlerTable = 0x80486AF0; /* holds the table's address */
+static const uint32_t kInterruptHandlerTable = A_INTERRUPT_HANDLER_TABLE; /* holds the table's address */
 static uint64_t sRetracePeriod;
 static uint64_t sNextRetrace;
 uint32_t g_retrace_count;
@@ -337,17 +337,17 @@ int hle_wait_for_event(ppc_t* c) {
 }
 
 /* BOOL OSEnableInterrupts(void) */
-void f_8020D310(ppc_t* c) {
+void F_OSEnableInterrupts(ppc_t* c) {
     uint32_t lr = c->lr;
-    f_8020D310_orig(c);
+    F_OSEnableInterrupts_orig(c);
     hle_deliver(c);
     c->lr = lr;
     hle_idle_check(c);
 }
 
 /* BOOL OSRestoreInterrupts(BOOL level) */
-void f_8020D330(ppc_t* c) {
+void F_OSRestoreInterrupts(ppc_t* c) {
     uint32_t enable = c->r[3];
-    f_8020D330_orig(c);
+    F_OSRestoreInterrupts_orig(c);
     if (enable) hle_deliver(c);
 }

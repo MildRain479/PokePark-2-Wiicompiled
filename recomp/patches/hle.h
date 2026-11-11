@@ -4,6 +4,8 @@
 
 #include <stdio.h>
 
+#include "addrs.h"
+#include "game.h"
 #include "recomp_funcs.h"
 
 /* RECOMP_HLE_LOG=1 logs HLE requests; 2 also logs thread switches with
@@ -45,8 +47,11 @@ void hle_request_minigame(int at);
 /* hle_motion.c: the remote's motion in the minigame being played, from
  * keys, sticks and the mouse, for report number report. Returns 0 outside
  * a minigame; otherwise sets acc (accelerometer x, y, z) and returns 1,
- * or 3 with dots (two sensor-bar dots in the IR camera's view) set too. */
+ * or 3 with dots (two sensor-bar dots in the IR camera's view) set too,
+ * or 2 with both set where the game wants only the pointer. */
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]);
+/* Whether the game wants the pointer now, outside a minigame. */
+int hle_pointer_wanted(uint32_t held);
 /* hle_prompts.c: redraws the button prompt glyphs if they should change. */
 void hle_prompts_update(void);
 /* hle_pause.c: a texture of a model file, as the file is set up. */
@@ -80,6 +85,7 @@ void hle_text_boot_setup(void);
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst);
 uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max);
 const uint8_t* hle_dvd_disc_id(void);
+uint8_t* hle_dvd_load(const char* path, uint32_t* size);
 
 /* Copies a NUL-terminated guest string (at most n - 1 bytes). */
 void hle_read_str(uint32_t addr, char* out, size_t n);
