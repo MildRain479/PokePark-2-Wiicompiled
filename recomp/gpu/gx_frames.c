@@ -760,6 +760,53 @@ static void blend_chunks(uint32_t* out, const uint32_t* prev, const uint32_t* cu
     }
 }
 
+/* Draws placed alike are drawn alike. A model drawn twice in a frame, as
+ * the cave's sky is (once in the scene, then again on black for the glow,
+ * tested against the scene's depth for where it shows), is two draws, and
+ * one may be matched with the frame before and the other not: blended,
+ * one moved and the other didn't, a hair apart, the depth test failed in
+ * bands, and the glow over the sky went dark and striped for the frame.
+ * Each draw whose position matrix and projection are as an earlier one's
+ * in the frame has its blended ones. */
+#define PLACES 1024
+typedef struct Place {
+    unsigned gen;
+    uint32_t own[19], drawn[19];
+} Place;
+static Place sPlaces[PLACES];
+static unsigned sPlaceGen;
+
+static void place_words(uint32_t* out, const uint32_t* xf, int m) {
+    memcpy(out, xf + m, 12 * 4);
+    memcpy(out + 12, xf + GX_XF_MEM_WORDS + 0x20, 7 * 4);
+}
+
+/* drawn, or a copy in placed with the earlier draw's placing; NULL if as it is. */
+static const uint32_t* same_place(const GXDrawState* st, const uint32_t* own, const uint32_t* drawn, uint32_t* placed) {
+    uint32_t key[19], have[19], h = 2166136261u;
+    int m = (int)(own[GX_XF_MEM_WORDS + 0x18] & 63) * 4, i, slot;
+    Place* p;
+    if (st->mtx_per_vertex & 1 || m + 12 > 0x100) return NULL;
+    place_words(key, own, m);
+    for (i = 0; i < 19; i++) h = (h ^ key[i]) * 16777619u;
+    for (slot = (int)(h & (PLACES - 1));; slot = (slot + 1) & (PLACES - 1)) {
+        p = &sPlaces[slot];
+        if (p->gen != sPlaceGen) break;
+        if (memcmp(p->own, key, sizeof(key)) == 0) {
+            place_words(have, drawn, m);
+            if (memcmp(have, p->drawn, sizeof(have)) == 0) return NULL;
+            if (drawn != placed) memcpy(placed, drawn, GX_XF_WORDS * 4);
+            memcpy(placed + m, p->drawn, 12 * 4);
+            memcpy(placed + GX_XF_MEM_WORDS + 0x20, p->drawn + 12, 7 * 4);
+            return placed;
+        }
+    }
+    p->gen = sPlaceGen;
+    memcpy(p->own, key, sizeof(key));
+    place_words(p->drawn, drawn, m);
+    return NULL;
+}
+
 /* For each draw of sPrev, the draw of sCur matched with it; -1 for none. */
 static int* sNext;
 static int sNextCap;
@@ -774,6 +821,10 @@ static void render_frame(float t) {
     int before = t < 0.5f && sPrevDrawable;
     const Frame* f = before ? sPrev : sCur;
     const Frame* g = before ? sCur : sPrev; /* the other frame, blended with */
+    if (++sPlaceGen == 0) {
+        memset(sPlaces, 0, sizeof(sPlaces));
+        sPlaceGen = 1;
+    }
     /* The last draw blended into xf, of f and of g; -1 for none. Two
      * draws in a row, of both frames, differ only in their XF dirty
      * chunks (the decoder's words changed since its draw before), so
@@ -805,6 +856,14 @@ static void render_frame(float t) {
                 drawn = xf;
             } else {
                 last = -1;
+            }
+            {
+                static uint32_t placed[GX_XF_WORDS];
+                const uint32_t* moved = same_place(&r->st, own, drawn, drawn == xf ? xf : placed);
+                if (moved) {
+                    drawn = moved;
+                    last = -1; /* xf isn't the blend the next draw would build on */
+                }
             }
             if (drawn != own && r->st.bounds_ok &&
                 (r->st.bounds_mtx[0] > r->st.bounds_mtx[1] ||
