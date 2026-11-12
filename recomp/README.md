@@ -49,7 +49,7 @@ aiming photos. The four attractions (`recomp/patches/S2LE01/minigames.h`):
 | Attraction | Controls |
 |---|---|
 | Cake Contraption | mouse or right stick to aim, A to shoot |
-| Dance Inferno | the shake keys by turns, in time with the symbols |
+| Dance Inferno | each move's key, drawn on its icon (W A S D, E, Space; the d-pad, RB, A): pressed as it comes up, held to its bar's end (`hle_dance.c`) |
 | Power Bash | the shake keys by turns to swing; A drops a bomb through the floor |
 | Flight of Fancy | left, right, up and down to tilt, 2 to fly faster |
 
