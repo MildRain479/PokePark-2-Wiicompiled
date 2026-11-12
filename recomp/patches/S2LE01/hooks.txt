@@ -79,3 +79,25 @@
 0x803D7670 fn_803D7670  # hle_text.c: the instructions for the PC's and phone's controls
 0x801B8170 DanceInferno_Frame  # hle_dance.c: Dance Inferno's move due, for a key each
 0x801B8850 DanceInferno_Frame2  # hle_dance.c: the same, the song's second part
+0x80374020 FAInit  # hle_sd.c: the SD card, kept in memory: no driver started
+0x80373AF0 FAAttach  # hle_sd.c: a card always in the slot
+0x80373DA0 FADetach  # hle_sd.c
+0x80374160 FA_Mount  # hle_sd.c: mount
+0x80373D50 FA_MediaCheck  # hle_sd.c: the media check after a failed mount
+0x803740F0 FAIsWriteProtected  # hle_sd.c
+0x80374340 FAUnmount  # hle_sd.c
+0x80373FF0 FA_Devinf  # hle_sd.c: devinf (free space)
+0x80373E50 FAErrnum  # hle_sd.c
+0x80374190 FA_Opendir  # hle_sd.c: opendir
+0x80373CF0 FA_Closedir  # hle_sd.c: closedir
+0x80374130 FAMkdir  # hle_sd.c
+0x80374310 FARemove  # hle_sd.c
+0x80373FB0 FAFstat  # hle_sd.c
+0x80373F50 FAFsfirst  # hle_sd.c
+0x80373F80 FAFsnext  # hle_sd.c
+0x80373EF0 FAFopen  # hle_sd.c
+0x80373D20 FACreate  # hle_sd.c
+0x80373E90 FA_Fclose  # hle_sd.c: fclose: a photo written is saved where the player chooses
+0x80373EC0 FA_Fgetsize  # hle_sd.c: fgetsize
+0x80373F20 FAFseek  # hle_sd.c
+0x80373FE0 FA_Fwrite  # hle_sd.c: fwrite

@@ -136,6 +136,10 @@ and on to a Wii by right-clicking the game in Dolphin's list and choosing
   sides. The HUD and menus stay at 16:9 in the middle.
 - **Field of view.** 80% to 150% of the game's, in the park.
 - **Movies.** Shown as they were, sharpened, or AI upscaled.
+- **Texture packs.** Packs made for Dolphin work as they are: put the
+  pack's folder in a `textures` folder beside the game (on Android, the
+  `textures` folder beside `S2LE01`). Options > Display > Texture pack
+  turns it off and on.
 - **Vulkan and OpenGL renderers.** Vulkan is the default and the
   fastest. It falls back to OpenGL if Vulkan can't start.
 - **Fullscreen** (borderless) or windowed, toggled with Alt+Enter.
@@ -184,6 +188,8 @@ Optional changes to the game's balance, all off (100%) by default:
 - **An in-game Options menu.** It's in the PokéPark Pad (pause menu) and
   on the save files screen, in the game's own style, with a way to close
   the game. Changes apply immediately and are saved in `settings.ini`.
+- **Save photos anywhere.** Copying photos to the SD card asks for a
+  folder, and the photos are saved there as JPEGs.
 - **Autosave.** With Options > Gameplay > Autosave on, the game saves
   itself, as the PokéPark Pad's Save does, whenever you make a friend
   or enter another area. It's off by default.

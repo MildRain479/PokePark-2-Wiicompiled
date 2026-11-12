@@ -149,3 +149,26 @@
 #define F_DanceInferno_Frame_orig f_801B8170_orig
 #define F_DanceInferno_Frame2 f_801B8850
 #define F_DanceInferno_Frame2_orig f_801B8850_orig
+/* hle_sd.c: the SD card (the SDK's FA library, PrFILE2) */
+#define F_FAInit f_80374020
+#define F_FAAttach f_80373AF0
+#define F_FADetach f_80373DA0
+#define F_FA_Mount f_80374160
+#define F_FA_MediaCheck f_80373D50
+#define F_FAIsWriteProtected f_803740F0
+#define F_FAUnmount f_80374340
+#define F_FA_Devinf f_80373FF0
+#define F_FAErrnum f_80373E50
+#define F_FA_Opendir f_80374190
+#define F_FA_Closedir f_80373CF0
+#define F_FAMkdir f_80374130
+#define F_FARemove f_80374310
+#define F_FAFstat f_80373FB0
+#define F_FAFsfirst f_80373F50
+#define F_FAFsnext f_80373F80
+#define F_FAFopen f_80373EF0
+#define F_FACreate f_80373D20
+#define F_FA_Fclose f_80373E90
+#define F_FA_Fgetsize f_80373EC0
+#define F_FAFseek f_80373F20
+#define F_FA_Fwrite f_80373FE0

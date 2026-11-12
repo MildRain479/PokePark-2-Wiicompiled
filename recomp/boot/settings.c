@@ -212,6 +212,8 @@ void settings_save(void) {
             g_settings.frame_rate);
     fprintf(f, "aspect = %s ; the picture's shape: 4:3 (the game's own, from the next start), 16:9, 16:10 or 21:9\n",
             kAspectNames[g_settings.aspect]);
+    fprintf(f, "texture_pack = %d ; 1: Dolphin texture packs in the textures folder replace the game's textures\n",
+            g_settings.texture_pack);
     fprintf(f, "fov = %d ; field of view in the park, percent of the game's: %d-%d\n", g_settings.fov, FOV_MIN,
             FOV_MAX);
     fprintf(f, "aniso = %d ; anisotropic texture filtering: 1 (off), 2, 4, 8 or 16\n", g_settings.aniso);
@@ -277,6 +279,7 @@ void settings_load(void) {
     g_settings.dual_screen = 1;
     g_settings.renderer = RENDERER_VULKAN; /* OpenGL draws if it can't start */
     g_settings.aspect = ASPECT_16_9;
+    g_settings.texture_pack = 1;
     g_settings.rumble = 2;
     g_settings.touch_controls = 1;
     g_settings.text_speed = 1;
@@ -322,6 +325,7 @@ void settings_load(void) {
             if (!strcmp(name, "movies"))
                 g_settings.movie_upscale = atoi(p) < 0 ? 0 : atoi(p) > MOVIE_UPSCALE_AI ? MOVIE_UPSCALE_AI : atoi(p);
             if (!strcmp(name, "renderer")) g_settings.renderer = strstr(p, "vulkan") ? RENDERER_VULKAN : RENDERER_OPENGL;
+            if (!strcmp(name, "texture_pack")) g_settings.texture_pack = atoi(p) != 0;
             if (!strcmp(name, "aspect")) {
                 char shape[8] = "";
                 sscanf(p, " %7s", shape);
@@ -434,6 +438,7 @@ void settings_step(int which, int d) {
     }
     case SET_RENDERER: g_settings.renderer = !g_settings.renderer; break;
     case SET_ASPECT: g_settings.aspect = (g_settings.aspect + d + ASPECTS) % ASPECTS; break;
+    case SET_TEXTURE_PACK: g_settings.texture_pack = !g_settings.texture_pack; break;
     case SET_MOVIES: g_settings.movie_upscale = (g_settings.movie_upscale + d + 3) % 3; break;
     case SET_DUAL_SCREEN: g_settings.dual_screen = !g_settings.dual_screen; break;
     case SET_SWAP_SCREENS: g_settings.swap_screens = !g_settings.swap_screens; break;

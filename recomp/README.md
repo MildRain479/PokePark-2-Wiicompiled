@@ -162,7 +162,16 @@ layouts. It squeezes them into the EFB's 640 columns for a TV to
 stretch out; the EFB is rendered 4/3 as wide as it is scaled tall, so
 the stretched picture is at full resolution. Frames are shown at the
 shape they have on a TV, with black bars filling the rest of the
-window. THP movie frames are
+window.
+
+Texture packs (`recomp/boot/texpack.c`) are Dolphin's: PNGs named
+`tex1_<w>x<h>[_m]_<hash>[_<palette hash>]_<format>`, found anywhere
+under the `textures` folder. A texture made for the first time (or
+changed) is hashed as Dolphin does (XXH64 of its first level, and of a
+colour-indexed one's palette entries in use) and, if the pack has its
+picture, that picture is used instead, with its mipmaps made from it.
+Pictures are read when first needed (WIC on Windows, `AImageDecoder` on
+Android) and kept in a 256 MB cache. THP movie frames are
 decoded natively (`hle_thp.c`). EFB copies are converted to their copy
 format, and the EFB depth is stored reversed in a float buffer, for the
 precision GX scenes need near the far plane.
@@ -332,6 +341,11 @@ Diagnostics:
   `RECOMP_GX_COPY_LOG=1` logs each new EFB copy target.
 - `RECOMP_GX_DUMP_TEX=<address>` saves the texture at that address, as
   decoded, to `tex_<address>.bmp` the first time it is loaded.
+- `RECOMP_TEXTURES=<dir>` reads texture packs from there instead of the
+  `textures` folder; `RECOMP_TEXTURES_LOG=1` prints each texture's
+  Dolphin name as it's looked for.
+- `RECOMP_SD_DIR=<dir>` saves photos copied to the SD card there,
+  without asking for a folder.
 - `RECOMP_WATCH_LOG=1`, with `RECOMP_WATCH`, logs every function that
   writes the watched range instead of stopping at the first.
 - `RECOMP_DUMP_MEM=<file>` saves MEM1 and MEM2 when the watchdog stops a
@@ -364,7 +378,8 @@ Diagnostics:
 |---|---|
 | `hle_thread.c` | Thread switching. Each guest thread is a host fiber. `OSSaveContext` and `OSLoadContext` become fiber switches. Interrupts run on the interrupted thread and return to it. |
 | `hle_irq.c` | Interrupt delivery: device completions, the decrementer (`OSAlarm`), and a 59.94 Hz VI retrace. These are taken when the game enables interrupts, and the idle loop sleeps until the next one. |
-| `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no SD card and no Bluetooth adapter. |
+| `hle_ios.c` | IOS (`__ios_Ipc2`): devices answered on the host. There is no Bluetooth adapter. |
+| `hle_sd.c` | The SD card, answered above `/dev/sdio` at the SDK's FA file calls (PrFILE2's): a card kept in memory, always in the slot and empty at start. A photo the album copies to it is saved in a folder the player picks, asked once per copy (`host_sdcard.h`: the shell's folder picker in `sdcard_win32.c`, the system's in `sdcard_android.c`). |
 | `hle_autosave.c` | Autosave (Options > Gameplay, off by default): when a friend is made (a Pokemon's friendship points reaching 100) or another area entered (the save data's area and zone changing), the save the PokePark Pad's Save makes (`fn_80185A20`): the game held busy (`fn_8002EAB0`), the play time brought up to date (`fn_802161D0`) and the slot the game was loaded from written (`fn_802165A0`, polled with `fn_802166A0` and `fn_80216750`). Watched from the minimap's drawing, so in the park; it waits until no event script has run for half a second (the script interface's `+0x248`, `0x804B04F0`). |
 | `hle_nand.c` | The NAND file system (`/dev/fs` and NAND file descriptors), stored in a host directory. It also provides what a US console's system menu leaves there: `SYSCONF` (English, stereo, Wii Remote settings) and `setting.txt` (region USA). `SCGetAspectRatio` reports a 16:9 TV unless `RECOMP_WIDESCREEN=0`. |
 | `hle_dvd.c` | The disc. `/dev/di` reads are mapped to the extracted files through the FST. |
