@@ -51,6 +51,8 @@ extern int (*g_host_script_input)(uint32_t held);
  * to it, on the device used last. Returns 0 if there is none (the game's
  * own glyph stays). */
 extern int (*g_host_prompt_icon)(uint32_t button, uint8_t* coverage, int w, int h);
+/* With the button for g_host_prompt_icon: HOST_PAD_SCREEN_UP is up alone. */
+#define HOST_PROMPT_ALONE 0x80000000u
 /* Changes whenever those icons may have. */
 extern uint32_t (*g_host_prompt_generation)(void);
 /* The name of what the player has bound to a button (a HOST_PAD_* bit) on

@@ -7,7 +7,8 @@
  * to press: on the keyboard and mouse, the controller, or the touch
  * controls, whichever was used last.
  *
- * In the attractions the shake keys swing the remote by turns (hle_motion.c);
+ * In the attractions the shake keys swing the remote by turns (in Dance
+ * Inferno each move has a key instead, drawn on its icon: hle_dance.c);
  * in the field, holding either one shakes it (hle_wpad.c). Buttons are the
  * game's own button tags, which hle_prompts.c draws as the keys bound to
  * them; the movement and shake keys are named instead, from the bindings.
@@ -59,8 +60,10 @@ static const struct {
     {"AT_30_10_030", "Aim the pointer", "Aim the cursor at a cake ingredient,\nand press [A] to shoot it!"},
     {"AT_30_04_030", "Aim the pointer", "Aim the cursor at a cake ingredient,\nand press [A] to shoot it!"},
     /* Dance Inferno */
-    {"AT_30_01_020", "Hold the Wii Remote", "Press [shake] by turns, in time\nwith the music, to dance\njust like Lopunny."},
-    {"AT_30_11_020", "Hold the Wii Remote", "Press [shake] by turns, in time\nwith the music, to dance\njust like Lopunny."},
+    {"AT_30_01_020", "Hold the Wii Remote",
+     "Press the button on each move's\nicon as it comes up, and hold it\nto its bar's end, to dance\njust like Lopunny."},
+    {"AT_30_11_020", "Hold the Wii Remote",
+     "Press the button on each move's\nicon as it comes up, and hold it\nto its bar's end, to dance\njust like Lopunny."},
     /* Power Bash */
     {"AT_30_02_020", "When a Pok", "When a Pok\xe9mon appears,\npress [shake] by turns\nto swing at it!"},
     {"AT_30_12_020", "When a Pok", "When a Pok\xe9mon appears,\npress [shake] by turns\nto swing at it!"},

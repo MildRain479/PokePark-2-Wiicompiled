@@ -240,13 +240,16 @@ static void draw_icon(const Icon* icon, uint8_t* out, int stride, int bx, int by
 }
 
 /* The icon for button, as coverage (0-255) in a w x h box, top row first.
- * HOST_PAD_SCREEN_UP stands for the d-pad as a whole: on the controller
+ * HOST_PAD_SCREEN_UP stands for the d-pad as a whole (unless with
+ * HOST_PROMPT_ALONE, for up alone): on the controller
  * the left stick (which moves too), on the keyboard its four keys in a
  * cross, if each has an icon. Returns 0 to keep the game's glyph. */
 static int prompt_icon(uint32_t button, uint8_t* out, int w, int h) {
     Icon* icon;
+    int alone = (button & HOST_PROMPT_ALONE) != 0;
+    button &= ~HOST_PROMPT_ALONE;
     memset(out, 0, (size_t)w * h);
-    if (button == HOST_PAD_SCREEN_UP && !input_controller_last()) {
+    if (button == HOST_PAD_SCREEN_UP && !alone && !input_controller_last()) {
         static const int kCell[4][2] = {{1, 0}, {1, 2}, {0, 1}, {2, 1}}; /* up, down, left, right */
         Icon* arrows[4];
         int i;
@@ -258,7 +261,7 @@ static int prompt_icon(uint32_t button, uint8_t* out, int w, int h) {
         return 1;
     }
     {
-        const char* name = button == HOST_PAD_SCREEN_UP ? "pad_lstick" : icon_for(button);
+        const char* name = button == HOST_PAD_SCREEN_UP && !alone ? "pad_lstick" : icon_for(button);
         if (!(icon = name ? load_icon(name) : NULL)) return 0;
     }
     draw_icon(icon, out, w, 0, 0, w, h);

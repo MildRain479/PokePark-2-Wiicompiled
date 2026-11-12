@@ -3,7 +3,7 @@ static const struct {
     int at, hold, use;
 } kMinigames[] = {
     {1, HOLD_SIDEWAYS, USE_POINTER},          /* Cake Contraption: point, A shoots */
-    {2, HOLD_UPRIGHT, USE_SWING},             /* Dance Inferno: held upright, dancing with the music */
+    {2, HOLD_UPRIGHT, USE_DANCE},             /* Dance Inferno: held upright, each move's key (hle_dance.c) */
     {3, HOLD_SIDEWAYS, USE_SHAKE | USE_ANY_WAY}, /* Power Bash: swing, A drops a bomb through the floor */
     {4, HOLD_SIDEWAYS, USE_STEER | USE_PITCH}, /* Flight of Fancy: tilted, 2 flies faster */
 };

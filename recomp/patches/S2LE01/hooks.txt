@@ -77,3 +77,5 @@
 0x80187310 MovieManager_Advance  # hle_game.c: a movie frame at the scene's own pace
 0x8013CAC0 fn_8013CAC0  # hle_minimap.c: the minimap's layouts marked, for a second screen
 0x803D7670 fn_803D7670  # hle_text.c: the instructions for the PC's and phone's controls
+0x801B8170 DanceInferno_Frame  # hle_dance.c: Dance Inferno's move due, for a key each
+0x801B8850 DanceInferno_Frame2  # hle_dance.c: the same, the song's second part

@@ -145,3 +145,7 @@
 #define F_MenuUIPartsPause_Update_orig f_801795B0_orig
 #define F_MenuScreenSaveData_Update f_80157860
 #define F_MenuScreenSaveData_Update_orig f_80157860_orig
+#define F_DanceInferno_Frame f_801B8170
+#define F_DanceInferno_Frame_orig f_801B8170_orig
+#define F_DanceInferno_Frame2 f_801B8850
+#define F_DanceInferno_Frame2_orig f_801B8850_orig

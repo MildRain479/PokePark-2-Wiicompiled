@@ -10,6 +10,9 @@
  *     turns (Q and E, LB and RB): a swing up or down for each press after
  *     the other key's, so the faster they go by turns, the faster the
  *     shaking (about 8 presses a second wins Bulbasaur's dash in 9 s);
+ *   dancing (Lopunny's Dance Inferno): held upright; each move has a key,
+ *     drawn on its icon (hle_dance.c): pressed as the move comes up, it
+ *     shakes, and held, it shakes again for each further beat of the move;
  *   swinging on a vine or rope (Venusaur, Tangrowth): held upright; the
  *     shake keys by turns swing it back and forth, in time with the vine;
  *     B pushes it forward to jump, as the game asks ("Push [B] as shown"),
@@ -46,7 +49,11 @@ void (*g_host_pointer_read)(float* dx, float* dy);
 #define PI 3.14159265f
 
 enum { HOLD_SIDEWAYS, HOLD_UPRIGHT };
-enum { USE_SHAKE = 1, USE_STEER = 2, USE_PITCH = 4, USE_SWING = 8, USE_PUSH = 16, USE_BAT = 32, USE_POINTER = 64, USE_ANY_WAY = 128 };
+enum {
+    USE_SHAKE = 1, USE_STEER = 2, USE_PITCH = 4, USE_SWING = 8, USE_PUSH = 16, USE_BAT = 32, USE_POINTER = 64, USE_ANY_WAY = 128,
+    USE_DANCE = 256 /* a key for each move: hle_dance.c */
+};
+int hle_dance_swing(uint32_t held, uint32_t report);
 
 #include "minigames.h"
 
@@ -227,7 +234,9 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     }
 
     /* Bursts of acceleration on top. */
-    swing = (use & (USE_SHAKE | USE_SWING | USE_BAT | USE_ANY_WAY)) ? shake_swing(held, report) : 0;
+    swing = (use & USE_DANCE) ? hle_dance_swing(held, report)
+            : (use & (USE_SHAKE | USE_SWING | USE_BAT | USE_ANY_WAY)) ? shake_swing(held, report)
+                                                                       : 0;
     if (swing) {
         /* Up and down, out of its face, whichever way it is held: running
          * reads only that (in Bulbasaur's dash, a shake along its length
