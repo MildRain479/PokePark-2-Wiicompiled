@@ -30,9 +30,9 @@ extern struct android_app* g_android_app; /* window_android.c */
 #include "version.h"
 
 #define API_HOST "api.github.com"
-#define API_PATH "/repos/MildRain479/PokePark-Wiicompiled/releases/latest"
-#define RELEASES_PAGE "https://github.com/MildRain479/PokePark-Wiicompiled/releases/latest"
-#define USER_AGENT "PokePark-Wiicompiled/" RECOMP_VERSION
+#define API_PATH "/repos/MildRain479/PokePark-2-Wiicompiled/releases/latest"
+#define RELEASES_PAGE "https://github.com/MildRain479/PokePark-2-Wiicompiled/releases/latest"
+#define USER_AGENT "PokePark-2-Wiicompiled/" RECOMP_VERSION
 #define MAX_REPLY (256 * 1024)
 
 static volatile int sState; /* UPDATE_* */
