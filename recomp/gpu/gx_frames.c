@@ -242,6 +242,28 @@ static int pos_row(const GXDrawState* st, const GXVertex* v, int vertices, const
     return (int)(st->xf[GX_XF_MEM_WORDS + 0x18] & 0x3F);
 }
 
+/* Whether the draw lays a copy the frame made of its own picture where its
+ * vertices' texture coordinates put it: a layer of the picture, a blur's
+ * (the cave's: Pikachu alone, blurred and laid back over him). The copy
+ * is of the frame as drawn, in between too; the draw moved half way, it
+ * laid it beside: a second Pikachu, the layer's edge a band at the side.
+ * A copy projected from the vertices' positions (a shadow, the floor's)
+ * follows them, and is blended with them. */
+static int lays_copy(const GXDrawState* st) {
+    int s, i;
+    for (s = 0; s < st->num_stages; s++) {
+        const GXTevStage* g = &st->stage[s];
+        uint32_t tg;
+        if (!g->tex_enable || g->texmap > 7 || g->texcoord > 7) continue;
+        tg = st->xf[GX_XF_MEM_WORDS + 0x40 + g->texcoord];
+        if (((tg >> 7) & 0x1F) == 0) continue; /* from the position */
+        for (i = sRec->count - 2; i >= 0; i--) {
+            if (sRec->ops[i].op == OP_COPY && st->texture[g->texmap] == sDev->copy_texture(sRec->ops[i].a[0])) return 1;
+        }
+    }
+    return 0;
+}
+
 static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int first_index, int count, int row) {
     RecOp* r = rec_op(OP_DRAW);
     r->st = *st;
@@ -258,6 +280,7 @@ static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int 
     r->a[2] = first_index;
     r->a[3] = count;
     r->a[4] = row;
+    r->a[5] = lays_copy(st);
 }
 
 /* How far apart two draws are: the sum of the differences of their
@@ -400,10 +423,37 @@ static float camera_distance(const RecOp* prev, const RecOp* cur) {
     return d == d ? d : 1e30f;
 }
 
+/* How far apart two draws' position matrices' rotation and scale are (the
+ * one of sPrev turned as the camera turned). */
+static float shape_distance(const RecOp* prev, const RecOp* cur, int camera) {
+    const uint32_t *p = pos_matrix(sPrev, prev), *c = pos_matrix(sCur, cur);
+    float d = 0;
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++) {
+            float was = wordf(p[4 * i + j]);
+            if (camera) {
+                const float* r = sCamera.m[i];
+                was = r[0] * wordf(p[j]) + r[1] * wordf(p[4 + j]) + r[2] * wordf(p[8 + j]);
+            }
+            d += fabsf(wordf(c[4 * i + j]) - was);
+        }
+    }
+    return d == d ? d : 0;
+}
+
+/* Where they are, and of draws in one place, how alike they are: the
+ * Attraction Cleared banner and the fading copies of it that trail it,
+ * bigger, are one picture (one key) with one middle; paired by where
+ * alone, the banner took a copy's size as often as not, its own between
+ * them, and jumped from size to size. */
+#define SHAPE_WEIGHT 1e-3f
+
 static float draw_distance(const RecOp* prev, const RecOp* cur, float limit) {
     const uint32_t *p = sPrev->xf + prev->xf, *c = sCur->xf + cur->xf;
-    if (sCameraValid && perspective(p) && perspective(c)) return camera_distance(prev, cur);
-    return matrix_distance(p, c, limit);
+    int camera = sCameraValid && perspective(p) && perspective(c);
+    float d = camera ? camera_distance(prev, cur) : matrix_distance(p, c, limit);
+    return d < limit ? d + SHAPE_WEIGHT * shape_distance(prev, cur, camera) : d;
 }
 
 /* Whether a match can be one object moving. Of many alike, one going as
@@ -416,6 +466,7 @@ static int same_object(const RecOp* prev, const RecOp* cur) {
     const uint32_t *c = pos_matrix(sCur, cur), *p = pos_matrix(sPrev, prev);
     float x = wordf(c[3]), y = wordf(c[7]), z = wordf(c[11]), d;
     if (prev->a[4] != cur->a[4]) return 0; /* placed by another of its matrices */
+    if (prev->a[5] || cur->a[5]) return 0; /* lays a copy of its picture (lays_copy) */
     if (!perspective(sPrev->xf + prev->xf) || !perspective(sCur->xf + cur->xf)) return 1;
     /* (With too few draws to tell the camera's motion by, as it is here.) */
     d = sCameraValid ? camera_distance(prev, cur)
@@ -993,7 +1044,10 @@ int display_msaa(void) { return sDev->msaa(); }
 int display_renderer(void) { return sDev == &g_vk_device ? RENDERER_VULKAN : RENDERER_OPENGL; }
 
 int gxb_recording(void) {
-    int want = sOutputRate > 60;
+    /* Only when more than 60 frames a second would be shown: on a 60 Hz
+     * display (an Android device's refresh rate capped in its settings)
+     * the setting's 120 is 60, drawn as at 60. */
+    int want = output_rate() > 60.5;
     if (sRecording && !want && sHaveFrame) {
         /* Stopping: show the newest frame as it is. */
         GL_ENTER();
