@@ -246,12 +246,13 @@ controller, whichever was used last, and again whenever the bindings or
 the device change. The icons are PNGs in `recomp/assets/prompts`, copied
 beside the program (Icons8's; see the README there); a key with none
 keeps the game's glyph, as does the d-pad on the keyboard. Prompts drawn
-as pictures in a screen's layout (the save screen's footer, the title's
-"Please Press") are not text and stay as they are, except the field's
-action bubble ("Talk", "Check": `ActionWin.tpl`, found as the game binds
-it with `TPLBind`), whose 2 is redrawn as the bound button: a
-controller's button in the game's grey disc, a key (Space, say) on its
-own, the disc wiped.
+as pictures in a screen's layout (the save screen's footer) are not text
+and stay as they are, except two, found as the game binds them with
+`TPLBind`, whose 2 is redrawn as the bound button: the field's action
+bubble ("Talk", "Check": `ActionWin.tpl`) and the title's "Please Press"
+(`StartButtonTwo.tpl`). A controller's button goes in the game's grey
+disc; a key (Space, say) is drawn on its own, the disc wiped: on the
+bubble's white, or on the title white with a grey edge like the words.
 
 The keyboard counts only while the game window has focus. While it has
 focus the mouse is captured for the camera: Esc lets it go, and a click

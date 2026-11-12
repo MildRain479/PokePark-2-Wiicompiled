@@ -431,19 +431,27 @@ void F_ResTex_Init(ppc_t* c) {
  * so on, over a 2 in a grey disc). A controller's button: the disc keeps
  * its ring; inside it the 2 is wiped and the icon for what is bound to the
  * button drawn in the ring's dark grey. A key: the ring wiped too, and the
- * key drawn larger on the bubble's white. Found as the game binds the TPL (TPLBind), by its size
- * and format; its CI8 colours from its palette. */
+ * key drawn larger on the bubble's white. And the title's "Please Press"
+ * (MenuStartMenu.dac, StartButtonTwo.tpl), its 2 in a shaded grey disc on
+ * nothing: a controller's button is drawn in the disc, over its shading;
+ * a key, the disc wiped, white with a grey edge like the words. Found as
+ * the game binds the TPL (TPLBind), by its size and format; its CI8
+ * colours from its palette. */
+
+enum { TPL_BUBBLE, TPL_TITLE };
 
 typedef struct {
     int w, h, colours;   /* the texture: CI8, this many RGB5A3 colours */
     int cx, cy, r;       /* the disc inside the ring: centre and radius */
     int ring;            /* the ring's outer radius */
-    int kw, kh;          /* the box a key is drawn in, about the centre */
+    int kx, kw, kh;      /* the box a key is drawn in: its centre's x (cy its y), size */
     uint32_t button, ink, fill; /* 0xRRGGBB */
+    int style;           /* TPL_* */
 } TplKind;
 
 static const TplKind kTplKinds[] = {
-    {110, 71, 80, 54, 23, 7, 11, 22, 16, HOST_PAD_2, 0x505050, 0xE8E8E8}, /* ActionWin.tpl */
+    {110, 71, 80, 54, 23, 7, 11, 54, 22, 16, HOST_PAD_2, 0x505050, 0xE8E8E8, TPL_BUBBLE}, /* ActionWin.tpl */
+    {290, 34, 64, 258, 17, 13, 17, 265, 42, 26, HOST_PAD_2, 0x383838, 0, TPL_TITLE},       /* StartButtonTwo.tpl */
 };
 #define TPL_KINDS ((int)(sizeof(kTplKinds) / sizeof(kTplKinds[0])))
 #define MAX_TPLS 4
@@ -481,8 +489,78 @@ static int tpl_here(const TplPicture* t) {
            LD32(t->header + 8) == t->image;
 }
 
+/* The colour nearest r, g, b at alpha a, of all of them. */
+static int tpl_nearest_alpha(const TplPicture* t, int r, int g, int b, int a) {
+    int i, best = 0;
+    long bestD = -1;
+    for (i = 0; i < t->kind->colours; i++) {
+        const uint8_t* p = t->rgba[i];
+        long dr = p[0] - r, dg = p[1] - g, db = p[2] - b, da = p[3] - a, d;
+        d = (dr * dr + dg * dg + db * db) * (p[3] + a) / 510 + 4 * da * da; /* colour counts as much as it shows */
+        if (bestD < 0 || d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* The title's: a controller's button in the disc, drawn over its shading
+ * (the 2's dark pixels taken for the shading of their row, beside it); a
+ * key, the disc and the box wiped, the key white with a grey edge. */
+static void draw_title_tpl(TplPicture* t, int key, const uint8_t* cov, int bw, int bh) {
+    const TplKind* k = t->kind;
+    int x0 = (key ? k->kx : k->cx) - bw / 2, y0 = k->cy - bh / 2, x, y;
+    int left = k->cx - k->ring - 1, right = k->cx + k->ring, top = k->cy - k->ring - 1, bottom = k->cy + k->ring;
+    int ir = (int)(k->ink >> 16 & 255), ig = (int)(k->ink >> 8 & 255), ib = (int)(k->ink & 255);
+    if (key) {
+        if (x0 < left) left = x0;
+        if (x0 + bw > right) right = x0 + bw;
+        if (y0 < top) top = y0;
+        if (y0 + bh > bottom) bottom = y0 + bh;
+    }
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right >= k->w) right = k->w - 1;
+    if (bottom >= k->h) bottom = k->h - 1;
+    for (y = top; y <= bottom; y++) {
+        for (x = left; x <= right; x++) {
+            int ix = x - x0, iy = y - y0, dx = 2 * x + 1 - 2 * k->cx, dy = 2 * y + 1 - 2 * k->cy;
+            int a = ix >= 0 && iy >= 0 && ix < bw && iy < bh ? cov[iy * bw + ix] : 0;
+            uint8_t px = t->original[y * k->w + x];
+            if (key) {
+                /* The icon's thin lines thickened to the words' strokes:
+                 * white within a pixel of them, the grey edge within
+                 * three. */
+                int edge = 0, ex, ey, r, g, b, al;
+                a = 0;
+                for (ey = iy - 3; ey <= iy + 3; ey++) {
+                    for (ex = ix - 3; ex <= ix + 3; ex++) {
+                        int d2 = (ex - ix) * (ex - ix) + (ey - iy) * (ey - iy), v;
+                        if (ex < 0 || ey < 0 || ex >= bw || ey >= bh || d2 > 9) continue;
+                        v = cov[ey * bw + ex] * 2 > 255 ? 255 : cov[ey * bw + ex] * 2;
+                        if (v > edge) edge = v;
+                        if (d2 <= 1 && v > a) a = v;
+                    }
+                }
+                r = g = b = (0x66 * (255 - a) + 255 * a) / 255;
+                al = edge;
+                px = (uint8_t)tpl_nearest_alpha(t, r, g, b, al);
+            } else if (dx * dx + dy * dy <= 4 * k->r * k->r) {
+                /* The 2 (in the disc's middle rows): darker than the
+                 * shading beside it on its row. */
+                const uint8_t *o = t->rgba[px], *s = t->rgba[t->original[y * k->w + k->cx - 7]];
+                if (dy * dy <= 4 * (k->r - 3) * (k->r - 3) && o[0] + 12 < s[0]) o = s;
+                px = (uint8_t)tpl_nearest(t, (o[0] * (255 - a) + ir * a) / 255, (o[1] * (255 - a) + ig * a) / 255,
+                                          (o[2] * (255 - a) + ib * a) / 255);
+            }
+            ST8(ci8_byte(t->image, k->w, x, y), px);
+        }
+    }
+}
+
 static void draw_tpl(TplPicture* t) {
-    enum { MAX_S = 24 };
+    enum { MAX_S = 48 };
     static uint8_t cov[MAX_S * MAX_S];
     const TplKind* k = t->kind;
     /* A key (the generation's low bit clear: the keyboard was used last)
@@ -497,6 +575,15 @@ static void draw_tpl(TplPicture* t) {
     int ir = (int)(k->ink >> 16 & 255), ig = (int)(k->ink >> 8 & 255), ib = (int)(k->ink & 255);
     if (bw > MAX_S || bh > MAX_S) return;
     if (g_host_prompt_icon) drew = g_host_prompt_icon(k->button, cov, bw, bh);
+    if (k->style == TPL_TITLE) {
+        if (drew) {
+            draw_title_tpl(t, key, cov, bw, bh);
+        } else { /* the game's 2 back */
+            for (y = 0; y < k->h; y++)
+                for (x = 0; x < k->w; x++) ST8(ci8_byte(t->image, k->w, x, y), t->original[y * k->w + x]);
+        }
+        return;
+    }
     for (y = k->cy - k->ring - 1; y <= k->cy + k->ring; y++) {
         for (x = k->cx - k->ring - 1; x <= k->cx + k->ring; x++) {
             int dx = 2 * x + 1 - 2 * k->cx, dy = 2 * y + 1 - 2 * k->cy;

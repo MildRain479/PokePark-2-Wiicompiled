@@ -155,7 +155,8 @@ and on to a Wii by right-clicking the game in Dolphin's list and choosing
   slots and two controller slots.
 - **Button prompts match your device.** The game's on-screen Wii Remote
   icons are redrawn as the key or button they're bound to, in the menus'
-  button bar, the bubble over Pikachu's head and the text, switching
+  button bar, the bubble over Pikachu's head, the title screen's "Please
+  Press" and the text, switching
   between keyboard and controller as you use them.
 - **Instructions for your controls.** The attractions' How to Play
   pages, the partners' moves as each joins, the moves taught in the
