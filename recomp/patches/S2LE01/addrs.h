@@ -172,3 +172,6 @@
 #define F_FA_Fgetsize f_80373EC0
 #define F_FAFseek f_80373F20
 #define F_FA_Fwrite f_80373FE0
+#define F_fn_80195F70 f_802330F0
+#define F_fn_80196200 f_80233380
+#define F_fn_80196030 f_802331B0

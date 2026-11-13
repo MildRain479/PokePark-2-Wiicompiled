@@ -101,3 +101,6 @@
 0x80373EC0 FA_Fgetsize  # hle_sd.c: fgetsize
 0x80373F20 FAFseek  # hle_sd.c
 0x80373FE0 FA_Fwrite  # hle_sd.c: fwrite
+0x802330F0 fn_80195F70  # hle_lookup.c: resources by name, found natively (area loads)
+0x80233380 fn_80196200  # hle_lookup.c: the same, the other kind
+0x802331B0 fn_80196030  # hle_lookup.c: resources by number, found natively
