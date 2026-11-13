@@ -229,8 +229,13 @@ void F_WPADRead(ppc_t* c) {
         az = acc[2];
     } else if (held & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2)) {
         /* Swing along the remote's length, which is left-right on screen
-         * held sideways: +-2.5 g, about 17 times a second. */
-        ay = (sReports / SWING_REPORTS) & 1 ? ACC_ONE_G * 5 / 2 : -ACC_ONE_G * 5 / 2;
+         * held sideways, and out of its face, up and down: +-2.5 g, about
+         * 17 times a second. The partners' moves and Shake Sprint took
+         * the swing along its length; Pikachu's Iron Tail, in battles,
+         * didn't. */
+        int s = (sReports / SWING_REPORTS) & 1 ? 1 : -1;
+        ay = (int16_t)(s * ACC_ONE_G * 5 / 2);
+        az = (int16_t)(ACC_ONE_G + s * ACC_ONE_G * 5 / 2);
     }
     memset(MA(st), 0, 0x2A);
     ST16(st + 0x00, wpad_buttons(held));
