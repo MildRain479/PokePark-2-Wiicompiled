@@ -1544,6 +1544,15 @@ static void wait_idle(void) {
     vkDeviceWaitIdle(sDev);
 }
 static VkPresentModeKHR sPresentMode;
+static int sHaveImmediate, sHaveMailbox; /* the surface's present modes */
+
+/* Off: immediately (tearing allowed), else by mailbox. On (v-sync): by
+ * mailbox, the newest whole frame at each refresh, or, without one, in
+ * time with the display. */
+static VkPresentModeKHR wanted_present_mode(void) {
+    if (!g_settings.vsync && sHaveImmediate) return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    return sHaveMailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+}
 static Buffer sReadback; /* RECOMP_GX_DUMP */
 static const char* sDumpDir;
 static int sDumpEvery = 30;
@@ -1600,6 +1609,7 @@ static void make_swapchain(int w, int h) {
         }
         ci.compositeAlpha = (VkCompositeAlphaFlagBitsKHR)a;
     }
+    sPresentMode = wanted_present_mode();
     ci.presentMode = sPresentMode;
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = old;
@@ -2002,11 +2012,11 @@ static int make_device(void) {
     /* Presenting never waits for the display (as gl_backend.c's): the
      * game paces itself. */
     vkGetPhysicalDeviceSurfacePresentModesKHR(sGpu, sSurface, &nm, modes);
-    sPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     for (i = 0; i < nm; i++) {
-        if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) sPresentMode = modes[i];
-        else if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR && sPresentMode == VK_PRESENT_MODE_FIFO_KHR) sPresentMode = modes[i];
+        if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) sHaveImmediate = 1;
+        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) sHaveMailbox = 1;
     }
+    sPresentMode = wanted_present_mode();
     {
         VkSampleCountFlags c = sLimits.framebufferColorSampleCounts & sLimits.framebufferDepthSampleCounts;
         for (sMaxSamples = 8; sMaxSamples > 1 && !(c & (VkSampleCountFlags)sMaxSamples); sMaxSamples /= 2) {}
@@ -2304,7 +2314,8 @@ static void vk_texture_delete(const uint32_t* handles, int n) {
  * tools/recomp/anime4k.py) once for each frame the movie uploads: twice the
  * size, edges and lines restored. Draws then sample that in its place; U
  * and V stay as they are. The light network on Android, the large one
- * elsewhere. Run before the frame's commands (S->up) when the plane was
+ * elsewhere, where at an internal resolution of 3x or more (1440p and up)
+ * the network runs again on its own output, for four times the size. Run before the frame's commands (S->up) when the plane was
  * uploaded there, else in them, outside the EFB's pass. */
 
 #ifdef __ANDROID__
@@ -2327,11 +2338,16 @@ static VkDescriptorSetLayout sImgLayout;
 static VkPipelineLayout sCompLayout;
 static VkDescriptorPool sCompPool;
 static VkPipeline sA4kPipe[A4K_PASSES];
-static A4kImage sA4kSlot[A4K_SLOTS]; /* the passes' intermediate textures */
-static int sA4kW, sA4kH;             /* their size: the plane's */
+/* The passes' intermediate textures, the size of what they take in: for
+ * the plane, and for twice its size (the second run). */
+typedef struct A4kSlots {
+    A4kImage slot[A4K_SLOTS];
+    int w, h;
+} A4kSlots;
+static A4kSlots sA4kRun[2];
 static struct {
     uint32_t src, stamp; /* the plane and which upload of it */
-    A4kImage out;        /* twice its size */
+    A4kImage out, out4;  /* twice its size; four times (out4.handle 0 if not) */
     uint64_t used;
 } sA4kOut[A4K_OUTS];
 static int sA4kReady = -1; /* compute set up: 1, failed: 0, not yet: -1 */
@@ -2353,9 +2369,9 @@ static void a4k_init(void) {
     li.pBindings = &b;
     CHECK(vkCreateDescriptorSetLayout(sDev, &li, NULL, &sImgLayout));
     size.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    size.descriptorCount = A4K_SLOTS + A4K_OUTS;
+    size.descriptorCount = 2 * (A4K_SLOTS + A4K_OUTS);
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pi.maxSets = A4K_SLOTS + A4K_OUTS;
+    pi.maxSets = 2 * (A4K_SLOTS + A4K_OUTS);
     pi.poolSizeCount = 1;
     pi.pPoolSizes = &size;
     CHECK(vkCreateDescriptorPool(sDev, &pi, NULL, &sCompPool));
@@ -2441,81 +2457,114 @@ static void a4k_drop(A4kImage* a) {
     memset(a, 0, sizeof(*a));
 }
 
-/* Texture src upscaled, as of its last upload: its handle, or 0 (not a
- * texture the network takes, or upscaling is off). */
-static uint32_t a4k_upscale(uint32_t src) {
-    Tex* s = &sTex[src];
-    int i, p, w, h, mid;
-    VkCommandBuffer cb;
-    uint32_t words[16];
-    if (!src || g_settings.movie_upscale != MOVIE_UPSCALE_AI || !s->im.img) return 0;
-    if (sA4kReady < 0) a4k_init();
-    if (!sA4kReady) return 0;
-    w = s->im.w;
-    h = s->im.h;
-    for (i = 0; i < A4K_OUTS; i++) {
-        if (sA4kOut[i].src == src && sA4kOut[i].out.handle && sTex[sA4kOut[i].out.handle].im.w == 2 * w &&
-            sTex[sA4kOut[i].out.handle].im.h == 2 * h)
-            break;
+/* Whether the network runs twice: off Android, at 3x or more. */
+static int a4k_quad(void) {
+#ifdef __ANDROID__
+    return 0;
+#else
+    return sScale >= 3;
+#endif
+}
+
+/* Makes *a a w x h output image (dropping one of another size); 1 if it
+ * was remade. */
+static int a4k_sized(A4kImage* a, int w, int h, VkSampler sampled_as) {
+    if (a->handle && sTex[a->handle].im.w == w && sTex[a->handle].im.h == h) return 0;
+    if (a->handle) {
+        /* Its set is freed: nothing may still use it. */
+        end_efb();
+        wait_idle();
+        a4k_drop(a);
     }
-    if (i < A4K_OUTS && sA4kOut[i].stamp == s->stamp) {
-        sA4kOut[i].used = sSerial;
-        return sA4kOut[i].out.handle;
+    *a = a4k_image(w, h, VK_FORMAT_R8G8B8A8_UNORM, sampled_as, 0);
+    return 1;
+}
+
+/* The intermediate textures r for taking in w x h. */
+static void a4k_slots(A4kSlots* r, int w, int h) {
+    int p;
+    if (r->w == w && r->h == h) return;
+    if (r->w) {
+        end_efb();
+        wait_idle();
     }
-    if (i == A4K_OUTS) {
-        /* The one used longest ago, made for this size. */
-        int oldest = 0;
-        for (i = 1; i < A4K_OUTS; i++) {
-            if (sA4kOut[i].used < sA4kOut[oldest].used) oldest = i;
-        }
-        i = oldest;
-        if (sA4kOut[i].used == sSerial) return 0; /* all four drawn this frame: not a movie */
-        if (!sA4kOut[i].out.handle || sTex[sA4kOut[i].out.handle].im.w != 2 * w ||
-            sTex[sA4kOut[i].out.handle].im.h != 2 * h) {
-            if (sA4kOut[i].out.handle) {
-                /* Its set is freed: nothing may still use it. */
-                end_efb();
-                wait_idle();
-                a4k_drop(&sA4kOut[i].out);
-            }
-            sA4kOut[i].out = a4k_image(2 * w, 2 * h, VK_FORMAT_R8G8B8A8_UNORM, s->sampler, 0);
-        }
-    }
-    if (sA4kW != w || sA4kH != h) {
-        if (sA4kW) {
-            end_efb();
-            wait_idle();
-        }
-        for (p = 0; p < A4K_SLOTS; p++) {
-            a4k_drop(&sA4kSlot[p]);
-            sA4kSlot[p] = a4k_image(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, sampler(0, 1), 1);
-        }
-        sA4kW = w;
-        sA4kH = h;
-    }
-    /* After the plane's upload: in the frame's commands if it was made there. */
-    mid = s->up_serial == sSerial && s->up_cb;
-    if (mid) end_efb();
-    cb = mid ? S->cb : S->up;
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, sCompLayout, 0, 1, &sTexSet, 0, NULL);
     for (p = 0; p < A4K_SLOTS; p++) {
-        Image* im = &sTex[sA4kSlot[p].handle].im;
+        a4k_drop(&r->slot[p]);
+        r->slot[p] = a4k_image(w, h, VK_FORMAT_R16G16B16A16_SFLOAT, sampler(0, 1), 1);
+    }
+    r->w = w;
+    r->h = h;
+}
+
+/* Records the network's passes: texture src (w x h) into out, twice its
+ * size, left ready to sample. */
+static void a4k_record(VkCommandBuffer cb, uint32_t src, int w, int h, const A4kSlots* r, const A4kImage* out) {
+    uint32_t words[16];
+    int p;
+    for (p = 0; p < A4K_SLOTS; p++) {
+        Image* im = &sTex[r->slot[p].handle].im;
         if (im->layout != VK_IMAGE_LAYOUT_GENERAL) transition(cb, im, VK_IMAGE_LAYOUT_GENERAL);
     }
-    transition(cb, &sTex[sA4kOut[i].out.handle].im, VK_IMAGE_LAYOUT_GENERAL);
+    transition(cb, &sTex[out->handle].im, VK_IMAGE_LAYOUT_GENERAL);
     for (p = 0; p < A4K_PASSES; p++) {
         const A4kPass* a = &A4K[p];
-        const A4kImage* o = a->out < 0 ? &sA4kOut[i].out : &sA4kSlot[a->out];
+        const A4kImage* o = a->out < 0 ? out : &r->slot[a->out];
         int k, ow = a->doubles ? 2 * w : w, oh = a->doubles ? 2 * h : h;
         memset(words, 0, sizeof(words));
-        for (k = 0; k < a->n_in; k++) words[k] = a->in[k] < 0 ? src : sA4kSlot[a->in[k]].handle;
+        for (k = 0; k < a->n_in; k++) words[k] = a->in[k] < 0 ? src : r->slot[a->in[k]].handle;
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, sA4kPipe[p]);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, sCompLayout, 1, 1, &o->set, 0, NULL);
         vkCmdPushConstants(cb, sCompLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(words), words);
         vkCmdDispatch(cb, (uint32_t)(ow + 7) / 8, (uint32_t)(oh + 7) / 8, 1);
         memory_barrier(cb);
     }
-    transition(cb, &sTex[sA4kOut[i].out.handle].im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition(cb, &sTex[out->handle].im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+/* Texture src upscaled, as of its last upload: its handle, or 0 (not a
+ * texture the network takes, or upscaling is off). */
+static uint32_t a4k_upscale(uint32_t src) {
+    Tex* s = &sTex[src];
+    int i, w, h, mid, quad = a4k_quad();
+    VkCommandBuffer cb;
+    if (!src || g_settings.movie_upscale != MOVIE_UPSCALE_AI || !s->im.img) return 0;
+    if (sA4kReady < 0) a4k_init();
+    if (!sA4kReady) return 0;
+    w = s->im.w;
+    h = s->im.h;
+    for (i = 0; i < A4K_OUTS && sA4kOut[i].src != src; i++) {}
+    if (i < A4K_OUTS && sA4kOut[i].stamp == s->stamp && sA4kOut[i].out.handle &&
+        sTex[sA4kOut[i].out.handle].im.w == 2 * w && sTex[sA4kOut[i].out.handle].im.h == 2 * h &&
+        (sA4kOut[i].out4.handle != 0) == quad) {
+        sA4kOut[i].used = sSerial;
+        return quad ? sA4kOut[i].out4.handle : sA4kOut[i].out.handle;
+    }
+    if (i == A4K_OUTS) {
+        /* The one used longest ago. */
+        int oldest = 0;
+        for (i = 1; i < A4K_OUTS; i++) {
+            if (sA4kOut[i].used < sA4kOut[oldest].used) oldest = i;
+        }
+        i = oldest;
+        if (sA4kOut[i].used == sSerial) return 0; /* all four drawn this frame: not a movie */
+    }
+    a4k_sized(&sA4kOut[i].out, 2 * w, 2 * h, s->sampler);
+    if (quad) {
+        a4k_sized(&sA4kOut[i].out4, 4 * w, 4 * h, s->sampler);
+        a4k_slots(&sA4kRun[1], 2 * w, 2 * h);
+    } else if (sA4kOut[i].out4.handle) {
+        end_efb();
+        wait_idle();
+        a4k_drop(&sA4kOut[i].out4);
+    }
+    a4k_slots(&sA4kRun[0], w, h);
+    /* After the plane's upload: in the frame's commands if it was made there. */
+    mid = s->up_serial == sSerial && s->up_cb;
+    if (mid) end_efb();
+    cb = mid ? S->cb : S->up;
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, sCompLayout, 0, 1, &sTexSet, 0, NULL);
+    a4k_record(cb, src, w, h, &sA4kRun[0], &sA4kOut[i].out);
+    if (quad) a4k_record(cb, sA4kOut[i].out.handle, 2 * w, 2 * h, &sA4kRun[1], &sA4kOut[i].out4);
     if (mid) {
         forget();
         bind_sets();
@@ -2524,7 +2573,7 @@ static uint32_t a4k_upscale(uint32_t src) {
     sA4kOut[i].src = src;
     sA4kOut[i].stamp = s->stamp;
     sA4kOut[i].used = sSerial;
-    return sA4kOut[i].out.handle;
+    return quad ? sA4kOut[i].out4.handle : sA4kOut[i].out.handle;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -4028,7 +4077,7 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
         VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
         present_done(); /* which may have found the swapchain out of date */
-        if (sChainStale || sChainW != w || sChainH != h) make_swapchain(w, h);
+        if (sChainStale || sChainW != w || sChainH != h || sPresentMode != wanted_present_mode()) make_swapchain(w, h);
         second_chain();
 #ifdef __ANDROID__
         /* The screens swapped: the game's picture (gw by gh) on the second

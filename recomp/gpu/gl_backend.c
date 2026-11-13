@@ -1071,8 +1071,10 @@ static int window_present(int w, int h, int may_drop) {
         ID3D11DeviceContext_CopyResource(sD3dCtx, (ID3D11Resource*)back, (ID3D11Resource*)sShared);
         ID3D11Texture2D_Release(back);
     }
+    /* V-sync: still sync interval 0, which in the flip model shows the
+     * newest whole frame at the next refresh without waiting for it. */
     hr = IDXGISwapChain1_Present(sChain, 0,
-                                 (sTearing ? DXGI_PRESENT_ALLOW_TEARING : 0) | (may_drop ? DXGI_PRESENT_DO_NOT_WAIT : 0));
+                                 (sTearing && !g_settings.vsync ? DXGI_PRESENT_ALLOW_TEARING : 0) | (may_drop ? DXGI_PRESENT_DO_NOT_WAIT : 0));
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return 1;
     if (FAILED(hr) && failures++ < 5) fprintf(stderr, "gl: present failed (%08lX)\n", (unsigned long)hr);
     return 0;

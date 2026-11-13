@@ -74,6 +74,9 @@ static const Row kDisplay[] = {
     {ROW_SETTING, SET_SCALE, "Resolution"},
     {ROW_SETTING, SET_ASPECT, "Aspect ratio"},
     {ROW_SETTING, SET_MSAA, "Anti-aliasing"},     {ROW_SETTING, SET_FRAME_RATE, "Frame rate"},
+#ifndef __ANDROID__
+    {ROW_SETTING, SET_VSYNC, "V-sync"},
+#endif
     {ROW_SETTING, SET_FOV, "Field of view"},       {ROW_SETTING, SET_ANISO, "Filtering"},
     {ROW_SETTING, SET_TEXTURE_PACK, "Texture pack"},
     {ROW_SETTING, SET_MOVIES, "Movies"},
@@ -170,6 +173,7 @@ static void setting_text(int which, char* out, size_t n) {
     case SET_MINIMAP_TOP: snprintf(out, n, g_settings.minimap_top ? "On" : "Off"); break;
     case SET_DUAL_SCREEN: snprintf(out, n, g_settings.dual_screen ? "On" : "Off"); break;
     case SET_SWAP_SCREENS: snprintf(out, n, g_settings.swap_screens ? "On" : "Off"); break;
+    case SET_VSYNC: snprintf(out, n, g_settings.vsync ? "On" : "Off"); break;
     case SET_ANISO: snprintf(out, n, g_settings.aniso == 1 ? "Original" : "%dx", g_settings.aniso); break;
     case SET_TEXTURE_PACK:
         if (!texpack_count()) snprintf(out, n, "None found");

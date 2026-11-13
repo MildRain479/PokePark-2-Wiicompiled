@@ -42,6 +42,7 @@ typedef struct {
     int frame_rate;          /* 30 (the game's own), 60, or 120-240 (interpolated) */
     int fov;                 /* field of view, percent of the game's (tangent of half the angle) */
     int aniso;               /* anisotropic filtering: 1 (off), 2, 4, 8 or 16 */
+    int vsync;               /* whole frames only, no tearing; presenting still never waits for the display */
     int movie_upscale;       /* MOVIE_UPSCALE_* */
     /* Android, on a handheld with two screens (second_screen_device):
      * otherwise all taken as off. */
@@ -93,7 +94,7 @@ void prompts_init(void);
 enum { SET_FULLSCREEN, SET_SCALE, SET_MSAA, SET_FRAME_RATE, SET_FOV, SET_SENSITIVITY, SET_INVERT, SET_ANISO,
        SET_RUMBLE, SET_TEXT_SPEED, SET_BERRIES, SET_PRICES,
        SET_DAMAGE_DEALT, SET_DAMAGE_TAKEN, SET_CHASE_SPEED, SET_RENDERER, SET_TOUCH, SET_UPDATES, SET_MOVIES,
-       SET_DUAL_SCREEN, SET_SWAP_SCREENS, SET_MINIMAP_TOP, SET_ASPECT, SET_AUTOSAVE, SET_TEXTURE_PACK };
+       SET_DUAL_SCREEN, SET_SWAP_SCREENS, SET_MINIMAP_TOP, SET_ASPECT, SET_AUTOSAVE, SET_TEXTURE_PACK, SET_VSYNC };
 /* Changes a setting a step (d: -1 or 1; on and off settings flip), applies
  * and saves it. */
 void settings_step(int which, int d);

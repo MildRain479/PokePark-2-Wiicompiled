@@ -210,6 +210,7 @@ void settings_save(void) {
     fprintf(f, "msaa = %d ; anti-aliasing samples: 1 (off), 2, 4 or 8\n", g_settings.msaa);
     fprintf(f, "frame_rate = %d ; 30 (the game's own), 60, or 120, 144, 165, 240 (interpolated)\n",
             g_settings.frame_rate);
+    fprintf(f, "vsync = %d ; 1: whole frames only, no tearing\n", g_settings.vsync);
     fprintf(f, "aspect = %s ; the picture's shape: 4:3 (the game's own, from the next start), 16:9, 16:10 or 21:9\n",
             kAspectNames[g_settings.aspect]);
     fprintf(f, "texture_pack = %d ; 1: Dolphin texture packs in the textures folder replace the game's textures\n",
@@ -275,6 +276,7 @@ void settings_load(void) {
     memset(&g_settings, 0, sizeof(g_settings));
     g_settings.msaa = 1;
     g_settings.aniso = 1;
+    g_settings.vsync = 1;
     g_settings.movie_upscale = MOVIE_UPSCALE_AI;
     g_settings.dual_screen = 1;
     g_settings.renderer = RENDERER_VULKAN; /* OpenGL draws if it can't start */
@@ -322,6 +324,7 @@ void settings_load(void) {
             if (!strcmp(name, "scale")) g_settings.scale = atoi(p) < 0 ? 0 : atoi(p) > MAX_SCALE ? MAX_SCALE : atoi(p);
             if (!strcmp(name, "msaa")) g_settings.msaa = valid_msaa(atoi(p));
             if (!strcmp(name, "aniso")) g_settings.aniso = valid_aniso(atoi(p));
+            if (!strcmp(name, "vsync")) g_settings.vsync = atoi(p) != 0;
             if (!strcmp(name, "movies"))
                 g_settings.movie_upscale = atoi(p) < 0 ? 0 : atoi(p) > MOVIE_UPSCALE_AI ? MOVIE_UPSCALE_AI : atoi(p);
             if (!strcmp(name, "renderer")) g_settings.renderer = strstr(p, "vulkan") ? RENDERER_VULKAN : RENDERER_OPENGL;
@@ -439,6 +442,7 @@ void settings_step(int which, int d) {
     case SET_RENDERER: g_settings.renderer = !g_settings.renderer; break;
     case SET_ASPECT: g_settings.aspect = (g_settings.aspect + d + ASPECTS) % ASPECTS; break;
     case SET_TEXTURE_PACK: g_settings.texture_pack = !g_settings.texture_pack; break;
+    case SET_VSYNC: g_settings.vsync = !g_settings.vsync; break;
     case SET_MOVIES: g_settings.movie_upscale = (g_settings.movie_upscale + d + 3) % 3; break;
     case SET_DUAL_SCREEN: g_settings.dual_screen = !g_settings.dual_screen; break;
     case SET_SWAP_SCREENS: g_settings.swap_screens = !g_settings.swap_screens; break;

@@ -36,7 +36,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <pthread.h>
 #include <time.h>
+#include <unistd.h>
 /* The performance counter, from the monotonic clock in nanoseconds. */
 typedef long long LONGLONG;
 typedef struct {
@@ -69,8 +71,92 @@ static LONGLONG qpc(void) {
     QueryPerformanceCounter(&t);
     return t.QuadPart;
 }
-#define GL_ENTER() LONGLONG t0_ = (g_in_gl = 1, qpc())
-#define GL_LEAVE(kind) (sGlTicks[kind] += qpc() - t0_, sGlCalls[kind]++, g_in_gl = 0)
+
+/* The draw thread
+ *
+ * Above 60 fps, with Vulkan, the frames between the game's are drawn by a
+ * thread of their own, at their own steady rate. Drawn by the game's
+ * thread while it waited for its next frame, none could be shown while it
+ * worked, 7 to 10 ms at a time: at 165 Hz, every few frames one was left
+ * out, the picture stuttered, and in busy places, longer, it jerked.
+ *
+ * Two locks. The frames' (sRec, sCur, sPrev and their matches): held by
+ * the draw thread while it draws one, and by the game's from a frame's
+ * vertices handed over (gxb_frame_data) to its end (gxb_present), so a
+ * frame between is never drawn with half of the next, and for anything
+ * else that mustn't come in the middle of one (settings applied, a copy
+ * read back, textures deleted). The device's: held for each call into
+ * it, by either thread, so the game's work goes on while a frame is
+ * blended. The frames' is always taken before the device's. The window
+ * stays the game thread's (its messages, title and fullscreen): Windows
+ * sends a window's messages to the thread that made it, and a present
+ * may wait for one, so the game thread, waiting for a lock, takes them
+ * in the meantime. */
+#ifdef _WIN32
+#define THREAD_LOCAL __declspec(thread)
+typedef CRITICAL_SECTION Lock;
+#else
+#define THREAD_LOCAL __thread
+typedef pthread_mutex_t Lock;
+#endif
+static Lock sFrameLock, sDevLock;
+static int sThreaded;               /* the draw thread runs */
+static THREAD_LOCAL int tDrawThread; /* this is the draw thread */
+static int sHeld;                   /* times the game thread holds the frames' lock for a frame's end */
+
+static void lock_take(Lock* l) {
+#ifdef _WIN32
+    if (tDrawThread) {
+        EnterCriticalSection(l);
+        return;
+    }
+    {
+        /* A frame takes the draw thread a few ms: spun for, then waited
+         * for taking the window's sent messages. */
+        LARGE_INTEGER fq;
+        LONGLONG until;
+        QueryPerformanceFrequency(&fq);
+        until = qpc() + fq.QuadPart / 200; /* 5 ms */
+        while (!TryEnterCriticalSection(l)) {
+            if (qpc() < until) {
+                YieldProcessor();
+            } else {
+                MSG m;
+                MsgWaitForMultipleObjects(0, NULL, FALSE, 1, QS_SENDMESSAGE);
+                PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            }
+        }
+    }
+#else
+    pthread_mutex_lock(l);
+#endif
+}
+
+static void lock_give(Lock* l) {
+#ifdef _WIN32
+    LeaveCriticalSection(l);
+#else
+    pthread_mutex_unlock(l);
+#endif
+}
+
+static void dev_lock(void) {
+    if (sThreaded) lock_take(&sDevLock);
+}
+static void dev_unlock(void) {
+    if (sThreaded) lock_give(&sDevLock);
+}
+static void frame_lock(void) {
+    if (sThreaded) lock_take(&sFrameLock);
+}
+static void frame_unlock(void) {
+    if (sThreaded) lock_give(&sFrameLock);
+}
+
+/* Calls into the device: locked, and timed for RECOMP_FPS=1. The game
+ * thread is marked as in the driver, for the profiler (boot.c). */
+#define GL_ENTER() LONGLONG t0_ = (dev_lock(), tDrawThread ? 0 : (g_in_gl = 1), qpc())
+#define GL_LEAVE(kind) (sGlTicks[kind] += qpc() - t0_, sGlCalls[kind]++, tDrawThread ? 0 : (g_in_gl = 0), dev_unlock())
 
 /* Prints and resets the per-entry-point totals. */
 static void print_gl_stats(void) {
@@ -93,6 +179,10 @@ static unsigned sPresentsDropped; /* frames left out as the display wasn't ready
 
 /* ------------------------------------------------------------------------ */
 /* Showing a frame */
+
+/* The window title the draw thread made, for the game thread to set. */
+static char sTitle[96];
+static volatile int sTitleNew;
 
 /* Frames per second and the longest frame of the last second, in the
  * window title and, with RECOMP_FPS=1, on stderr. */
@@ -125,7 +215,13 @@ static void report(void) {
         lastWait = g_wait_ticks;
         snprintf(title, sizeof(title), GAME_NAME " (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
                  worst, busy);
-        win_set_title(title);
+        if (tDrawThread) {
+            /* The window is the game thread's: it sets the title (gxb_present). */
+            memcpy(sTitle, title, sizeof(title));
+            sTitleNew = 1;
+        } else {
+            win_set_title(title);
+        }
         if (e && *e == '1')
             fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%, game %u, left out %u\n", fps, worst, busy,
                     sGameFrames - lastGameFrames, sPresentsDropped - lastDropped);
@@ -151,6 +247,7 @@ static void show(int x, int y, int w, int h) {
      * waits, would slow down. Then the frame is left out. */
     if (sDev->present(x, y, w, h, sRecording)) sPresentsDropped++;
     report();
+    if (tDrawThread) return; /* the rest is the game thread's (gxb_present) */
     win_pump();
     /* Between frames, so a change doesn't lose the one being drawn. */
     win_set_fullscreen(g_settings.fullscreen);
@@ -189,7 +286,8 @@ typedef struct RecOp {
     int xf;           /* OP_DRAW: its XF state, at words xf of the frame's */
     int match;        /* OP_DRAW: the last frame's op of the same draw, or -1 */
     int a[8];         /* the other ops' arguments; OP_DRAW: first vertex, vertices, first index, count,
-                       * and the row of the matrix that places it (pos_row) */
+                       * the row of the matrix that places it (pos_row), whether it lays a copy
+                       * (lays_copy), and how many draws of its key came before it in the frame */
 } RecOp;
 
 typedef struct Frame {
@@ -280,7 +378,10 @@ static void rec_draw(const GXDrawState* st, int first_vertex, int vertices, int 
     r->a[2] = first_index;
     r->a[3] = count;
     r->a[4] = row;
+    dev_lock();
     r->a[5] = lays_copy(st);
+    dev_unlock();
+    r->a[6] = 0; /* rank_draws */
 }
 
 /* How far apart two draws are: the sum of the differences of their
@@ -373,6 +474,23 @@ static int mtx_close(const Mtx34* a, const Mtx34* b) {
  * clear answer. */
 static Mtx34 sCamera;
 static int sCameraValid;
+/* Whether a draw is of the HUD's layouts: PP2 draws them in perspective,
+ * with a camera of their own (45 degrees: the projection's y scale 2.414,
+ * as gx_fifo.c's canvas_kind tells them). Moved as the scene's camera
+ * moved, a banner and the fading copies trailing it (Nice Job, after a
+ * skill game) and the pause menu's pieces paired up anyhow while the
+ * camera turned, and jumped from place to place. The sky's and the dash's
+ * own projections do move with the scene. */
+static int hud_layout(const uint32_t* xf) {
+    float y;
+    memcpy(&y, &xf[GX_XF_MEM_WORDS + 0x22], 4);
+    return fabsf(y - 2.4142136f) < 1e-3f;
+}
+
+/* Whether a pair of draws is weighed as moving with the camera. */
+static int with_camera(const uint32_t* p, const uint32_t* c) {
+    return sCameraValid && perspective(p) && perspective(c) && !hud_layout(p) && !hud_layout(c);
+}
 
 static void camera_motion(const int* uniqueMatch) {
     enum { SAMPLES = 48 };
@@ -448,12 +566,19 @@ static float shape_distance(const RecOp* prev, const RecOp* cur, int camera) {
  * alone, the banner took a copy's size as often as not, its own between
  * them, and jumped from size to size. */
 #define SHAPE_WEIGHT 1e-3f
+#define ORDER_WEIGHT 2.0f
 
 static float draw_distance(const RecOp* prev, const RecOp* cur, float limit) {
     const uint32_t *p = sPrev->xf + prev->xf, *c = sCur->xf + cur->xf;
-    int camera = sCameraValid && perspective(p) && perspective(c);
+    int camera = with_camera(p, c);
     float d = camera ? camera_distance(prev, cur) : matrix_distance(p, c, limit);
-    return d < limit ? d + SHAPE_WEIGHT * shape_distance(prev, cur, camera) : d;
+    if (d >= limit) return d;
+    d += SHAPE_WEIGHT * shape_distance(prev, cur, camera);
+    /* In 2D and the HUD's layouts (the pause menu, banners),
+     * of draws alike in about one place, the one drawn as many draws of
+     * the key in: a layout draws its pieces in one order. */
+    if (!perspective(c) || hud_layout(c)) d += ORDER_WEIGHT * (float)abs(prev->a[6] - cur->a[6]);
+    return d;
 }
 
 /* Whether a match can be one object moving. Of many alike, one going as
@@ -469,7 +594,7 @@ static int same_object(const RecOp* prev, const RecOp* cur) {
     if (prev->a[5] || cur->a[5]) return 0; /* lays a copy of its picture (lays_copy) */
     if (!perspective(sPrev->xf + prev->xf) || !perspective(sCur->xf + cur->xf)) return 1;
     /* (With too few draws to tell the camera's motion by, as it is here.) */
-    d = sCameraValid ? camera_distance(prev, cur)
+    d = with_camera(sPrev->xf + prev->xf, sCur->xf + cur->xf) ? camera_distance(prev, cur)
                      : fabsf(x - wordf(p[3])) + fabsf(y - wordf(p[7])) + fabsf(z - wordf(p[11]));
     return d <= FARTHEST_STEP * sqrtf(x * x + y * y + z * z);
 }
@@ -549,6 +674,28 @@ static int pair_order(const void* a, const void* b) {
 /* Pairs of a key up to which they're all weighed, nearest taken first. */
 #define ALL_PAIRS 4096
 
+/* Each draw of sCur's count of draws of its key before it (a[6]). */
+static void rank_draws(void) {
+    enum { SLOTS = 8192 };
+    static uint64_t keys[SLOTS];
+    static uint8_t used[SLOTS];
+    static int count[SLOTS];
+    int i;
+    memset(used, 0, sizeof(used));
+    for (i = 0; i < sCur->count; i++) {
+        uint64_t k = sCur->ops[i].st.key;
+        unsigned slot = (unsigned)(k ^ (k >> 29)) & (SLOTS - 1);
+        if (sCur->ops[i].op != OP_DRAW) continue;
+        while (used[slot] && keys[slot] != k) slot = (slot + 1) & (SLOTS - 1);
+        if (!used[slot]) {
+            used[slot] = 1;
+            keys[slot] = k;
+            count[slot] = 0;
+        }
+        sCur->ops[i].a[6] = count[slot]++;
+    }
+}
+
 static void match_draws(void) {
     enum { CANDIDATES = 48 };
     enum { SLOTS = 8192 };
@@ -592,6 +739,7 @@ static void match_draws(void) {
         if (used[slot] && head[slot] >= 0 && next[head[slot]] < 0) unique[i] = head[slot];
     }
     camera_motion(unique);
+    rank_draws();
     /* Of a key a few draws in each frame have (nuts in a row of holes):
      * every pair weighed, the nearest taken first. Each draw in turn taking
      * the nearest left, a nut jumping out of its hole further than the
@@ -744,7 +892,16 @@ static void blend_range(uint32_t* out, const uint32_t* prev, const uint32_t* cur
         blend_matrix(out, prev, cur, m, t);
     }
     lerp_clipped(out, prev, cur, 0x400, 0x460, lo, hi, t); /* normal matrices */
-    lerp_clipped(out, prev, cur, 0x500, 0x600, lo, hi, t); /* post-transform matrices */
+    /* Post-transform matrices, 3x4 at multiples of 12 words from 0x500,
+     * checked as the others are: a draw matched with one that keeps
+     * something else in its post matrix (an identity, another effect's
+     * projection) blended the two halfway, and the ground's shadow,
+     * projected through one, jumped from side to side between frames. */
+    for (m = lo < 0x500 ? 0x500 : 0x500 + (lo - 0x500) / 12 * 12; m + 12 <= 0x5FC && m < hi; m += 12) {
+        memcpy(out + m, own + m, 48);
+        blend_matrix(out, prev, cur, m, t);
+    }
+    lerp_clipped(out, prev, cur, 0x5FC, 0x600, lo, hi, t);
     for (j = 0; j < 8; j++) lerp_clipped(out, prev, cur, 0x600 + 16 * j + 10, 0x600 + 16 * j + 16, lo, hi, t); /* lights */
     if (lo < proj + 7 && hi > proj) { /* the projection, with its kind (word 6) */
         memcpy(out + proj, own + proj, 6 * 4);
@@ -819,6 +976,89 @@ static const uint32_t* same_place(const GXDrawState* st, const uint32_t* own, co
 static int* sNext;
 static int sNextCap;
 
+/* A skinned model is drawn in pieces, each with the bones it uses loaded
+ * as position matrices, the vertices picking one each. A piece left
+ * unmatched was drawn where its own frame put it while the pieces
+ * around it were blended, and the model came apart at the seams between
+ * them for the frame. Its bones are found in the matched pieces (by
+ * their matrices, as the game loaded them) and blended as theirs are. */
+#define BONES 8192
+#define BONE_PROBES 32
+typedef struct Bone {
+    unsigned gen;
+    uint32_t own[12], other[12];
+} Bone;
+/* Kept once per game frame and direction (sPrev to sCur, or back): the
+ * frames don't change between the in-between frames drawn from them, and
+ * finding the bones on every one was a sixth of the draw thread. */
+typedef struct Bones {
+    unsigned gen, frame;
+    int any;
+    Bone b[BONES];
+} Bones;
+static Bones sBones[2];
+static unsigned sBoneGen, sFrameGen;
+
+static Bone* bone_slot(Bones* t, const uint32_t* own) {
+    uint32_t h = 2166136261u;
+    int i, slot, n;
+    for (i = 0; i < 12; i++) h = (h ^ own[i]) * 16777619u;
+    for (slot = (int)(h & (BONES - 1)), n = 0; n < BONE_PROBES; slot = (slot + 1) & (BONES - 1), n++) {
+        Bone* b = &t->b[slot];
+        if (b->gen != t->gen || memcmp(b->own, own, 48) == 0) return b;
+    }
+    return NULL; /* crowded */
+}
+
+/* Whether f, matched with g by match (sNext or each op's match), has an
+ * unmatched skinned piece; if so, the bones its matched skinned pieces
+ * have, with the other frame's, are kept for skin_bones. */
+static Bones* keep_bones(const Frame* f, const Frame* g, int before) {
+    Bones* t = &sBones[before];
+    int i, m;
+    if (t->gen && t->frame == sFrameGen) return t->any ? t : NULL;
+    if (++sBoneGen == 0) {
+        memset(sBones, 0, sizeof(sBones));
+        sBoneGen = 1;
+    }
+    t->gen = sBoneGen;
+    t->frame = sFrameGen;
+    t->any = 0;
+    for (i = 0; i < f->count && !t->any; i++)
+        if (f->ops[i].op == OP_DRAW && (f->ops[i].st.mtx_per_vertex & 1) && (before ? sNext[i] : f->ops[i].match) < 0) t->any = 1;
+    if (!t->any) return NULL;
+    for (i = 0; i < f->count; i++) {
+        const RecOp* r = &f->ops[i];
+        int o = before ? sNext[i] : r->match;
+        const uint32_t *own, *other;
+        if (r->op != OP_DRAW || !(r->st.mtx_per_vertex & 1) || o < 0) continue;
+        own = f->xf + r->xf;
+        other = g->xf + g->ops[o].xf;
+        for (m = 0; m + 12 <= 0x100; m += 12) {
+            Bone* b;
+            if (memcmp(own + m, other + m, 48) == 0 || !(b = bone_slot(t, own + m)) || b->gen == t->gen) continue;
+            b->gen = t->gen;
+            memcpy(b->own, own + m, 48);
+            memcpy(b->other, other + m, 48);
+        }
+    }
+    return t;
+}
+
+/* An unmatched skinned piece (own) with the bones kept blended, in
+ * placed; NULL if none are. */
+static const uint32_t* skin_bones(Bones* t, const GXDrawState* st, const uint32_t* own, int before, float tt, uint32_t* placed) {
+    int m, moved = 0;
+    if (!(st->mtx_per_vertex & 1)) return NULL;
+    for (m = 0; m + 12 <= 0x100; m += 12) {
+        Bone* b = bone_slot(t, own + m);
+        if (!b || b->gen != t->gen) continue;
+        if (!moved++) memcpy(placed, own, GX_XF_WORDS * 4);
+        blend_matrix(placed + m, before ? b->own : b->other, before ? b->other : b->own, 0, tt);
+    }
+    return moved ? placed : NULL;
+}
+
 /* Draws sCur or, the first half of the way, sPrev, their matrices t of the
  * way from sPrev's to sCur's. Each frame's own draws: drawn as sCur, a nut
  * opening in its shell (two halves and the nut in place of the shell) put
@@ -840,6 +1080,7 @@ static void render_frame(float t) {
      * two 7 KB snapshots, was 9% of the Thor's game thread at 120 fps
      * (now 2%). */
     int last = -1, lastOther = -1;
+    Bones* bones = t > 0.0f && t < 1.0f ? keep_bones(f, g, before) : NULL;
     int i;
     for (i = 0; i < f->count; i++) {
         const RecOp* r = &f->ops[i];
@@ -872,6 +1113,11 @@ static void render_frame(float t) {
                     drawn = moved;
                     last = -1; /* xf isn't the blend the next draw would build on */
                 }
+                if (o < 0 && bones) {
+                    static uint32_t boned[GX_XF_WORDS];
+                    const uint32_t* b = skin_bones(bones, &r->st, own, before, t, boned);
+                    if (b) drawn = b;
+                }
             }
             if (drawn != own && r->st.bounds_ok &&
                 (r->st.bounds_mtx[0] > r->st.bounds_mtx[1] ||
@@ -882,15 +1128,31 @@ static void render_frame(float t) {
                  * its position matrices or the projection. */
                 GXDrawState st = r->st;
                 st.bounds_ok = 0;
+                dev_lock();
                 sDev->draw_recorded(&st, drawn, r->a[0], r->a[2], r->a[3], before);
+                dev_unlock();
             } else {
+                dev_lock();
                 sDev->draw_recorded(&r->st, drawn, r->a[0], r->a[2], r->a[3], before);
+                dev_unlock();
             }
             break;
         }
-        case OP_CLEAR: sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]); break;
-        case OP_COPY: sDev->copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]); break;
-        default: show(r->a[0], r->a[1], r->a[2], r->a[3]); break;
+        case OP_CLEAR:
+            dev_lock();
+            sDev->clear(r->a[0], r->a[1], r->a[2], (uint32_t)r->a[3], (uint32_t)r->a[4]);
+            dev_unlock();
+            break;
+        case OP_COPY:
+            dev_lock();
+            sDev->copy(r->a[0], r->a[1], r->a[2], r->a[3], r->a[4], r->a[5], r->a[6], r->a[7]);
+            dev_unlock();
+            break;
+        default:
+            dev_lock();
+            show(r->a[0], r->a[1], r->a[2], r->a[3]);
+            dev_unlock();
+            break;
         }
     }
 }
@@ -904,6 +1166,7 @@ static void frame_end(void) {
     sCur = sRec;
     sRec = f;
     sRec->count = sRec->xf_words = 0;
+    sFrameGen++;
     match_draws();
     if (sPrev->count > sNextCap) {
         sNextCap = sPrev->count * 2;
@@ -940,7 +1203,7 @@ static void frame_end(void) {
 /* ------------------------------------------------------------------------ */
 /* Pacing */
 
-static uint64_t frame_due(void) { return sRecording && sHaveFrame ? sNextOut : 0; }
+static uint64_t frame_due(void) { return !sThreaded && sRecording && sHaveFrame ? sNextOut : 0; }
 
 /* Frames shown per second: the setting, or the display's refresh rate if
  * lower (more would never be seen). */
@@ -961,9 +1224,115 @@ static void frame_render(void) {
     if ((int64_t)(now - sNextOut) > (int64_t)step) sNextOut = now + step; /* fell behind: start again from now */
     if (t == 1.0f && sLastT == 1.0f) return; /* the game is late: nothing new to show */
     sLastT = t;
-    GL_ENTER();
-    render_frame(t);
-    GL_LEAVE(GLK_PRESENT);
+    {
+        /* Timed as one call; the device is locked call by call (render_frame). */
+        LONGLONG t0_ = (tDrawThread ? 0 : (g_in_gl = 1), qpc());
+        render_frame(t);
+        sGlTicks[GLK_PRESENT] += qpc() - t0_;
+        sGlCalls[GLK_PRESENT]++;
+        if (!tDrawThread) g_in_gl = 0;
+    }
+}
+
+/* Waits until the time base reaches due: slept most of the way, the last
+ * quarter millisecond spun, as a sleep may end late. */
+static void wait_until(uint64_t due) {
+    const int64_t spin = (int64_t)(PPC_TB_HZ / 4000);
+#ifdef _WIN32
+    static THREAD_LOCAL HANDLE timer;
+    if (!timer) {
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    }
+#endif
+    for (;;) {
+        int64_t left = (int64_t)(due - ppc_timebase());
+        if (left <= 0) return;
+        if (left > spin) {
+#ifdef _WIN32
+            LARGE_INTEGER d;
+            d.QuadPart = -((left - spin) * 10000000 / (int64_t)PPC_TB_HZ);
+            if (d.QuadPart == 0) d.QuadPart = -1;
+            if (timer && SetWaitableTimer(timer, &d, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+            else Sleep(1);
+#else
+            struct timespec ts;
+            int64_t ns = (left - spin) * 1000000000 / (int64_t)PPC_TB_HZ;
+            ts.tv_sec = (time_t)(ns / 1000000000);
+            ts.tv_nsec = (long)(ns % 1000000000);
+            nanosleep(&ts, NULL);
+#endif
+        }
+    }
+}
+
+/* The draw thread: each frame between the game's, when it's due. */
+#ifdef _WIN32
+static DWORD WINAPI draw_thread(LPVOID arg) {
+#else
+static void* draw_thread(void* arg) {
+#endif
+    (void)arg;
+    tDrawThread = 1;
+    for (;;) {
+        uint64_t due;
+        frame_lock();
+        due = sRecording && sHaveFrame ? sNextOut : 0;
+        frame_unlock();
+        if (!due) {
+            /* Not recording (60 fps), or no frame yet. */
+#ifdef _WIN32
+            Sleep(2);
+#else
+            usleep(2000);
+#endif
+            continue;
+        }
+        wait_until(due);
+        frame_lock();
+        if (sRecording && sHaveFrame) frame_render();
+        frame_unlock();
+    }
+    return 0;
+}
+
+/* Starts the draw thread: with Vulkan (an OpenGL context is one
+ * thread's), on Windows (Android presents from a thread of its own
+ * already); RECOMP_DRAW_THREAD=0 leaves it out, 1 starts it anywhere. */
+static void start_draw_thread(void) {
+    const char* e = getenv("RECOMP_DRAW_THREAD");
+    int want = sDev == &g_vk_device;
+#ifndef _WIN32
+    want = 0;
+#endif
+    if (e && *e) want = *e != '0' && sDev == &g_vk_device;
+    if (!want) return;
+#ifdef _WIN32
+    InitializeCriticalSectionAndSpinCount(&sDevLock, 4000);
+    InitializeCriticalSectionAndSpinCount(&sFrameLock, 4000);
+    sThreaded = 1;
+    {
+        HANDLE h = CreateThread(NULL, 0, draw_thread, NULL, 0, NULL);
+        if (!h) {
+            sThreaded = 0;
+            return;
+        }
+        SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL);
+        CloseHandle(h);
+    }
+#else
+    {
+        pthread_mutexattr_t a;
+        pthread_t t;
+        pthread_mutexattr_init(&a);
+        pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&sDevLock, &a);
+        pthread_mutex_init(&sFrameLock, &a);
+        sThreaded = 1;
+        if (pthread_create(&t, NULL, draw_thread, NULL) != 0) sThreaded = 0;
+        else pthread_detach(t);
+    }
+#endif
 }
 
 void gxb_set_output_rate(int fps) { sOutputRate = fps < 30 ? 30 : fps > 360 ? 360 : fps; }
@@ -997,6 +1366,7 @@ void gxb_init(void) {
 #endif
     g_host_frame_due = frame_due;
     g_host_frame_render = frame_render;
+    start_draw_thread();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1115,6 +1485,7 @@ int gxb_recording(void) {
      * display (an Android device's refresh rate capped in its settings)
      * the setting's 120 is 60, drawn as at 60. */
     int want = output_rate() > 60.5;
+    frame_lock();
     if (sRecording && !want && sHaveFrame) {
         /* Stopping: show the newest frame as it is. */
         GL_ENTER();
@@ -1130,10 +1501,15 @@ int gxb_recording(void) {
         sCur->count = sCur->xf_words = 0;
         sPrev->count = sPrev->xf_words = 0;
     }
+    frame_unlock();
     return sRecording;
 }
 
 void gxb_frame_data(const GXVertex* v, int vertices, const uint32_t* index, int count) {
+    /* Held to the frame's end (gxb_present, gxb_copy_sync): the device
+     * has its vertices as the newest frame's from now. */
+    frame_lock();
+    sHeld++;
     sFrameDataCalls++;
     GL_ENTER();
     sDev->frame_data(v, vertices, index, count);
@@ -1192,9 +1568,13 @@ unsigned gxb_texture_pixels(void) { return sDev->texture_pixels ? sDev->texture_
 
 void gxb_texture_free(uint32_t handle) {
     if (sPendingFreeCount == MAX_PENDING_FREES) {
-        GL_ENTER();
-        free_textures(sPendingFree, &sPendingFreeCount);
-        GL_LEAVE(GLK_TEXTURE);
+        frame_lock(); /* not while a frame that may draw them is drawn */
+        {
+            GL_ENTER();
+            free_textures(sPendingFree, &sPendingFreeCount);
+            GL_LEAVE(GLK_TEXTURE);
+        }
+        frame_unlock();
     }
     sPendingFree[sPendingFreeCount++] = handle;
 }
@@ -1243,6 +1623,8 @@ static int sWriteBackCount;
 /* Every copy's latest, for gxb_copy_sync. */
 static WriteBack sCopiesMade[32];
 static int sCopiesMadeCount;
+
+static void release_held(void);
 
 static void write_back(const WriteBack* b, int force) {
     int tw, th, x, y;
@@ -1294,6 +1676,8 @@ static void write_back_copies(void) {
 void gxb_copy_sync(uint32_t addr) {
     const WriteBack* in = NULL;
     int i;
+    frame_lock();
+    sHeld++;
     for (i = 0; i < sCopiesMadeCount; i++) {
         const WriteBack* b = &sCopiesMade[i];
         /* Its rows of blocks: 8 lines for 4 bits a pixel, else 4. */
@@ -1304,7 +1688,10 @@ void gxb_copy_sync(uint32_t addr) {
         }
         if (!in && addr - b->addr < bytes) in = b;
     }
-    if (!in) return;
+    if (!in) {
+        release_held();
+        return;
+    }
     if (sRecording) {
         /* The copy is drawn with the frame, not yet ended: what's been
          * recorded of it is drawn now. Nothing more of the frame before is
@@ -1323,10 +1710,12 @@ void gxb_copy_sync(uint32_t addr) {
     GL_ENTER();
     write_back(in, 1);
     GL_LEAVE(GLK_COPY);
+    release_held();
 }
 
 void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int intensity, int efb_alpha, int stride) {
     WriteBack made;
+    uint32_t handle;
     int t, i;
     GL_ENTER();
     t = sDev->copy_target(addr, w, h);
@@ -1362,7 +1751,10 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
         else i = (int)(addr >> 5) & 31;
     }
     sCopiesMade[i] = made;
-    if (!gx_register_copy(addr, sDev->copy_texture(t), w, h, fmt)) {
+    dev_lock();
+    handle = sDev->copy_texture(t);
+    dev_unlock();
+    if (!gx_register_copy(addr, handle, w, h, fmt)) {
         for (i = 0; i < sWriteBackCount; i++) {
             if (sWriteBacks[i].addr == addr && sWriteBacks[i].waited) {
                 sWriteBacks[i] = sWriteBacks[--sWriteBackCount];
@@ -1379,7 +1771,18 @@ void gxb_copy_to_texture(uint32_t addr, int x, int y, int w, int h, int fmt, int
     sWriteBacks[i] = made;
 }
 
+/* Lets go of the lock held from a frame's vertices to its end. */
+
+static void release_held(void) {
+    while (sHeld > 0) {
+        sHeld--;
+        frame_unlock();
+    }
+}
+
 void gxb_present(int x, int y, int cw, int ch) {
+    frame_lock(); /* (taken already if the frame's vertices were handed over) */
+    sHeld++;
     sGameFrames++;
 #ifdef __ANDROID__
     {
@@ -1397,6 +1800,22 @@ void gxb_present(int x, int y, int cw, int ch) {
         frame_end();
         if (sWriteBackCount) write_back_copies();
         GL_LEAVE(GLK_PRESENT);
+        release_held();
+        if (sThreaded) {
+            /* The window's part of showing a frame, show's when the game
+             * thread shows them. */
+            win_pump();
+            if (sTitleNew) {
+                sTitleNew = 0;
+                win_set_title(sTitle);
+            }
+            win_set_fullscreen(g_settings.fullscreen);
+            frame_lock();
+            dev_lock();
+            sDev->apply_settings();
+            dev_unlock();
+            frame_unlock();
+        }
         return;
     }
     GL_ENTER();
@@ -1404,4 +1823,5 @@ void gxb_present(int x, int y, int cw, int ch) {
     free_textures(sPendingFree, &sPendingFreeCount);
     if (sWriteBackCount) write_back_copies();
     GL_LEAVE(GLK_PRESENT);
+    release_held();
 }
