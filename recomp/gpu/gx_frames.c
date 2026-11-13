@@ -691,7 +691,7 @@ static void lerp_words(uint32_t* out, const uint32_t* a, const uint32_t* b, int 
 static void blend_matrix(uint32_t* out, const uint32_t* prev, const uint32_t* cur, int m, float t) {
     const uint32_t *a = prev + m, *b = cur + m;
     float scale = 0, rot = 0, dt = 0, tlen = 0;
-    int nan = 0, j;
+    int nan = 0, turned = 0, j;
     if (memcmp(a, b, 48) == 0) return;
     for (j = 0; j < 12; j++) {
         float x = wordf(a[j]), y = wordf(b[j]);
@@ -699,6 +699,14 @@ static void blend_matrix(uint32_t* out, const uint32_t* prev, const uint32_t* cu
         if ((j & 3) == 3) {
             dt += (y - x) * (y - x);
             tlen += y * y;
+            /* Weighed row by row: a texture matrix is two rows, and the
+             * third is whatever was left there, which may be large. The
+             * dash's streaks are each turned at random (flipped, turned a
+             * quarter); paired with one turned another way, the halfway
+             * blend of the two squashed the texture to a line, and the
+             * streak was drawn a flat bar, through its first frames. */
+            turned |= rot > 0.3f * scale;
+            scale = rot = 0;
         } else {
             scale = fmaxf(scale, fabsf(y));
             rot = fmaxf(rot, fabsf(y - x));
@@ -707,7 +715,7 @@ static void blend_matrix(uint32_t* out, const uint32_t* prev, const uint32_t* cu
     if (nan) return; /* not floats */
     /* The same object moving turns and moves a little in a frame;
      * another object (a wrong match, a cut) differs wholesale. */
-    if (rot > 0.3f * scale || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) return;
+    if (turned || sqrtf(dt) > 0.5f * sqrtf(tlen) + 200.0f) return;
     lerp_words(out, prev, cur, m, m + 12, t);
 }
 
