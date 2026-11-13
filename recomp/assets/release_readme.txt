@@ -23,6 +23,16 @@ Settings
 - Aspect ratio (Options > Display): 16:9 by default; 16:10 and 21:9
   show more of the world around the picture; 4:3 is the game's own
   4:3 mode (from the next start).
+- Frame rate (Options > Display): 30 or 60 fps, or 120, 144, 165 or
+  240 with frames drawn in between the game's.
+- Texture packs: Dolphin texture packs work as they are. Put the
+  pack's folder in a textures folder beside PokePark2.exe.
+- Photos: copying photos to the SD card asks for a folder and saves
+  them there as JPEGs.
+- The attractions need no Wii Remote: aim Cake Contraption with the
+  mouse or right stick; in Dance Inferno press and hold the key shown
+  on each move's icon; swing in Power Bash with Q and E (LB and RB) by
+  turns.
 - Autosave (Options > Gameplay, off by default): the game saves to
   the slot it was loaded from whenever you make a friend or enter
   another area, once any scene or conversation is over.
