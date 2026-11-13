@@ -9,6 +9,29 @@
 
 #include "hle.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+typedef CRITICAL_SECTION Mutex;
+#define mutex_init(m) InitializeCriticalSection(m)
+#define mutex_lock(m) EnterCriticalSection(m)
+#define mutex_unlock(m) LeaveCriticalSection(m)
+typedef CONDITION_VARIABLE Cond;
+#define cond_init(c) InitializeConditionVariable(c)
+#define cond_wait(c, m) SleepConditionVariableCS(c, m, INFINITE)
+#define cond_signal(c) WakeConditionVariable(c)
+#else
+#include <pthread.h>
+typedef pthread_mutex_t Mutex;
+#define mutex_init(m) pthread_mutex_init(m, NULL)
+#define mutex_lock(m) pthread_mutex_lock(m)
+#define mutex_unlock(m) pthread_mutex_unlock(m)
+typedef pthread_cond_t Cond;
+#define cond_init(c) pthread_cond_init(c, NULL)
+#define cond_wait(c, m) pthread_cond_wait(c, m)
+#define cond_signal(c) pthread_cond_signal(c)
+#endif
+
 #ifndef _WIN32
 #define _strdup strdup
 #define _fseeki64 fseeko
@@ -152,8 +175,150 @@ void hle_dvd_boot_setup(void) {
     ST32(0x80003110, fst_addr); /* MEM1 arena end */
 }
 
+/* Files kept open between reads: the game reads the same archives again
+ * and again, and opening a file on Windows (with the virus scanner's look
+ * at it) was most of a 490 ms stall as an area loaded. */
+#define OPEN_FILES 32
+static struct {
+    int region; /* -1: none */
+    FILE* f;
+} sOpen[OPEN_FILES];
+static unsigned sOpenNext;
+
+static FILE* open_region(int i) {
+    int k;
+    for (k = 0; k < OPEN_FILES; k++) {
+        if (sOpen[k].f && sOpen[k].region == i) return sOpen[k].f;
+    }
+    k = (int)(sOpenNext++ % OPEN_FILES);
+    if (sOpen[k].f) fclose(sOpen[k].f);
+    sOpen[k].f = fopen(sRegions[i].path, "rb");
+    sOpen[k].region = i;
+    return sOpen[k].f;
+}
+
 /* Copies len bytes at a data-partition offset to guest memory. */
+static int read_now(uint64_t offset, uint32_t len, uint32_t dst);
+
+/* Reads, one at a time (the open files and a disc image's reader are
+ * shared): the game's own, made as it waits, and the asynchronous ones,
+ * made on a thread of their own. */
+static Mutex sReadLock;
+static int sReadLockMade; /* (made on the game's thread, before the reader starts) */
+
+static void read_lock(void) {
+    if (!sReadLockMade) {
+        mutex_init(&sReadLock);
+        sReadLockMade = 1;
+    }
+    mutex_lock(&sReadLock);
+}
+
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
+    int r;
+    read_lock();
+    r = read_now(offset, len, dst);
+    mutex_unlock(&sReadLock);
+    return r;
+}
+
+/* Reads the game asked for with a callback. On the Wii the drive reads
+ * while the game goes on (drawing, playing its sound), the callback
+ * coming when the data is in. Made as the request came, a read the file
+ * cache didn't have stopped the game for as long as the disk took: a
+ * first visit to a town stalled it for up to half a second, several
+ * times. Here a thread reads them in order, and hle_dvd_poll (on the
+ * game's thread, at each delivery point) calls each one's done once it
+ * is in. RECOMP_DVD_SYNC=1 makes them as they are asked for instead. */
+#define JOBS 16
+typedef struct {
+    uint64_t offset;
+    uint32_t len, dst, a, b;
+    void (*done)(int ok, uint32_t a, uint32_t b);
+    int ok;
+} Job;
+static Job sJobs[JOBS];
+static unsigned sJobHead, sJobRead, sJobTail; /* done up to head, read up to read, queued up to tail */
+static Cond sJobQueued;
+static volatile long sJobsRead; /* sJobRead, for hle_dvd_poll to look at without the lock */
+
+#ifdef _WIN32
+static DWORD WINAPI reader(LPVOID arg)
+#else
+static void* reader(void* arg)
+#endif
+{
+    (void)arg;
+    read_lock();
+    for (;;) {
+        Job* j;
+        while (sJobRead == sJobTail) cond_wait(&sJobQueued, &sReadLock);
+        j = &sJobs[sJobRead % JOBS];
+        j->ok = read_now(j->offset, j->len, j->dst);
+        sJobRead++;
+#ifdef _WIN32
+        InterlockedExchange(&sJobsRead, (long)sJobRead);
+#else
+        __atomic_store_n(&sJobsRead, (long)sJobRead, __ATOMIC_RELEASE);
+#endif
+    }
+    return 0;
+}
+
+int hle_dvd_read_async(uint64_t offset, uint32_t len, uint32_t dst, void (*done)(int ok, uint32_t a, uint32_t b),
+                       uint32_t a, uint32_t b) {
+    static int started, sync = -1;
+    Job* j;
+    if (sync < 0) sync = getenv("RECOMP_DVD_SYNC") && atoi(getenv("RECOMP_DVD_SYNC"));
+    if (sync) return 0;
+    read_lock();
+    if (!started) {
+        cond_init(&sJobQueued);
+#ifdef _WIN32
+        {
+            HANDLE t = CreateThread(NULL, 0, reader, NULL, 0, NULL);
+            if (t) CloseHandle(t);
+            started = t ? 1 : -1;
+        }
+#else
+        {
+            pthread_t t;
+            started = pthread_create(&t, NULL, reader, NULL) == 0 ? 1 : -1;
+            if (started > 0) pthread_detach(t);
+        }
+#endif
+    }
+    if (started < 0 || sJobTail - sJobHead >= JOBS) {
+        mutex_unlock(&sReadLock);
+        return 0;
+    }
+    j = &sJobs[sJobTail % JOBS];
+    j->offset = offset;
+    j->len = len;
+    j->dst = dst;
+    j->done = done;
+    j->a = a;
+    j->b = b;
+    sJobTail++;
+    cond_signal(&sJobQueued);
+    mutex_unlock(&sReadLock);
+    return 1;
+}
+
+void hle_dvd_poll(void) {
+#ifdef _WIN32
+    unsigned read = (unsigned)InterlockedCompareExchange(&sJobsRead, 0, 0);
+#else
+    unsigned read = (unsigned)__atomic_load_n(&sJobsRead, __ATOMIC_ACQUIRE);
+#endif
+    while (sJobHead != read) {
+        Job j = sJobs[sJobHead % JOBS];
+        sJobHead++;
+        j.done(j.ok, j.a, j.b);
+    }
+}
+
+static int read_now(uint64_t offset, uint32_t len, uint32_t dst) {
     uint64_t end = offset + len;
     int i, ok = 1;
     ppc_mem_host_write(dst, len);
@@ -171,7 +336,7 @@ int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
         uint64_t hi = end < r->offset + r->size ? end : r->offset + r->size;
         FILE* f;
         if (lo >= hi) continue;
-        f = fopen(r->path, "rb");
+        f = open_region(i);
         if (!f) {
             HLE_WARN("disc read needs %s, which is missing", r->path);
             ok = 0;
@@ -179,7 +344,6 @@ int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst) {
         }
         _fseeki64(f, (int64_t)(lo - r->offset), SEEK_SET);
         if (fread(MA(dst + (uint32_t)(lo - offset)), 1, (size_t)(hi - lo), f) != hi - lo) ok = 0;
-        fclose(f);
         HLE_LOG("disc read %08llX+%X: %s", (unsigned long long)lo, (unsigned)(hi - lo), r->path + strlen(sRoot) + 1);
     }
     return ok;

@@ -83,6 +83,12 @@ int hle_dvd_init_image(const uint8_t* boot, const uint8_t* fst, uint32_t fstSize
 void hle_dvd_boot_setup(void);
 void hle_text_boot_setup(void);
 int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst);
+/* The same read made on a thread of its own: done(ok, a, b) is called on
+ * the game's thread (by hle_dvd_poll, at a delivery point) once it is
+ * in. Returns 0 if it can't be (then read it with hle_dvd_read). */
+int hle_dvd_read_async(uint64_t offset, uint32_t len, uint32_t dst, void (*done)(int ok, uint32_t a, uint32_t b),
+                       uint32_t a, uint32_t b);
+void hle_dvd_poll(void);
 uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max);
 const uint8_t* hle_dvd_disc_id(void);
 uint8_t* hle_dvd_load(const char* path, uint32_t* size);

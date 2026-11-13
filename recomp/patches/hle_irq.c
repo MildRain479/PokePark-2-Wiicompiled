@@ -163,6 +163,7 @@ void hle_deliver(ppc_t* c) {
     /* Interrupts are off inside a handler; a thread the handler switched
      * to takes them as usual. */
     if (hle_in_interrupt()) return;
+    hle_dvd_poll(); /* disc reads that are in */
     for (;;) {
         if (sHead != sTail) {
             Pending p = sQueue[sHead++ % QUEUE_SIZE];

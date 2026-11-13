@@ -14,6 +14,7 @@ enum { REQ_OPEN = 1, REQ_CLOSE, REQ_READ, REQ_WRITE, REQ_SEEK, REQ_IOCTL, REQ_IO
 #define IPC_EINVAL (-4)
 #define IPC_ENOENT (-106)
 #define IPC_PENDING 0x7FFFFFFF /* internal: never completes (event hooks) */
+#define IPC_STARTED 0x7FFFFFFE /* internal: completes later (disc reads), its callback posted then */
 
 static const uint32_t kIosFree = A_iosFree;   /* iosFree(hid, ptr) */
 static const uint32_t kIosHeapSda = A_IOS_HEAP_SDA; /* r13-relative: hid of the IPC heap */
@@ -96,6 +97,10 @@ static int32_t ios_open(uint32_t req) {
 #define DI_OK 1
 #define DI_ERROR 2
 
+/* The request being answered and its callback (0: the game waits). */
+static uint32_t sReq, sCb;
+static void read_in(int ok, uint32_t req, uint32_t cb);
+
 static int32_t di_ioctl(uint32_t type, uint32_t in, uint32_t out, uint32_t outsize) {
     HLE_LOG("/dev/di 0x%02X (%08X %08X), in %08X, out %08X+%X", type, LD32(in + 4), LD32(in + 8), in, out, outsize);
     if (out && outsize) memset(MA(out), 0, outsize);
@@ -104,6 +109,7 @@ static int32_t di_ioctl(uint32_t type, uint32_t in, uint32_t out, uint32_t outsi
         memcpy(MA(out), hle_dvd_disc_id(), outsize < 0x20 ? outsize : 0x20);
         return DI_OK;
     case 0x71: /* Read, from the open data partition */
+        if (sCb && hle_dvd_read_async((uint64_t)LD32(in + 8) << 2, LD32(in + 4), out, read_in, sReq, sCb)) return IPC_STARTED;
         return hle_dvd_read((uint64_t)LD32(in + 8) << 2, LD32(in + 4), out) ? DI_OK : DI_ERROR;
     case 0x88: /* GetCoverStatus: 2 = closed with a disc inside */
         if (outsize >= 4) ST32(out, 2);
@@ -234,6 +240,13 @@ static void free_request(ppc_t* c, uint32_t req) {
     hle_call(c, kIosFree, LD32(c->r[13] + kIosHeapSda), req);
 }
 
+/* An asynchronous disc read is in: its callback, as an interrupt. */
+static void read_in(int ok, uint32_t req, uint32_t cb) {
+    int32_t ret = ok ? DI_OK : DI_ERROR;
+    ST32(req + 4, (uint32_t)ret);
+    hle_post(cb, (uint32_t)ret, LD32(req + 0x24), free_request, req);
+}
+
 /* s32 __ios_Ipc2(IPCRequestEx* req, IPCAsyncCallback cb): sends a
  * request. Without a callback it waits and returns the result; with one
  * it returns 0 and the callback gets (result, callbackArg) later. */
@@ -244,7 +257,14 @@ void F___ios_Ipc2(ppc_t* c) {
         c->r[3] = (uint32_t)IPC_EINVAL;
         return;
     }
+    sReq = req;
+    sCb = cb;
     ret = ios_handle(req);
+    sReq = sCb = 0;
+    if (ret == IPC_STARTED) {
+        c->r[3] = 0;
+        return;
+    }
     if (ret == IPC_PENDING) {
         if (!cb) HLE_WARN("synchronous IOS request will never complete");
         c->r[3] = 0;
