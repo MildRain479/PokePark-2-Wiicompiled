@@ -244,16 +244,76 @@ static LRESULT CALLBACK proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(w, msg, wp, lp);
 }
 
+/* sDir: the program's folder. */
+static int program_dir(void) {
+    char* slash;
+    if (!GetModuleFileNameA(NULL, sDir, sizeof(sDir))) return 0;
+    if ((slash = strrchr(sDir, '\\')) != NULL) *slash = '\0';
+    return 1;
+}
+
+/* A line RecompLauncher's set-up step shows: how far along (0 to 1), and what. */
+static void progress(double done, const char* text) {
+    printf("progress %.2f %s\n", done, text);
+    fflush(stdout);
+}
+
+static int fail(const char* why) {
+    printf("%s\n", why);
+    fflush(stdout);
+    return 0;
+}
+
+/* The window's set-up (import above) from a disc image a launcher passes in
+ * (--game), with no window: it prints progress lines and what went wrong,
+ * and returns 1 with main.dol's path once the game is set up. The checks are
+ * the same, except that the exact-copy question is left out, as nobody is
+ * there to ask: main.dol is still checked against the recompiled one. */
+int import_image(const char* image, char* mainDol, size_t n) {
+    char game[MAX_PATH], disc[MAX_PATH], sys[MAX_PATH], from[MAX_PATH], to[MAX_PATH], why[512];
+    static char info[16384];
+    int code;
+    if (!program_dir()) return fail("Couldn't find the program's folder.");
+    progress(0.02, "Checking your disc image");
+    if (run_dtk("info", image, info, sizeof(info)) == -1) {
+        return fail("Couldn't start tools\\dtk.exe, which reads disc images: it should be in the tools folder "
+                    "beside the program.");
+    }
+    if (disc_check_info(info, why, sizeof(why)) != DISC_OK) return fail(why);
+    snprintf(game, sizeof(game), "%s\\" GAME_ID, sDir);
+    snprintf(disc, sizeof(disc), "%s\\disc", game);
+    snprintf(sys, sizeof(sys), "%s\\sys", game);
+    remove_tree(disc); /* what an earlier try left */
+    CreateDirectoryA(game, NULL);
+    progress(0.10, "Setting the game up from your disc image");
+    code = extract(image, disc);
+    if (code != 0 || !is_game(disc)) {
+        remove_tree(disc);
+        return fail(code != 0 ? "That file couldn't be read as a disc image." : "That disc isn't " GAME_FULL_NAME
+                                                                                 " (USA, " GAME_ID ").");
+    }
+    progress(0.90, "Checking the game's code");
+    CreateDirectoryA(sys, NULL);
+    snprintf(from, sizeof(from), "%s\\sys\\main.dol", disc);
+    if (!check_dol(from, why, sizeof(why))) {
+        remove_tree(disc);
+        return fail(why);
+    }
+    snprintf(to, sizeof(to), "%s\\main.dol", sys);
+    if (!CopyFileA(from, to, FALSE)) return fail("The disc image was read, but main.dol couldn't be copied.");
+    progress(1.0, "The game is set up");
+    snprintf(mainDol, n, "%s", to);
+    return 1;
+}
+
 int import_game(char* mainDol, size_t n) {
     WNDCLASSA wc;
     HWND w;
     RECT r = {0, 0, 480, 190};
     NONCLIENTMETRICSA ncm;
-    char* slash;
     MSG m;
     int dpi;
-    if (!GetModuleFileNameA(NULL, sDir, sizeof(sDir))) return 0;
-    if ((slash = strrchr(sDir, '\\')) != NULL) *slash = '\0';
+    if (!program_dir()) return 0;
     SetProcessDPIAware();
     dpi = GetDeviceCaps(GetDC(NULL), LOGPIXELSY);
     r.right = MulDiv(r.right, dpi, 96);
