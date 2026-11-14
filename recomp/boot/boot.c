@@ -560,15 +560,47 @@ static void start_profiler(int after) {
 }
 #endif
 
+#ifdef _WIN32
+int import_image(const char* image, char* mainDol, size_t n); /* import_win32.c */
+
+/* What a launcher passes (RecompLauncher): --game <disc image> and
+ * --prepare, taken out of argv so the arguments below are as before. */
+static void launcher_args(int* argc, char** argv, const char** image, int* prepare) {
+    int i, kept = 1;
+    for (i = 1; i < *argc; i++) {
+        if (!strcmp(argv[i], "--prepare")) {
+            *prepare = 1;
+        } else if (!strcmp(argv[i], "--game") && i + 1 < *argc) {
+            *image = argv[++i];
+        } else {
+            argv[kept++] = argv[i];
+        }
+    }
+    *argc = kept;
+}
+#endif
+
 int main(int argc, char** argv) {
     ppc_t* c;
     uint32_t entry;
     static char found[1024];
     static char* defaultArgs[2];
 #ifdef _WIN32
+    const char* image = NULL;
+    int prepare = 0;
+    launcher_args(&argc, argv, &image, &prepare);
+    if (prepare && !image) {
+        printf("--prepare needs --game <disc image>\n");
+        return 2;
+    }
+    /* --game: set up from that disc image, with no window, if the game isn't
+     * set up yet (or always, with --prepare, as the player may have changed
+     * their copy), and with --prepare that is all. */
+    if (image && (prepare || !find_game(found, sizeof(found))) && !import_image(image, found, sizeof(found))) return 3;
+    if (prepare) return 0;
     /* Not set up yet: the player's disc image, extracted beside the
      * program (import_win32.c). */
-    if (argc < 2 && !find_game(found, sizeof(found)) && !import_game(found, sizeof(found))) return 0;
+    if (argc < 2 &&!find_game(found, sizeof(found)) && !import_game(found, sizeof(found))) return 0;
 #endif
     if (argc < 2 && (found[0] || find_game(found, sizeof(found)))) {
         /* Started without arguments (double-clicked): the game found
