@@ -54,6 +54,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
 int hle_pointer_wanted(uint32_t held);
 /* hle_prompts.c: redraws the button prompt glyphs if they should change. */
 void hle_prompts_update(void);
+uint32_t hle_wpad_held(void); /* the first remote's HOST_PAD_* bits, as last read */
 /* hle_pause.c: a texture of a model file, as the file is set up. */
 void hle_pause_texture(uint32_t tex);
 

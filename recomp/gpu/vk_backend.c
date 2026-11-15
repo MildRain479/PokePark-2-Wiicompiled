@@ -1664,11 +1664,15 @@ static void write_bmp(const char* path, const uint8_t* rgba, int w, int h) {
 
 
 
+extern uint64_t g_gpu_wait_ticks; /* gx_frames.c: for the fps line */
+
 static void begin_slot(void) {
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     int i;
     if (S->serial) {
+        uint64_t t0 = ppc_timebase();
         CHECK(vkWaitForFences(sDev, 1, &S->fence, VK_TRUE, UINT64_MAX));
+        g_gpu_wait_ticks += ppc_timebase() - t0;
         CHECK(vkResetFences(sDev, 1, &S->fence));
         if (S->serial > sDone) sDone = S->serial;
         if (sTimes) {
@@ -1774,7 +1778,11 @@ static void end_slot(int acquired, uint32_t image, int dump, int dw, int dh) {
         si[1].pWaitDstStageMask = wait;
         si[1].pSignalSemaphores = signals;
     }
-    present_done();
+    {
+        uint64_t t0 = ppc_timebase();
+        present_done();
+        g_gpu_wait_ticks += ppc_timebase() - t0;
+    }
     CHECK(vkQueueSubmit(sQueue, acquired ? 2 : 1, si, S->fence));
     S->serial = sSerial++;
 #ifdef __ANDROID__
@@ -2726,9 +2734,10 @@ static uint32_t write_tev(const GXDrawState* st) {
         }
         iw[120] = st->ind_stages;
         iw[121] = 1;
+        /* The coordinates' sizes, then the maps': width | height << 16. */
         for (i = 0; i < 8; i++) {
-            iw[128 + 2 * i] = st->tc_size[i][0];
-            iw[129 + 2 * i] = st->tc_size[i][1];
+            iw[128 + i] = st->tc_size[i][0] | st->tc_size[i][1] << 16;
+            iw[136 + i] = st->map_size[i][0] | st->map_size[i][1] << 16;
         }
     }
     for (i = 0; i < st->num_stages; i++) {
@@ -4206,8 +4215,10 @@ static int vk_present(int x, int y, int cw, int ch, int may_drop) {
             /* Above 60 fps a frame is never waited for (gx_frames.c):
              * left out if no image is free. */
             VkResult r;
+            uint64_t t0 = ppc_timebase();
             present_done();
             r = vkAcquireNextImageKHR(sDev, sChain, may_drop ? 0 : UINT64_MAX, S->acquired, VK_NULL_HANDLE, &image);
+            g_gpu_wait_ticks += ppc_timebase() - t0;
             if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
                 VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
                 acquired = 1;

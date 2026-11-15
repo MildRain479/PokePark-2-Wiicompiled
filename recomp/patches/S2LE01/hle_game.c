@@ -264,10 +264,40 @@ void hle_set_frame_rate(int fps) {
 
 /* void CMovieManager::Advance(this): decodes the next frame of a playing
  * movie, once per update. Updates come faster than the scene's own at 60 fps
- * and up, so the movie only steps as often as the scene's clock would. */
+ * and up, so the movie only steps as often as the scene's clock would.
+ *
+ * Holding + for half a second skips a movie that doesn't loop, no sooner
+ * than about a second in: its state set to finished, as Advance does
+ * itself after the last frame. RECOMP_SKIP_MOVIES=1 does that by itself,
+ * for tests. */
+#define MOVIE_FRAME 0x28    /* the frame shown; +0x24 is how many there are */
+#define MOVIE_STATE 0x35    /* 3 playing (what Advance is called in), 5 done */
+#define MOVIE_LOOPS 0x37    /* 1 for a movie that loops */
+#define MOVIE_FINISHED 5
+#define SKIP_AFTER_FRAMES 30
+#define SKIP_HOLD (PPC_TB_HZ / 2) /* + held this long skips a movie */
 static uint64_t sMovieTicks;
+static uint64_t sPlusSince; /* when + was pressed, 0 if it isn't held */
+
+static int skip_movie(uint32_t movie) {
+    static int skipAll = -1;
+    uint64_t now = ppc_timebase();
+    if (skipAll < 0) {
+        const char* e = getenv("RECOMP_SKIP_MOVIES");
+        skipAll = e && *e && *e != '0';
+    }
+    if (!(hle_wpad_held() & HOST_PAD_PLUS)) sPlusSince = 0;
+    else if (!sPlusSince) sPlusSince = now;
+    if (LD8(movie + MOVIE_LOOPS) == 1 || LD32(movie + MOVIE_FRAME) < SKIP_AFTER_FRAMES) return 0;
+    if (!skipAll && !(sPlusSince && now - sPlusSince >= SKIP_HOLD)) return 0;
+    if (!skipAll) HLE_LOG("movie skipped (+ held)");
+    sPlusSince = 0;
+    ST8(movie + MOVIE_STATE, MOVIE_FINISHED);
+    return 1;
+}
 
 void F_MovieManager_Advance(ppc_t* c) {
+    if (skip_movie(c->r[3])) return;
     if (sScenePeriod) {
         sMovieTicks += draw_period();
         if (sMovieTicks < sScenePeriod) return;

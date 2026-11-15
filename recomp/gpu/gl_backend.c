@@ -282,8 +282,9 @@ static const char* kFragmentShader =
     "/* Indirect texturing (gx.h): the indirect stages and whether any stage is\n"
     " * indirect; each stage's command; the indirect stages' maps, coordinates\n"
     " * and scales; the matrices' rows, each with its shift; the coordinates'\n"
-    " * sizes, two to a vector. */\n"
-    "uniform ivec4 u_ind, u_ind_cmd[4], u_ind_stage[4], u_ind_mtx[6], u_tc_size[4];\n"
+    " * sizes, two to a vector, then the maps' (as GX has them: an EFB copy's\n"
+    " * texture, or a texture pack's, is bigger). */\n"
+    "uniform ivec4 u_ind, u_ind_cmd[4], u_ind_stage[4], u_ind_mtx[6], u_tc_size[8];\n"
     "uniform int u_video; /* the maps whose texture is a movie frame, a bit each */\n"
     "/* A movie's frame, upscaled along its edges as AMD's FSR 1 does (EASU):\n"
     " * twelve texels weighted by a lobe stretched along the local edge, held\n"
@@ -367,20 +368,10 @@ static const char* kFragmentShader =
     "  if (m == 4) return texture(u_tex4, uv); if (m == 5) return texture(u_tex5, uv);\n"
     "  if (m == 6) return texture(u_tex6, uv); return texture(u_tex7, uv);\n"
     "}\n"
-    "ivec2 map_size(int m) {\n"
-    "  if (m == 0) return textureSize(u_tex0, 0); if (m == 1) return textureSize(u_tex1, 0);\n"
-    "  if (m == 2) return textureSize(u_tex2, 0); if (m == 3) return textureSize(u_tex3, 0);\n"
-    "  if (m == 4) return textureSize(u_tex4, 0); if (m == 5) return textureSize(u_tex5, 0);\n"
-    "  if (m == 6) return textureSize(u_tex6, 0); return textureSize(u_tex7, 0);\n"
-    "}\n"
+    "ivec2 map_size(int m) { ivec4 sz = u_tc_size[4 + (m >> 1)]; return (m & 1) != 0 ? sz.zw : sz.xy; }\n"
     "/* A map sampled at a coordinate in texels with 7 fractional bits, of the\n"
-    " * size GX gives texture coordinate n (the map's own, if none): a copy of\n"
-    " * the screen is bigger than the game's texels. */\n"
-    "vec4 sample_at(int m, ivec2 c, int n) {\n"
-    "  ivec4 sz = u_tc_size[n >> 1]; vec2 d = vec2((n & 1) != 0 ? sz.zw : sz.xy);\n"
-    "  if (d.x <= 0.0 || d.y <= 0.0) d = vec2(map_size(m));\n"
-    "  return sample_map(m, vec2(c) / (d * 128.0));\n"
-    "}\n"
+    " * map's size as GX has it. (n, the coordinate, isn't needed.) */\n"
+    "vec4 sample_at(int m, ivec2 c, int n) { return sample_map(m, vec2(c) / (vec2(map_size(m)) * 128.0)); }\n"
     "ivec2 fixpoint_uv(int n) {\n"
     "  vec3 tc = v_tex[n]; ivec4 sz = u_tc_size[n >> 1];\n"
     "  return ivec2(tc.xy / (tc.z == 0.0 ? 1.0 : tc.z) * vec2((n & 1) != 0 ? sz.zw : sz.xy) * 128.0);\n"
@@ -1398,8 +1389,8 @@ static void apply_draw_state(const GXDrawState* st) {
         UNIFORM_IF_CHANGED(p_glUniform4fv, uFogRange, 4, range, lrange);
     }
     {
-        static GLint lind[4], lcmd[16], lstage[16], lmtx[24], lsize[16];
-        GLint ind[4] = {0}, cmd[16] = {0}, istage[16] = {0}, mtx[24] = {0}, size[16] = {0};
+        static GLint lind[4], lcmd[16], lstage[16], lmtx[24], lsize[32];
+        GLint ind[4] = {0}, cmd[16] = {0}, istage[16] = {0}, mtx[24] = {0}, size[32] = {0};
         if (st->ind_any) {
             int k;
             ind[0] = st->ind_stages;
@@ -1421,6 +1412,8 @@ static void apply_draw_state(const GXDrawState* st) {
             for (i = 0; i < 8; i++) {
                 size[2 * i] = st->tc_size[i][0];
                 size[2 * i + 1] = st->tc_size[i][1];
+                size[16 + 2 * i] = st->map_size[i][0];
+                size[16 + 2 * i + 1] = st->map_size[i][1];
             }
         }
         UNIFORM_IF_CHANGED(p_glUniform4iv, uInd, 1, ind, lind);
@@ -1428,7 +1421,7 @@ static void apply_draw_state(const GXDrawState* st) {
             UNIFORM_IF_CHANGED(p_glUniform4iv, uIndCmd, 4, cmd, lcmd);
             UNIFORM_IF_CHANGED(p_glUniform4iv, uIndStage, 4, istage, lstage);
             UNIFORM_IF_CHANGED(p_glUniform4iv, uIndMtx, 6, mtx, lmtx);
-            UNIFORM_IF_CHANGED(p_glUniform4iv, uTcSize, 4, size, lsize);
+            UNIFORM_IF_CHANGED(p_glUniform4iv, uTcSize, 8, size, lsize);
         }
     }
     sUniformsSet = 1;

@@ -184,11 +184,18 @@ static unsigned sPresentsDropped; /* frames left out as the display wasn't ready
 static char sTitle[96];
 static volatile int sTitleNew;
 
+/* Time the thread drawing frames spent waiting for the GPU or the display
+ * (a frame's slot, the last present, a swapchain image: vk_backend.c), in
+ * time-base ticks; and the game thread's longest frame of its own work
+ * (not waiting for an event) since the last report, in ms (gxb_present). */
+uint64_t g_gpu_wait_ticks;
+static volatile double sMostWork;
+
 /* Frames per second and the longest frame of the last second, in the
  * window title and, with RECOMP_FPS=1, on stderr. */
 static void report(void) {
     static LARGE_INTEGER freq, since, last;
-    static unsigned frames;
+    static unsigned frames, late;
     static double worst;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -198,6 +205,7 @@ static void report(void) {
     } else {
         double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
         if (ms > worst) worst = ms;
+        if (ms > 20.0) late++; /* a 60 Hz retrace missed */
         frames++;
         last = now;
     }
@@ -208,11 +216,13 @@ static void report(void) {
         /* The share of the second the game thread was not waiting for an
          * event: how much headroom is left. */
         extern uint64_t g_wait_ticks;
-        static uint64_t lastWait;
+        static uint64_t lastWait, lastGpu;
         static unsigned lastGameFrames, lastDropped;
         double secs = (double)(now.QuadPart - since.QuadPart) / freq.QuadPart;
         double busy = 100.0 * (1.0 - (double)(g_wait_ticks - lastWait) / PPC_TB_HZ / secs);
+        double gpu = 100.0 * (double)(g_gpu_wait_ticks - lastGpu) / PPC_TB_HZ / secs;
         lastWait = g_wait_ticks;
+        lastGpu = g_gpu_wait_ticks;
         snprintf(title, sizeof(title), GAME_NAME " (recompiled) - %.2f fps, slowest frame %.1f ms, busy %.0f%%", fps,
                  worst, busy);
         if (tDrawThread) {
@@ -223,14 +233,17 @@ static void report(void) {
             win_set_title(title);
         }
         if (e && *e == '1')
-            fprintf(stderr, "fps: %.2f, slowest frame %.1f ms, busy %.0f%%, game %u, left out %u\n", fps, worst, busy,
-                    sGameFrames - lastGameFrames, sPresentsDropped - lastDropped);
+            fprintf(stderr,
+                    "fps: %.2f, slowest frame %.1f ms, over 20 ms %u, busy %.0f%%, game %u, left out %u, gpu wait %.0f%%, "
+                    "most work %.1f ms\n",
+                    fps, worst, late, busy, sGameFrames - lastGameFrames, sPresentsDropped - lastDropped, gpu, sMostWork);
         lastGameFrames = sGameFrames;
         lastDropped = sPresentsDropped;
         if (e && *e == '1') print_gl_stats();
         since = now;
-        frames = 0;
+        frames = late = 0;
         worst = 0;
+        sMostWork = 0;
     }
 }
 
@@ -1784,6 +1797,15 @@ void gxb_present(int x, int y, int cw, int ch) {
     frame_lock(); /* (taken already if the frame's vertices were handed over) */
     sHeld++;
     sGameFrames++;
+    {
+        extern uint64_t g_wait_ticks;
+        static uint64_t last, lastWait;
+        uint64_t now = ppc_timebase();
+        double work = last ? (double)((now - last) - (g_wait_ticks - lastWait)) * 1000.0 / PPC_TB_HZ : 0;
+        if (work > sMostWork) sMostWork = work;
+        last = now;
+        lastWait = g_wait_ticks;
+    }
 #ifdef __ANDROID__
     {
         void android_frame_done(void); /* window_android.c: the CPU's clocks kept up */

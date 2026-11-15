@@ -207,6 +207,11 @@ void F_WPADSetDataFormat(ppc_t* c) {
     c->r[3] = connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER;
 }
 
+/* What the first remote has held, as last read. */
+static uint32_t sHeld;
+
+uint32_t hle_wpad_held(void) { return sHeld; }
+
 /* void WPADRead(s32 chan, WPADStatus* status): the latest report.
  * WPADStatus: u16 button; s16 accX, accY, accZ; DPDObject obj[4] (s16 x,
  * y; u16 size; u8 traceId; pad); u8 dev; s8 err. */
@@ -221,6 +226,7 @@ void F_WPADRead(ppc_t* c) {
     if (on && chan == 0) {
         uint32_t scripted = script_held();
         if (!g_host_script_input || !g_host_script_input(scripted)) held |= scripted;
+        sHeld = held;
     }
     if (on && chan == 0 && (motion = hle_motion(held, sReports, acc, dots)) != 0) {
         /* In minigames, the remote's motion as each asks (hle_motion.c). */

@@ -81,6 +81,19 @@ The game keeps its saves where a Wii does, in the same files, so a save
 from your Wii or from Dolphin should carry on where you left off. This
 hasn't been tested with PokéPark 2 yet.
 
+**In the game.** On the save files screen, open **Options > Gameplay**:
+
+- **Import Wii save** takes a Wii's `data.bin` straight from its SD card
+  (no Dolphin needed; see step 1 below for making one), the files in
+  Dolphin's save folder, or a zip of them. The game restarts with the
+  imported save; the one it had is kept beside it, in a `data before
+  import` folder.
+- **Export Wii save** writes your save as a zip of its files, the way
+  Dolphin keeps them. Import it on another phone or PC, or unzip it into
+  Dolphin's save folder (below).
+
+The same can be done by hand:
+
 **From a Wii.** A Wii copies saves to an SD card encrypted, so Dolphin
 (free, [dolphin-emu.org](https://dolphin-emu.org)) is used to unpack it:
 
@@ -112,8 +125,9 @@ hasn't been tested with PokéPark 2 yet.
 4. Start the game; your save files are on the save files screen.
 
 Saves go the other way too: copy the game's `data` folder into Dolphin's,
-and on to a Wii by right-clicking the game in Dolphin's list and choosing
-**Export Wii Save**, which writes a `data.bin` to copy to the SD card.
+or unzip what **Export Wii save** writes there. On to a Wii from Dolphin,
+right-click the game in Dolphin's list and choose **Export Wii Save**,
+which writes a `data.bin` to copy to the SD card.
 
 ## Improvements over the Wii version
 
@@ -135,7 +149,8 @@ and on to a Wii by right-clicking the game in Dolphin's list and choosing
   ultrawide, which show more of the world above and below or at the
   sides. The HUD and menus stay at 16:9 in the middle.
 - **Field of view.** 80% to 150% of the game's, in the park.
-- **Movies.** Shown as they were, sharpened, or AI upscaled.
+- **Movies.** Shown as they were, sharpened, or AI upscaled. Hold + to
+  skip one.
 - **Texture packs.** Packs made for Dolphin work as they are: put the
   pack's folder in a `textures` folder beside the game (on Android, the
   `textures` folder beside `S2LE01`). Options > Display > Texture pack

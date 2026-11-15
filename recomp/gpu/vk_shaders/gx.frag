@@ -276,14 +276,17 @@ bool acmp(int f, float a, float r) {
 float q8(float x) { return floor(x * 255.0 + 0.5) / 255.0; }
 vec3 q8(vec3 x) { return floor(x * 255.0 + 0.5) / 255.0; }
 
-// A texture map sampled at a coordinate in texels with 7 fractional bits,
-// of the size GX gives texture coordinate n (the map's own, if none): a
-// copy of the screen is bigger than the game's texels.
+// Size i of the eight at word k (width | height << 16).
+ivec2 size_at(uint k, int i) {
+    int v = ti(k + 4u * uint(i >> 2))[i & 3];
+    return ivec2(v & 0xFFFF, v >> 16);
+}
+
+// A texture map sampled at a coordinate in texels with 7 fractional bits:
+// texels of the map's size as GX has it (an EFB copy's texture, or a
+// texture pack's, is bigger). (n, the coordinate, isn't needed.)
 vec4 sample_at(int m, ivec2 c, int n) {
-    ivec4 sz = ti(128u + 4u * uint(n >> 1));
-    vec2 d = vec2((n & 1) != 0 ? sz.zw : sz.xy);
-    if (d.x <= 0.0 || d.y <= 0.0) d = vec2(textureSize(textures[pc.tex[m] & 0x7FFFFFFFu], 0));
-    return sample_map(m, vec2(c) / (d * 128.0));
+    return sample_map(m, vec2(c) / (vec2(size_at(136u, m)) * 128.0));
 }
 
 // Texture coordinate n in texels with 7 fractional bits, by its size (an
@@ -291,8 +294,7 @@ vec4 sample_at(int m, ivec2 c, int n) {
 ivec2 fixpoint_uv(int n) {
 #if TEX_IO > 0
     vec3 tc = v_tex[TEX_IO < 8 ? min(n, TEX_IO - 1) : n];
-    ivec4 sz = ti(128u + 4u * uint(n >> 1));
-    return ivec2(tc.xy / (tc.z == 0.0 ? 1.0 : tc.z) * vec2((n & 1) != 0 ? sz.zw : sz.xy) * 128.0);
+    return ivec2(tc.xy / (tc.z == 0.0 ? 1.0 : tc.z) * vec2(size_at(128u, n)) * 128.0);
 #else
     return ivec2(0);
 #endif

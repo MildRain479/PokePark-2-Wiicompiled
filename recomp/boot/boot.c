@@ -19,6 +19,9 @@ int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
 void hle_text_boot_setup(void);
 void hle_nand_set_root(const char* root);
+#ifdef __ANDROID__
+void save_import_pending(void); /* save_import_android.c */
+#endif
 void hle_dump_threads(void);
 void input_init(void);
 void audio_init(void);
@@ -639,6 +642,20 @@ int main(int argc, char** argv) {
         slash = strrchr(root, '/');
         if (slash) strcpy(slash + 1, "disc");
         else strcpy(root, "disc");
+        {
+            /* dtk's own layout, <dir>/disc/sys/main.dol with the disc's
+             * files beside sys: that disc folder itself. */
+            char probe[1100];
+            FILE* f;
+            snprintf(probe, sizeof(probe), "%s/sys/boot.bin", root);
+            if (!(f = fopen(probe, "rb")) && (slash = strrchr(root, '/')) && slash - root >= 4 &&
+                !strncmp(slash - 4, "disc", 4)) {
+                *slash = '\0';
+                snprintf(probe, sizeof(probe), "%s/sys/boot.bin", root);
+                if (!(f = fopen(probe, "rb"))) *slash = '/';
+            }
+            if (f) fclose(f);
+        }
 #ifdef __ANDROID__
         if (disc_image_active() ? disc_image_dvd_init() == 0 : hle_dvd_init(root) == 0) {
 #else
@@ -651,6 +668,9 @@ int main(int argc, char** argv) {
          * which keep their own). */
         strcpy(root + strlen(root) - 4, "nand");
         hle_nand_set_root(getenv("RECOMP_NAND") ? getenv("RECOMP_NAND") : root);
+#ifdef __ANDROID__
+        save_import_pending();
+#endif
     }
 #ifdef _WIN32
     {

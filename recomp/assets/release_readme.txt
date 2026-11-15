@@ -12,6 +12,12 @@ Getting started
   your saves are kept in S2LE01\nand.
 - Keep the prompts and tools folders beside PokePark2.exe.
 
+Steam Deck
+- Not tested yet, but it should run through Proton: in Desktop Mode, add
+  PokePark2.exe to Steam as a non-Steam game, and in its Properties >
+  Compatibility, force the latest Proton. Then set Options > Display >
+  Aspect ratio to 16:10 and turn on Fullscreen.
+
 Settings
 - Options are on the PokePark Pad (and on the save files screen):
   display, keyboard, controller and gameplay. They are saved in
@@ -27,6 +33,13 @@ Settings
   240 with frames drawn in between the game's.
 - Texture packs: Dolphin texture packs work as they are. Put the
   pack's folder in a textures folder beside PokePark2.exe.
+- Wii and Dolphin saves: on the save files screen, Options > Gameplay
+  > Import Wii save takes a Wii's data.bin (from its SD card), the
+  files of Dolphin's save folder, or a zip of them. The save there
+  before is kept, in S2LE01\nand\title\00010000\53324c45\data before
+  import. Export Wii save writes your save as a zip of its files, to
+  import elsewhere or unzip into Dolphin's save folder.
+- Movies: hold + (P, or Start on a controller) to skip one.
 - Photos: copying photos to the SD card asks for a folder and saves
   them there as JPEGs.
 - The attractions need no Wii Remote: aim Cake Contraption with the

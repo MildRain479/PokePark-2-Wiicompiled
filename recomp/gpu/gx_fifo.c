@@ -530,6 +530,13 @@ static int written_since(const TexEntry* e, uint32_t addr, int size) {
 #define TEX_CACHE 4096
 #define TEX_WAYS 4
 static TexEntry sTexCache[TEX_CACHE];
+/* A texture not looked at in this many frames is let go: a scene's
+ * textures, once it's gone, are seldom looked up again (the next visit
+ * loads them elsewhere in memory), and kept they filled the cache's 4096
+ * ways, about 60 MB of RAM and as much GPU memory for each minigame
+ * played. One drawn again is decoded again; a minute or two (as the game
+ * draws 60 or 30 frames a second) keeps a minigame's for a replay. */
+#define TEX_UNUSED_FRAMES 3600
 
 /* Spreads every bit of a key over the result (splitmix64's finalizer). The
  * set index needs the address bits, which sit high in the key: without
@@ -756,7 +763,10 @@ static uint32_t texture_for_map(int map) {
         }
     }
     if (sInvalidated) note_writes();
-    if (e->handle && e->key == key && e->seen == sNote) return e->handle;
+    if (e->handle && e->key == key && e->seen == sNote) {
+        e->checked = sFrame; /* in use: kept, and not the way a miss takes */
+        return e->handle;
+    }
     {
         uint32_t image;
         /* A texture changing frame after frame (a movie's) is hashed every
@@ -949,6 +959,8 @@ static void build_state(GXDrawState* st) {
         for (i = 0; i < 8; i++) {
             st->tc_size[i][0] = (int)(bp[0x30 + 2 * i] & 0xFFFF) + 1;
             st->tc_size[i][1] = (int)(bp[0x31 + 2 * i] & 0xFFFF) + 1;
+            st->map_size[i][0] = (int)(bp[(i < 4 ? 0x88 : 0xA8 - 4) + i] & 0x3FF) + 1;
+            st->map_size[i][1] = (int)((bp[(i < 4 ? 0x88 : 0xA8 - 4) + i] >> 10) & 0x3FF) + 1;
         }
     }
     for (i = 0; i < st->num_stages; i++) {
@@ -1289,11 +1301,21 @@ static void arena_free_later(int first, int n) {
     sLateCount++;
 }
 
-/* A part of an array the list's vertices index, and its bytes' hash. */
+/* A part of an array the list's vertices index (attribute attr's, off
+ * bytes from its base, at addr when hashed), and its bytes' hash. */
 typedef struct ListRange {
-    uint32_t addr, len;
+    uint32_t addr, len, off;
+    int attr;
     uint64_t hash;
 } ListRange;
+
+/* Decoded vertices in the arena, shared by the entries of one list called
+ * with its arrays in different places but the same in them (as in the
+ * first game, whose park's trees, rocks and flowers are one list with a
+ * copy of its arrays for each). */
+typedef struct ListVerts {
+    int first, verts, refs;
+} ListVerts;
 
 typedef struct ListEntry {
     uint32_t addr, size; /* 0 size: unused */
@@ -1313,6 +1335,9 @@ typedef struct ListEntry {
      * noted costs a fault. */
     int tracked, same_written;
     uint32_t stamp;
+    uint64_t shape;      /* list_state but for the array bases */
+    int movable;         /* the list sets no array registers itself: its arrays may be elsewhere */
+    ListVerts* shared;   /* its vertices, once decoded (first and verts are theirs) */
 } ListEntry;
 
 #define LIST_SETS 4096
@@ -1325,6 +1350,10 @@ typedef struct ListEntry {
 #define LIST_UNCACHED 1000000
 #define LIST_SAME_WRITTEN 8
 static ListEntry sLists[LIST_SETS * LIST_WAYS];
+/* By list and shape: the entry decoded or checked last, whose vertices
+ * another call of the list with its arrays elsewhere may share. */
+#define LIST_SHAPES 16384
+static ListEntry* sShapes[LIST_SHAPES];
 
 /* The list running: drawn from its entry's vertices (sListBuild 0), or
  * decoded into sListVerts for it; sListAt vertices so far, of sListMax
@@ -1338,23 +1367,33 @@ static int sRangeCount, sRangeCap;
 /* Spans for draws outside display lists: the rest of this frame's. */
 static int sTransNext, sTransLeft;
 
-/* What a list's vertices depend on besides its bytes and the arrays: the
- * vertex descriptors and formats, the array registers, and the default
- * matrix indices. */
-static uint64_t list_state(void) {
+/* What a list's vertices depend on besides its bytes and what's in the
+ * arrays: the vertex descriptors and formats, the array strides and the
+ * default matrix indices (*shape); and where the arrays are (the
+ * result). */
+static uint64_t list_state(uint64_t* shape) {
     static uint32_t gen, x18, x19;
-    static uint64_t last;
+    static uint64_t last, lastShape;
     uint64_t h = 0x243F6A8885A308D3ull;
     int i;
-    if (gen == sCpGen && x18 == xf[0x1018] && x19 == xf[0x1019]) return last;
-    gen = sCpGen;
-    x18 = xf[0x1018];
-    x19 = xf[0x1019];
-    h = mix64(h ^ cp[0x50] ^ ((uint64_t)cp[0x60] << 32));
-    for (i = 0; i < 8; i++) h = mix64(h ^ cp[0x70 + i] ^ ((uint64_t)cp[0x80 + i] << 32) ^ ((uint64_t)cp[0x90 + i] << 16));
-    for (i = 0; i < 12; i++) h = mix64(h ^ cp[0xA0 + i] ^ ((uint64_t)cp[0xB0 + i] << 32));
-    return last = mix64(h ^ xf[0x1018] ^ ((uint64_t)xf[0x1019] << 32));
+    if (gen != sCpGen || x18 != xf[0x1018] || x19 != xf[0x1019]) {
+        gen = sCpGen;
+        x18 = xf[0x1018];
+        x19 = xf[0x1019];
+        h = mix64(h ^ cp[0x50] ^ ((uint64_t)cp[0x60] << 32));
+        for (i = 0; i < 8; i++)
+            h = mix64(h ^ cp[0x70 + i] ^ ((uint64_t)cp[0x80 + i] << 32) ^ ((uint64_t)cp[0x90 + i] << 16));
+        for (i = 0; i < 12; i++) h = mix64(h ^ cp[0xB0 + i]);
+        lastShape = h = mix64(h ^ xf[0x1018] ^ ((uint64_t)xf[0x1019] << 32));
+        for (i = 0; i < 12; i++) h = mix64(h ^ cp[0xA0 + i]);
+        last = h;
+    }
+    *shape = lastShape;
+    return last;
 }
+
+/* Set by list_vertex_count: the list writes array registers itself. */
+static int sListSetsArrays;
 
 /* The vertices of the draws in list p[0..len), as run would draw them;
  * -1 if implausibly many. */
@@ -1363,6 +1402,7 @@ static int list_vertex_count(const uint8_t* p, uint32_t len) {
     uint32_t pos = 0;
     int64_t total = 0;
     memcpy(saved, cp + 0x50, sizeof(saved));
+    sListSetsArrays = 0;
     while (pos < len) {
         uint32_t left = len - pos;
         uint8_t op = p[pos];
@@ -1372,6 +1412,7 @@ static int list_vertex_count(const uint8_t* p, uint32_t len) {
                 cp[p[pos + 1]] = rd32(p + pos + 2);
                 sCpGen++;
             }
+            if (p[pos + 1] >= 0xA0 && p[pos + 1] < 0xC0) sListSetsArrays = 1;
             pos += 6;
         } else if (op == 0x10) {
             if (left < 5) break;
@@ -1421,15 +1462,19 @@ static void list_note_arrays(const uint8_t* p, const VtxFormat* f, int count) {
             sRangeCap = sRangeCap ? sRangeCap * 2 : 64;
             sRanges = (ListRange*)realloc(sRanges, (size_t)sRangeCap * sizeof(ListRange));
         }
+        sRanges[sRangeCount].attr = a;
+        sRanges[sRangeCount].off = lo * stride;
         sRanges[sRangeCount].addr = base + lo * stride;
         sRanges[sRangeCount].len = (hi - lo) * stride + (uint32_t)elem;
         sRangeCount++;
     }
 }
 
+/* By attribute, then place. */
 static int range_order(const void* a, const void* b) {
-    uint32_t x = ((const ListRange*)a)->addr, y = ((const ListRange*)b)->addr;
-    return x < y ? -1 : x > y;
+    const ListRange *x = (const ListRange*)a, *y = (const ListRange*)b;
+    if (x->attr != y->attr) return x->attr < y->attr ? -1 : 1;
+    return x->addr < y->addr ? -1 : x->addr > y->addr;
 }
 
 /* Watches e's bytes and ranges for writes from now (tracked, from stamp);
@@ -1462,7 +1507,15 @@ static int list_ranges_same(const ListEntry* e) {
 }
 
 static void list_drop_vertices(ListEntry* e) {
-    if (e->first >= 0) arena_free_later(e->first, e->verts);
+    if (e->shared) {
+        if (--e->shared->refs == 0) {
+            if (e->shared->first >= 0) arena_free_later(e->shared->first, e->shared->verts);
+            free(e->shared);
+        }
+        e->shared = NULL;
+    } else if (e->first >= 0) {
+        arena_free_later(e->first, e->verts);
+    }
     free(e->small);
     e->small = NULL;
     e->first = -1;
@@ -1470,16 +1523,70 @@ static void list_drop_vertices(ListEntry* e) {
     e->valid = 0;
 }
 
+/* Whether [a, a + n) lies in MEM1 or MEM2 (physical). */
+static int phys_ok(uint32_t a, uint32_t n) {
+    return a + n <= 0x01800000u || (a >= 0x10000000u && a + n <= 0x14000000u);
+}
+
+static ListEntry** shape_slot(uint32_t addr, uint32_t size, uint64_t shape) {
+    return &sShapes[(mix64(shape ^ ((uint64_t)addr << 32) ^ size) >> 20) % LIST_SHAPES];
+}
+
+/* A new entry e for a list whose bytes hash to hash, given the vertices
+ * of d, the same list in the same shape, if what's in its arrays where
+ * they are now is what d's vertices were decoded from. */
+static int list_share(ListEntry* e, const ListEntry* d, uint64_t hash) {
+    int i;
+    if (!d->valid || !d->movable || !d->shared || d->addr != e->addr || d->size != e->size || d->shape != e->shape ||
+        d->hash != hash)
+        return 0;
+    for (i = 0; i < d->nranges; i++) {
+        uint32_t a = (cp[0xA0 + d->ranges[i].attr] & 0x3FFFFFFF) + d->ranges[i].off;
+        if (!phys_ok(a, d->ranges[i].len)) return 0;
+    }
+    if (d->nranges > e->rangecap) {
+        e->rangecap = d->nranges;
+        e->ranges = (ListRange*)realloc(e->ranges, (size_t)e->rangecap * sizeof(ListRange));
+    }
+    for (i = 0; i < d->nranges; i++) {
+        e->ranges[i] = d->ranges[i];
+        e->ranges[i].addr = (cp[0xA0 + d->ranges[i].attr] & 0x3FFFFFFF) + d->ranges[i].off;
+    }
+    e->nranges = d->nranges;
+    /* Watched before the ranges are hashed (as in list_end). */
+    list_watch(e);
+    for (i = 0; i < e->nranges; i++) {
+        if (hash_bytes64(MA(e->ranges[i].addr), e->ranges[i].len) != e->ranges[i].hash) {
+            e->nranges = 0;
+            e->tracked = 0;
+            return 0;
+        }
+    }
+    e->hash = hash;
+    e->shared = d->shared;
+    e->shared->refs++;
+    e->first = d->first;
+    e->verts = d->verts;
+    if (d->small) {
+        e->small = (GXVertex*)malloc((size_t)d->verts * sizeof(GXVertex));
+        if (e->small) memcpy(e->small, d->small, (size_t)d->verts * sizeof(GXVertex));
+    }
+    e->movable = 1;
+    e->valid = 1;
+    e->changed = 0;
+    return 1;
+}
+
 /* Before list addr (size bytes) runs: its entry drawn from, or decoded
  * into; neither (sList NULL) for a list that changes from call to call,
  * whose draws go to this frame's spans. */
 static void list_begin(uint32_t addr, uint32_t size) {
-    uint64_t state, key, hash = 0;
-    ListEntry *set, *e = NULL;
+    uint64_t shape, state, key, hash = 0;
+    ListEntry *set, *e = NULL, *d;
     int i, count;
     sList = NULL;
     if (!sArena || (long)sFrame == sDebugFrame) return;
-    state = list_state();
+    state = list_state(&shape);
     key = mix64(state ^ ((uint64_t)addr << 32) ^ size);
     set = &sLists[(key % LIST_SETS) * LIST_WAYS];
     for (i = 0; i < LIST_WAYS && !e; i++) {
@@ -1503,6 +1610,7 @@ static void list_begin(uint32_t addr, uint32_t size) {
         }
         hash = hash_bytes64(MA(addr), size);
         if (e->valid && hash == e->hash && list_ranges_same(e)) {
+            if (e->movable) *shape_slot(addr, size, shape) = e;
             e->changed = 0;
             sList = e;
             sListBuild = 0;
@@ -1521,10 +1629,14 @@ static void list_begin(uint32_t addr, uint32_t size) {
             }
             if (set[i].used < e->used) e = &set[i];
         }
+        d = *shape_slot(addr, size, shape);
+        if (d == e) d = NULL;
         if (e->size) list_drop_vertices(e);
         e->addr = addr;
         e->size = size;
         e->state = state;
+        e->shape = shape;
+        e->movable = 0;
         e->first = -1;
         e->verts = 0;
         e->valid = 0;
@@ -1532,6 +1644,12 @@ static void list_begin(uint32_t addr, uint32_t size) {
         e->same_written = 0;
         e->used = sFrame;
         hash = hash_bytes64(MA(addr), size);
+        if (d && list_share(e, d, hash)) {
+            sList = e;
+            sListBuild = 0;
+            sListAt = 0;
+            return;
+        }
     }
     count = list_vertex_count(MA(addr), size);
     if (count < 0) {
@@ -1574,7 +1692,8 @@ static void list_end(void) {
     }
     if (sRangeCount > 1) qsort(sRanges, (size_t)sRangeCount, sizeof(ListRange), range_order);
     for (i = 0; i < sRangeCount; i++) {
-        if (n && sRanges[i].addr <= sRanges[n - 1].addr + sRanges[n - 1].len + 64) {
+        if (n && sRanges[i].attr == sRanges[n - 1].attr &&
+            sRanges[i].addr <= sRanges[n - 1].addr + sRanges[n - 1].len + 64) {
             uint32_t end = sRanges[i].addr + sRanges[i].len;
             if (end > sRanges[n - 1].addr + sRanges[n - 1].len) sRanges[n - 1].len = end - sRanges[n - 1].addr;
         } else {
@@ -1600,6 +1719,14 @@ static void list_end(void) {
         list_drop_vertices(e);
     } else {
         e->valid = 1;
+        e->movable = !sListSetsArrays;
+        e->shared = (ListVerts*)malloc(sizeof(ListVerts));
+        if (e->shared) {
+            e->shared->first = e->first;
+            e->shared->verts = e->verts;
+            e->shared->refs = 1;
+            if (e->movable) *shape_slot(e->addr, e->size, e->shape) = e;
+        }
     }
 }
 
@@ -1869,6 +1996,13 @@ static void efb_copy(uint32_t exec) {
                 for (t = 0; t < TEX_CACHE; t++) {
                     if (sTexCache[t].handle) gxb_texture_free(sTexCache[t].handle);
                     sTexCache[t].handle = 0;
+                }
+            } else if ((sFrame & 63) == 0) {
+                for (t = 0; t < TEX_CACHE; t++) {
+                    if (sTexCache[t].handle && sFrame - sTexCache[t].checked > TEX_UNUSED_FRAMES) {
+                        gxb_texture_free(sTexCache[t].handle);
+                        sTexCache[t].handle = 0;
+                    }
                 }
             }
         }

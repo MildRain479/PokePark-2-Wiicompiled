@@ -14,7 +14,7 @@ copy at startup.
 
 ```
 python tools/recomp/recomp.py          # main.dol -> build/recomp_S2LE01/gen/*.c (~4 s)
-python tools/recomp/build.py --run     # compile (~25 s with MSVC) and run the tests
+python tools/recomp/build.py --run test # compile (~25 s with MSVC) and run the tests
 python tools/recomp/build.py --release # optimized across files (~70 s, a few % faster)
 ```
 
@@ -352,7 +352,7 @@ Diagnostics:
 - `RECOMP_DUMP_MEM=<file>` saves MEM1 and MEM2 when the watchdog stops a
   run.
 - `RECOMP_SKIP_MOVIES=1` ends movies that don't loop after about a
-  second (the 56 s opening), for reaching the park quickly in tests.
+  second, as holding + does, for tests.
 - `RECOMP_VI_HZ=<rate>` sets the video refresh and frame rate (default
   60; 59.94 is the Wii's).
 - `RECOMP_THP=orig` decodes THP movies with the game's own decoder;
@@ -394,7 +394,7 @@ Diagnostics:
 | `hle_font.c` | The Wii system font, which `OSInitFont` reads from the boot ROM: `ReadFont` builds the ANSI font from host glyphs (`host_font.h`; GDI's Segoe UI Semibold in `recomp/boot/font_win32.c`), in the ROM font's format, and the SDK expands it as usual. |
 | `hle_camera.c` | Mouse camera: the mouse turns the player camera's (`CameraPlayer`) yaw and its easing target, and swings the eye the game rebuilds that yaw from while Pikachu moves (so turning works while running and steers the run), so the game's own follow, distance and wall collision carry the turn on; up and down tilt it as an offset on the pitch the game picks from the slope ahead, kept off while the game works that pitch out. B recenters as on the Wii and clears the tilt. |
 | `hle_thp.c` | THP movie video: `THPVideoDecode` decoded natively (baseline JPEG without byte stuffing, written as I8 tiles). The game's decoder took ~12 ms a frame in recompiled code. The output matches it to within a few levels on under 0.5% of bytes (IDCT rounding). |
-| `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`, chosen so the 30 Hz alarm's period is exactly twice the 60 Hz one (otherwise the two drift apart and the game can settle at 15 fps). The boot cuts the Strap (safety) screen short: it hands over to Hold (sideways) as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer. Hold runs its course (about 4 s): skipping it sent the first new game of a session back to the title after the opening. `RECOMP_BOOT_SCREENS=1` keeps the Strap timer. |
+| `hle_game.c` | Not hardware: game changes. The game's four frame-step constants (1/59.94 s and 2/59.94 s) follow `RECOMP_VI_HZ`, chosen so the 30 Hz alarm's period is exactly twice the 60 Hz one (otherwise the two drift apart and the game can settle at 15 fps). The boot cuts the Strap (safety) screen short: it hands over to Hold (sideways) as soon as the park data has loaded, about 1 s in, instead of after its 21 s timer. Hold runs its course (about 4 s): skipping it sent the first new game of a session back to the title after the opening. `RECOMP_BOOT_SCREENS=1` keeps the Strap timer. Holding + for half a second skips a movie that doesn't loop (the story's movies; the title's background loops): `CMovieManager`'s state (+0x35) is set to finished, as it is after the last frame. |
 
 **Memory differences from a Wii:**
 - **MEM2:** the game also gets the top of MEM2 that IOS normally keeps
