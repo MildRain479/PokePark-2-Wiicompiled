@@ -10,7 +10,8 @@ Getting started
   PokePark 2: Wonders Beyond (USA, S2LE01): an ISO, RVZ, WBFS or the
   like. It sets the game up in an S2LE01 folder beside the program;
   your saves are kept in S2LE01\nand.
-- Keep the prompts and tools folders beside PokePark2.exe.
+- Keep the prompts and tools folders, SDL3.dll and vcruntime140.dll
+  beside PokePark2.exe.
 
 Steam Deck
 - Not tested yet, but it should run through Proton: in Desktop Mode, add
@@ -24,8 +25,10 @@ Settings
   settings.ini beside the program.
 - Renderer: Vulkan by default; OpenGL in Options > Display (from the
   next start). If Vulkan can't start, OpenGL is used.
-- Xbox-style controllers and keyboard and mouse are supported. Button
-  prompts in the game show the key or button you have bound.
+- Controllers: Xbox, PlayStation, Switch Pro, 8BitDo and most others,
+  over USB or Bluetooth (read through SDL3), and keyboard and mouse.
+  Buttons go by position: the bottom face button is A. Button prompts
+  in the game show the key or button you have bound.
 - Aspect ratio (Options > Display): 16:9 by default; 16:10 and 21:9
   show more of the world around the picture; 4:3 is the game's own
   4:3 mode (from the next start).

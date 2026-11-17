@@ -164,8 +164,9 @@ which writes a `data.bin` to copy to the SD card.
 - **Keyboard and mouse**, with a **mouse-controlled camera** that turns
   and tilts the player camera, even while running, kept inside walls and
   above the ground.
-- **Xbox-style controllers**, with rumble (off, light, normal or strong),
-  and movement in any direction with the left stick.
+- **Controllers**: Xbox, PlayStation, Switch Pro, 8BitDo and most others
+  (through SDL3; buttons go by position), with rumble (off, light,
+  normal or strong), and movement in any direction with the left stick.
 - **Fully rebindable.** Each Wii Remote button has two keyboard or mouse
   slots and two controller slots.
 - **Button prompts match your device.** The game's on-screen Wii Remote
