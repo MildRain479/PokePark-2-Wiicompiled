@@ -35,6 +35,7 @@
  * lrfb turns tilting the other way, and RECOMP_POINTER_FLIP=y moves the
  * pointer the other way up, in case a minigame expects it so. */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,9 +73,12 @@ int hle_dance_swing(uint32_t held, uint32_t report);
 
 /* The pointer: how far a pixel of mouse movement and a second of full
  * stick move it (the screen is -1 to 1 across), and where its dots sit in
- * the IR camera's 1024x768 view. */
+ * the IR camera's 1024x768 view. The stick goes by its tilt squared:
+ * slow near the middle, for aiming, and across the screen in about half
+ * a second at full tilt, for turning (at 1.5 it took 1.3 seconds and
+ * aiming felt sluggish). */
 #define POINTER_PER_PIXEL (1.0f / 600.0f)
-#define POINTER_PER_STICK_SECOND 1.5f
+#define POINTER_PER_STICK_SECOND 3.5f
 #define DOT_SPREAD 100 /* each dot from the middle */
 
 /* How far the pointer goes across, past the screen's edges: Rotom's game
@@ -144,13 +148,27 @@ static int gesture(Gesture* g, uint32_t held, uint32_t mask, uint32_t report, in
 /* The pointer, as the IR camera sees the sensor bar: the dots move the
  * other way to the pointer (pointing right puts the bar to the left of the
  * view, pointing up puts it lower). */
-static void pointer_dots(float rx, float ry, int16_t dots[4][2]) {
+static void pointer_dots(float rx, float ry, uint32_t report, int16_t dots[4][2]) {
     static float px, py;
+    static int env = -1;
+    static float ex, ey, ep;
     float dx = 0, dy = 0, yUp;
     int mx, my;
+    if (env < 0) {
+        /* RECOMP_POINTER_STICK=<x>,<y>[,<seconds>]: the right stick held
+         * there, for unattended runs; with seconds, turned the other way
+         * every that long. */
+        const char* e = getenv("RECOMP_POINTER_STICK");
+        env = e && sscanf(e, "%f,%f,%f", &ex, &ey, &ep) >= 2;
+    }
+    if (env) {
+        int back = ep > 0 && (int)(report / (200.0f * ep)) & 1;
+        rx = back ? -ex : ex;
+        ry = back ? -ey : ey;
+    }
     if (g_host_pointer_read) g_host_pointer_read(&dx, &dy);
-    px += dx * POINTER_PER_PIXEL + rx * POINTER_PER_STICK_SECOND / 200.0f;
-    py += -dy * POINTER_PER_PIXEL + ry * POINTER_PER_STICK_SECOND / 200.0f;
+    px += dx * POINTER_PER_PIXEL + rx * fabsf(rx) * POINTER_PER_STICK_SECOND / 200.0f;
+    py += -dy * POINTER_PER_PIXEL + ry * fabsf(ry) * POINTER_PER_STICK_SECOND / 200.0f;
     px = px > POINTER_X_LIMIT ? POINTER_X_LIMIT : px < -POINTER_X_LIMIT ? -POINTER_X_LIMIT : px;
     py = py > 1 ? 1 : py < -1 ? -1 : py;
     yUp = flip("RECOMP_POINTER_FLIP", "y") ? -py : py;
@@ -175,7 +193,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
         /* Outside minigames: the pointer alone, where the game asks for it. */
         if (!hle_pointer_wanted(held)) return 0;
         if (g_host_sticks_read) g_host_sticks_read(&lx, &ly, &rx, &ry);
-        pointer_dots(rx, ry, dots);
+        pointer_dots(rx, ry, report, dots);
         acc[0] = acc[1] = 0;
         acc[2] = G;
         return 2;
@@ -269,6 +287,6 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     acc[2] = clamp16(z);
 
     if (!(use & USE_POINTER)) return 1;
-    pointer_dots(rx, ry, dots);
+    pointer_dots(rx, ry, report, dots);
     return 3;
 }
