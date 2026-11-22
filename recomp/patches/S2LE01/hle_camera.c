@@ -13,15 +13,24 @@
 
 void (*g_host_mouse_read)(float* dx, float* dy);
 
-enum { CAM_PROJECTION = 0x38, CAM_FOVY = 0x3C, CAM_FAR = 0x44 };
+enum { CAM_ID = 0x04, CAM_PROJECTION = 0x38, CAM_FOVY = 0x3C, CAM_FAR = 0x44 };
 #define WORLD_FAR 5000.0f
+/* The camera that follows the player (see "Mouse camera" below). */
+#define VT_CAMERA_FOLLOW 0x80434938u
 
 static float sFovScale = 1.0f; /* tan(fovy / 2) times this */
+static uint32_t sCurrent;           /* the id of the camera on screen (CameraManager::Update) */
+static uint32_t sFollowId = ~0u;    /* the following camera's id, once applied */
 
 void hle_set_fov(int percent) { sFovScale = percent / 100.0f; }
 
+/* Only while the following camera is the one on screen: a cutscene's
+ * camera (ids 8 and 9 at Cofagrigus's door, after Panpour and Pansear)
+ * frames its shot for the game's own field of view, and widened it took in
+ * the ground under it. The cameras drawn with the player's view (the
+ * shadows', the scene's others) widen along with it, as before. */
 static int widens(uint32_t cam, float fovy) {
-    return sFovScale != 1.0f && !hle_in_minigame() && LD32(cam + CAM_PROJECTION) == 0 &&
+    return sFovScale != 1.0f && sCurrent == sFollowId && !hle_in_minigame() && LD32(cam + CAM_PROJECTION) == 0 &&
            (float)ld_f32(cam + CAM_FAR) >= WORLD_FAR && fovy > 1.0f && fovy < 170.0f;
 }
 
@@ -31,6 +40,7 @@ static float widened(float fovy) {
 
 /* void Camera::ApplyToG3dCamera(Camera*, g3d::Camera*, ..., f32 fovy, ...) */
 void F_Camera_ApplyToG3dCamera(ppc_t* c) {
+    if (LD32(c->r[3]) == VT_CAMERA_FOLLOW) sFollowId = LD32(c->r[3] + CAM_ID);
     if (widens(c->r[3], (float)c->f[1])) c->f[1] = widened((float)c->f[1]);
     F_Camera_ApplyToG3dCamera_orig(c);
 }
@@ -62,7 +72,6 @@ void F_FrustumForCamera(ppc_t* c) {
  *
  * RECOMP_MOUSE=<dx>,<dy> (testing): that many pixels every update. */
 enum {
-    CAM_ID = 0x04,
     CAM_EYE = 0x0C,
     CAM_AT = 0x28,
     CAM_PITCH = 0xF0,   /* degrees */
@@ -91,7 +100,6 @@ enum {
 #define GROUND_CLEARANCE 4.0f
 static float sTurn, sTilt;             /* degrees: the mouse's so far */
 static float sYawStep, sTiltStep;      /* this update's */
-static uint32_t sCurrent;              /* the id of the camera on screen */
 static int sRecenter;
 static uint32_t sGamePitch, sOurPitch; /* as stored (float bits) */
 static uint32_t sTilted;               /* the camera carrying the tilt */
