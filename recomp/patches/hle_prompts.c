@@ -17,7 +17,7 @@
 #include "hle.h"
 #include "host_input.h"
 
-int (*g_host_prompt_icon)(uint32_t button, uint8_t* coverage, int w, int h);
+int (*g_host_prompt_icon)(uint32_t button, int layer, uint8_t* coverage, int w, int h);
 uint32_t (*g_host_prompt_generation)(void);
 
 #define FIRST_ICON 0xE041 /* the d-pad; then A, B, HOME, +, -, 1, 2 */
@@ -40,6 +40,11 @@ typedef struct {
 static Font sFonts[MAX_FONTS];
 static int sFontCount;
 static uint32_t sGeneration = 0xFFFFFFFFu;
+/* The glyphs' layer (host_input.h's LAYER_*): the minigames' in their
+ * lobbies and the minigames themselves, where the instructions are; the
+ * park's elsewhere (dialogue, signs). */
+static int sGlyphLayer;
+static int sInMenu; /* hle_in_menu as the pictures were last drawn */
 
 /* A pixel of a 4-bit (I4) sheet: 8x8 tiles of 32 bytes, row by row. */
 static uint32_t i4_byte(const Font* f, int sheet, int x, int y) {
@@ -112,7 +117,7 @@ static void draw_icons(Font* f) {
         ox = (f->width[i] - s) / 2;
         oy = f->baseline - s - 1;
         if (oy < 0) oy = 0;
-        if (s > 0 && s * s <= MAX_CELL && g_host_prompt_icon) drew = g_host_prompt_icon(kButton[i], cov, s, s);
+        if (s > 0 && s * s <= MAX_CELL && g_host_prompt_icon) drew = g_host_prompt_icon(kButton[i], sGlyphLayer, cov, s, s);
         for (y = 0; y < f->ch; y++) {
             for (x = 0; x < f->cw; x++) {
                 int v = f->original[i][y * f->cw + x];
@@ -206,8 +211,9 @@ static const struct Kind {
     const Spot* spots;
     int spotCount;
     uint32_t line; /* the key's outline, 0xRRGGBB, or ~0u for the button's colour */
+    int layer;     /* whose buttons it shows (LAYER_*): the menus' (the bar, the title), the park's (talk) */
 } kKinds[] = {
-    {"", 0, 0, NULL, 0, 0}, /* its pictures aren't mapped yet: glyphs only */
+    {"", 0, 0, NULL, 0, 0, 0}, /* its pictures aren't mapped yet: glyphs only */
 };
 #define KINDS ((int)(sizeof(kKinds) / sizeof(kKinds[0])))
 
@@ -278,7 +284,7 @@ static void draw_spot(Picture* b, const Spot* spot) {
      * the game's cross, which says "directions" as well, stays. (The
      * generation's low bit: the controller was used last.) */
     if (!g_host_prompt_icon || (spot->button == HOST_PAD_SCREEN_UP && !(sGeneration & 1)) ||
-        !g_host_prompt_icon(spot->button, cov, s, s)) {
+        !g_host_prompt_icon(spot->button, b->kind->layer, cov, s, s)) {
         for (y = 0; y < h; y++) {
             for (x = 0; x < w; x++) ST8(ci8_byte(b->image, W, x0 + x, y0 + y), b->original[(y0 + y) * W + x0 + x]);
         }
@@ -438,7 +444,17 @@ void F_ResTex_Init(ppc_t* c) {
  * the game binds the TPL (TPLBind), by its size and format; its CI8
  * colours from its palette. */
 
-enum { TPL_BUBBLE, TPL_TITLE };
+/* And the menus' button pictures (MenuCommon.dac, KeyButtonOne.tpl and the
+ * rest, 32x32): a Wii button each, light grey with its sign in dark grey,
+ * drawn over an outline of its own (KeyButtonWaku.tpl, a dark ring, and
+ * KeyButtonBWaku.tpl for B's shape). The guide lines under the menus and
+ * the attractions' lobbies ("1 Back", "2 OK") and the photo mode's ("-
+ * Take a Photo", "B Look Around", "1 Back") are drawn from them. Each is
+ * redrawn as the icon for what is bound to its button, light where the
+ * icon is enclosed, its lines dark grey and a dark rim around it, as the
+ * game's own; the outline under it wiped, as the rim takes its place.
+ * Being 32x32 like many others, they are known by their pixels. */
+enum { TPL_BUBBLE, TPL_TITLE, TPL_KEY, TPL_KEY_OUTLINE };
 
 typedef struct {
     int w, h, colours;   /* the texture: CI8, this many RGB5A3 colours */
@@ -447,17 +463,28 @@ typedef struct {
     int kx, kw, kh;      /* the box a key is drawn in: its centre's x (cy its y), size */
     uint32_t button, ink, fill; /* 0xRRGGBB */
     int style;           /* TPL_* */
+    uint32_t pixels;     /* for the KeyButton pictures, their pixels' FNV-1a hash (as on the disc) */
 } TplKind;
 
 static const TplKind kTplKinds[] = {
     {110, 71, 80, 54, 23, 7, 11, 54, 22, 16, HOST_PAD_2, 0x505050, 0xE8E8E8, TPL_BUBBLE}, /* ActionWin.tpl */
     {290, 34, 64, 258, 17, 13, 17, 265, 42, 26, HOST_PAD_2, 0x383838, 0, TPL_TITLE},       /* StartButtonTwo.tpl */
+    {32, 32, 32, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_1, 0x303030, 0xE8E8E8, TPL_KEY, 0xD6243997u},     /* KeyButtonOne.tpl */
+    {32, 32, 32, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_2, 0x303030, 0xE8E8E8, TPL_KEY, 0xCEFA5504u},     /* KeyButtonTwo.tpl */
+    {32, 32, 32, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_B, 0x303030, 0xE8E8E8, TPL_KEY, 0x655C46A8u},     /* KeyButtonB.tpl */
+    {32, 32, 32, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_PLUS, 0x303030, 0xE8E8E8, TPL_KEY, 0x6986A145u},  /* KeyButtonPlus.tpl */
+    {32, 32, 32, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_MINUS, 0x303030, 0xE8E8E8, TPL_KEY, 0x8F1F1DABu}, /* KeyButtonMinus.tpl */
+    /* The outlines: under 1, 2, + and -, and under B. */
+    {32, 32, 16, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_1 | HOST_PAD_2 | HOST_PAD_PLUS | HOST_PAD_MINUS, 0, 0, TPL_KEY_OUTLINE,
+     0xA9144A41u}, /* KeyButtonWaku.tpl */
+    {32, 32, 16, 16, 16, 0, 0, 0, 0, 0, HOST_PAD_B, 0, 0, TPL_KEY_OUTLINE, 0x42519545u}, /* KeyButtonBWaku.tpl */
 };
 #define TPL_KINDS ((int)(sizeof(kTplKinds) / sizeof(kTplKinds[0])))
-#define MAX_TPLS 4
+#define MAX_TPLS 16
 
 typedef struct {
-    const TplKind* kind;
+    const TplKind* kind; /* own, below */
+    TplKind own;         /* the kind, its disc where this one has it */
     uint32_t tpl, header, image;
     uint8_t rgba[MAX_COLOURS][4];
     uint8_t* original;
@@ -559,6 +586,103 @@ static void draw_title_tpl(TplPicture* t, int key, const uint8_t* cov, int bw, i
     }
 }
 
+/* Whose buttons the menus' button pictures show: the menus' in the menus
+ * and lobbies (hle_in_menu, where those are what the buttons do), the
+ * park's or the minigames' elsewhere (the photo mode), as the text. */
+static int key_layer(void) { return hle_in_menu() ? 1 /* LAYER_MENUS */ : sGlyphLayer; }
+
+static void restore_tpl(TplPicture* t) {
+    int x, y;
+    for (y = 0; y < t->kind->h; y++)
+        for (x = 0; x < t->kind->w; x++) ST8(ci8_byte(t->image, t->kind->w, x, y), t->original[y * t->kind->w + x]);
+}
+
+/* A menu button picture (TPL_KEY) as the icon for what is bound to its
+ * button: light inside it (what can't be reached from the edge without
+ * crossing its lines), its lines dark grey, and a dark rim around both.
+ * Returns 0, the game's button kept, if the button has no icon. */
+static int draw_key_tpl(TplPicture* t) {
+    /* LINE: the coverage that counts as a line, low: at this size the
+     * icons' lines are thin, and the inside leaked out through them. */
+    enum { SIZE = 32, RIM = 2, S = SIZE - 2 * RIM - 2, LINE = 48 };
+    static uint8_t cov[S * S], inside[S * S];
+    static int stack[S * S];
+    const TplKind* k = t->kind;
+    int x, y, i, n = 0, o = (SIZE - S) / 2;
+    if (k->w != SIZE || k->h != SIZE || !g_host_prompt_icon || !g_host_prompt_icon(k->button, key_layer(), cov, S, S)) {
+        restore_tpl(t);
+        return 0;
+    }
+    memset(inside, 1, sizeof(inside));
+    for (i = 0; i < S * S; i++) {
+        x = i % S;
+        y = i / S;
+        if ((x == 0 || y == 0 || x == S - 1 || y == S - 1) && cov[i] < LINE) {
+            inside[i] = 0;
+            stack[n++] = i;
+        }
+    }
+    while (n) {
+        static const int kStep[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        int at = stack[--n], d;
+        for (d = 0; d < 4; d++) {
+            int nx = at % S + kStep[d][0], ny = at / S + kStep[d][1], j = ny * S + nx;
+            if (nx < 0 || ny < 0 || nx >= S || ny >= S || !inside[j] || cov[j] >= LINE) continue;
+            inside[j] = 0;
+            stack[n++] = j;
+        }
+    }
+    for (y = 0; y < SIZE; y++) {
+        for (x = 0; x < SIZE; x++) {
+            int ix = x - o, iy = y - o, ink = 0, body = 0, rim = 0, dx, dy, r, g, b, a = 255;
+            if (ix >= 0 && iy >= 0 && ix < S && iy < S) {
+                ink = cov[iy * S + ix];
+                body = inside[iy * S + ix] || ink >= LINE;
+            }
+            for (dy = -RIM; dy <= RIM && !body && !rim; dy++) {
+                for (dx = -RIM; dx <= RIM && !rim; dx++) {
+                    int jx = ix + dx, jy = iy + dy;
+                    if (dx * dx + dy * dy > RIM * RIM + 1 || jx < 0 || jy < 0 || jx >= S || jy >= S) continue;
+                    rim = inside[jy * S + jx] || cov[jy * S + jx] >= LINE;
+                }
+            }
+            if (body || ink) {
+                int fr = (int)(k->fill >> 16 & 255), fg = (int)(k->fill >> 8 & 255), fb = (int)(k->fill & 255);
+                int ir = (int)(k->ink >> 16 & 255), ig = (int)(k->ink >> 8 & 255), ib = (int)(k->ink & 255);
+                /* Open icons (a mouse's) have no inside: their lines alone, on the rim. */
+                if (!body) fr = fg = fb = 0x20;
+                r = (fr * (255 - ink) + ir * ink) / 255;
+                g = (fg * (255 - ink) + ig * ink) / 255;
+                b = (fb * (255 - ink) + ib * ink) / 255;
+            } else if (rim) {
+                r = g = b = 0x20;
+            } else {
+                r = g = b = a = 0;
+            }
+            ST8(ci8_byte(t->image, SIZE, x, y), (uint8_t)tpl_nearest_alpha(t, r, g, b, a));
+        }
+    }
+    return 1;
+}
+
+/* A button's outline (TPL_KEY_OUTLINE), wiped while the buttons it is
+ * under are drawn as icons, which have their own rim. */
+static void draw_key_outline_tpl(TplPicture* t) {
+    static const uint32_t kButtons[] = {HOST_PAD_1, HOST_PAD_2, HOST_PAD_PLUS, HOST_PAD_MINUS, HOST_PAD_B};
+    uint8_t cov[8 * 8];
+    int i, x, y, all = g_host_prompt_icon != NULL;
+    for (i = 0; i < (int)(sizeof(kButtons) / sizeof(kButtons[0])) && all; i++) {
+        if ((t->kind->button & kButtons[i]) && !g_host_prompt_icon(kButtons[i], key_layer(), cov, 8, 8)) all = 0;
+    }
+    if (!all) {
+        restore_tpl(t);
+        return;
+    }
+    for (y = 0; y < t->kind->h; y++)
+        for (x = 0; x < t->kind->w; x++)
+            ST8(ci8_byte(t->image, t->kind->w, x, y), (uint8_t)tpl_nearest_alpha(t, 0, 0, 0, 0));
+}
+
 static void draw_tpl(TplPicture* t) {
     enum { MAX_S = 48 };
     static uint8_t cov[MAX_S * MAX_S];
@@ -573,8 +697,17 @@ static void draw_tpl(TplPicture* t) {
     uint32_t bg = key ? 0xFFFFFFu : k->fill;
     int fr = (int)(bg >> 16 & 255), fg = (int)(bg >> 8 & 255), fb = (int)(bg & 255);
     int ir = (int)(k->ink >> 16 & 255), ig = (int)(k->ink >> 8 & 255), ib = (int)(k->ink & 255);
+    if (k->style == TPL_KEY) {
+        draw_key_tpl(t);
+        return;
+    }
+    if (k->style == TPL_KEY_OUTLINE) {
+        draw_key_outline_tpl(t);
+        return;
+    }
     if (bw > MAX_S || bh > MAX_S) return;
-    if (g_host_prompt_icon) drew = g_host_prompt_icon(k->button, cov, bw, bh);
+    /* The title's as the menus have them bound (LAYER_MENUS), the rest as the text is. */
+    if (g_host_prompt_icon) drew = g_host_prompt_icon(k->button, k->style == TPL_TITLE ? 1 : sGlyphLayer, cov, bw, bh);
     if (k->style == TPL_TITLE) {
         if (drew) {
             draw_title_tpl(t, key, cov, bw, bh);
@@ -603,7 +736,9 @@ static void draw_tpls(void) {
     for (i = 0; i < sTplCount; i++) {
         if (!tpl_here(&sTpls[i])) {
             free(sTpls[i].original);
-            sTpls[i--] = sTpls[--sTplCount];
+            sTpls[i] = sTpls[--sTplCount];
+            sTpls[i].kind = &sTpls[i].own;
+            i--;
             continue;
         }
         draw_tpl(&sTpls[i]);
@@ -621,9 +756,15 @@ void F_TPLBind(ppc_t* c) {
     header = LD32(LD32(tpl + 8));
     pal = LD32(LD32(tpl + 8) + 4);
     if (!header || !pal || LD32(header + 4) != 9 || LD32(pal + 4) != 2) return; /* CI8, RGB5A3 */
-    for (i = 0; i < TPL_KINDS; i++) {
-        if (LD16(header + 2) == kTplKinds[i].w && LD16(header) == kTplKinds[i].h && LD16(pal) == kTplKinds[i].colours)
+    for (i = 0; i < TPL_KINDS && !k; i++) {
+        if (LD16(header + 2) == kTplKinds[i].w && LD16(header) == kTplKinds[i].h && LD16(pal) == kTplKinds[i].colours) {
+            if (kTplKinds[i].pixels) { /* known by its pixels (as on the disc: not yet drawn over) */
+                uint32_t h = 0x811C9DC5u, image = LD32(header + 8), at;
+                for (at = image; at < image + (uint32_t)(kTplKinds[i].w * kTplKinds[i].h); at++) h = (h ^ LD8(at)) * 0x01000193u;
+                if (h != kTplKinds[i].pixels) continue;
+            }
             k = &kTplKinds[i];
+        }
     }
     if (!k) return;
     for (i = 0; i < sTplCount && sTpls[i].tpl != tpl; i++) {}
@@ -634,7 +775,8 @@ void F_TPLBind(ppc_t* c) {
         sTplCount++;
     }
     t = &sTpls[i];
-    t->kind = k;
+    t->own = *k;
+    t->kind = &t->own;
     t->tpl = tpl;
     t->header = header;
     t->image = LD32(header + 8);
@@ -657,6 +799,30 @@ void F_TPLBind(ppc_t* c) {
     for (y = 0; y < k->h; y++) {
         for (x = 0; x < k->w; x++) t->original[y * k->w + x] = LD8(ci8_byte(t->image, k->w, x, y));
     }
+    if (k->style == TPL_TITLE) {
+        /* Where the disc is depends on the language: after the words in
+         * English and the European languages (further left, the shorter
+         * the words), before them in Japanese ("2 ボタンを おしてね"). Its
+         * ring is the picture's only near-black: the disc spans the first
+         * to the last near-black pixel of its middle row. The key goes as
+         * far right of its centre as on the English, into the space after
+         * the words; with the words after the disc, over the disc, as far
+         * left as it fits. */
+        const uint8_t* row = t->original + k->cy * k->w;
+        int first = -1, last = -1;
+        for (x = 0; x < k->w; x++) {
+            const uint8_t* c = t->rgba[row[x]];
+            if (c[3] > 200 && c[0] < 0x50 && c[1] < 0x50 && c[2] < 0x50) {
+                if (first < 0) first = x;
+                last = x;
+            }
+        }
+        if (first >= 0 && last - first >= 2 * k->ring - 4 && last - first <= 2 * k->ring + 2) {
+            t->own.cx = (first + last + 1) / 2;
+            if (t->own.cx > k->w / 2) t->own.kx = t->own.cx + (k->kx - k->cx);
+            else t->own.kx = t->own.cx > k->kw / 2 ? t->own.cx : k->kw / 2;
+        }
+    }
     HLE_LOG("prompts: layout texture %08X", tpl);
     sGeneration = 0xFFFFFFFFu; /* draw it */
 }
@@ -668,8 +834,10 @@ void hle_prompts_update(void) {
     int i;
     if ((!sFontCount && !sPictureCount && !sTplCount) || !g_host_prompt_generation) return;
     gen = g_host_prompt_generation();
-    if (gen == sGeneration) return;
+    if (gen == sGeneration && hle_minigame_text() * 2 == sGlyphLayer && hle_in_menu() == sInMenu) return;
     sGeneration = gen;
+    sInMenu = hle_in_menu(); /* the menus' button pictures change with it (key_layer) */
+    sGlyphLayer = hle_minigame_text() * 2; /* LAYER_GAMES, or LAYER_PARK */
     for (i = 0; i < sFontCount; i++) draw_icons(&sFonts[i]);
     draw_pictures();
     draw_tpls();

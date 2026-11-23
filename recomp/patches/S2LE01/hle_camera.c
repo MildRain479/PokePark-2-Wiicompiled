@@ -24,6 +24,12 @@ static uint32_t sFollowId = ~0u;    /* the following camera's id, once applied *
 
 void hle_set_fov(int percent) { sFovScale = percent / 100.0f; }
 
+/* The photo mode (B held in the park) shows its view through one of the
+ * cameras the cutscenes use, 8 or 9, whichever is free (hle_wpad.c). */
+enum { CAM_OTHER_A = 8, CAM_OTHER_B = 9 };
+int hle_camera_following(void) { return sCurrent == sFollowId; }
+int hle_camera_other(void) { return sCurrent == CAM_OTHER_A || sCurrent == CAM_OTHER_B; }
+
 /* Only while the following camera is the one on screen: a cutscene's
  * camera (ids 8 and 9 at Cofagrigus's door, after Panpour and Pansear)
  * frames its shot for the game's own field of view, and widened it took in

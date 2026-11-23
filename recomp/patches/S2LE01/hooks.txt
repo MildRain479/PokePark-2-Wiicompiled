@@ -104,3 +104,9 @@
 0x802330F0 fn_80195F70  # hle_lookup.c: resources by name, found natively (area loads)
 0x80233380 fn_80196200  # hle_lookup.c: the same, the other kind
 0x802331B0 fn_80196030  # hle_lookup.c: resources by number, found natively
+0x80393A64 criAtomExAcb_LoadAcbData       # hle_sound.c: each cue sorted into music, effects or voices
+0x80393C60 criAtomExAcb_LoadAcbData_2     # hle_sound.c: the same
+0x80399324 criAtomExPlayer_SetCueId      # hle_sound.c: a player takes its cue's group
+0x8039A6D4 criAtomExPlayer_ResetParameters # hle_sound.c: its volume scaled again
+0x8039A730 criAtomExPlayer_SetVolume     # hle_sound.c: scaled by the music, effects or voices volume
+0x80136AA0 PortalShakeIcon  # hle_game.c: whether a portal is being charged, for the shake keys by turns

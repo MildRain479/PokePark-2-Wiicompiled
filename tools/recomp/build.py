@@ -185,7 +185,7 @@ def build_msvc(common, targets, opt):
         inc += f' /I"{os.path.join(VULKAN, "Include")}"'
     defs = " ".join(f"/D{d}" for d in DEFINES)
     # The generated code relies on wrapping unsigned arithmetic only.
-    flags = f"/nologo {opt} /MP /W0 /fp:precise /Zi {defs} {inc}"
+    flags = f"/nologo {opt} /MP /W0 /utf-8 /fp:precise /Zi {defs} {inc}"
     bat = os.path.join(OUT, "build.bat")
     objdir = OBJ
     with open(bat, "w") as f:
@@ -606,6 +606,7 @@ def main():
         os.makedirs(dist, exist_ok=True)
         shutil.copy2(os.path.join(OUT, "boot.exe"), os.path.join(dist, EXE_NAME))
         shutil.copytree(os.path.join(OUT, "prompts"), os.path.join(dist, "prompts"), dirs_exist_ok=True)
+        shutil.copy2(os.path.join(ROOT, "recomplauncher.json"), os.path.join(dist, "recomplauncher.json"))
         copy_sdl3(dist)
         # decomp-toolkit, which the game's set-up screen extracts disc images with (import_win32.c).
         dtk = fetch_dtk()
@@ -624,6 +625,8 @@ def main():
         shutil.copy2(os.path.join(OUT, "boot.exe"), os.path.join(rel, EXE_NAME))
         shutil.copytree(os.path.join(ROOT, "recomp", "assets", "prompts"), os.path.join(rel, "prompts"))
         shutil.copy2(os.path.join(ROOT, "recomp", "assets", "release_readme.txt"), os.path.join(rel, "README.txt"))
+        # How RecompLauncher sets the game up and starts it; it looks for it beside the program.
+        shutil.copy2(os.path.join(ROOT, "recomplauncher.json"), os.path.join(rel, "recomplauncher.json"))
         copy_sdl3(rel)
         if not sdl3_files():
             print("public: no SDL3; the release reads Xbox controllers alone")

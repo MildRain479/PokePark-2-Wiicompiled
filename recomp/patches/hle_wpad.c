@@ -19,6 +19,8 @@
 #include "host_input.h"
 
 int (*g_host_pad_read)(int chan, uint32_t* held);
+int (*g_host_menu_read)(int chan, uint32_t* held);
+int (*g_host_game_read)(int chan, uint32_t* held);
 void (*g_host_pad_rumble)(int chan, int on);
 
 #define WPAD_MAX_CHANS 4
@@ -115,6 +117,9 @@ static uint32_t script_held(void) {
     return held;
 }
 
+/* What the first remote has held, as the menus have it bound
+ * (g_host_menu_read), as last read. */
+static uint32_t sMenuHeld;
 /* Held sideways, d-pad on the left: the remote's UP points left on screen,
  * RIGHT points up. */
 static uint16_t wpad_buttons(uint32_t held) {
@@ -134,6 +139,7 @@ static uint16_t wpad_buttons(uint32_t held) {
     return b;
 }
 
+uint32_t hle_wpad_menu_buttons(void) { return wpad_buttons(sMenuHeld); }
 /* Reports go to the sampling callback, like the Bluetooth stack's receive
  * interrupt on a Wii. */
 static void report(ppc_t* c) {
@@ -207,6 +213,98 @@ void F_WPADSetDataFormat(ppc_t* c) {
     c->r[3] = connected(chan) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER;
 }
 
+/* First person, as in the first game: HOME's binding (the right stick's
+ * click) in the park. The game's is the photo mode, entered by holding B
+ * a moment and left with 1 (Back); here HOME holds B for it until the
+ * photo mode's camera is on screen (or a few seconds pass), and pressed
+ * there, presses 1. HOME itself, the Wii's menu, isn't passed on in the
+ * park. Returns held with those. */
+static int photo; /* in the photo mode */
+static uint32_t first_person(uint32_t held) {
+    const uint64_t backTicks = PPC_TB_HZ / 10; /* 1 pressed this long */
+    static uint32_t lastHome;
+    static uint64_t holdB, press1; /* until when */
+    static int wasFollowing, wasB;
+    uint64_t now = ppc_timebase();
+    uint32_t home = held & HOST_PAD_HOME;
+    int pressed = home && !lastHome;
+    lastHome = home;
+    /* In the photo mode: its camera came on from the following one with
+     * B held (the player's or ours); out of it once the following one is
+     * back. A cutscene's, which is the same camera, isn't it. */
+    if (hle_camera_following()) photo = 0;
+    else if (wasFollowing && wasB && hle_camera_other()) photo = 1;
+    wasFollowing = hle_camera_following();
+    if (!hle_in_park() || hle_in_menu() || hle_in_minigame()) {
+        holdB = press1 = 0;
+        wasB = (held & HOST_PAD_B) != 0;
+        return held;
+    }
+    held &= ~(uint32_t)HOST_PAD_HOME;
+    if (pressed) {
+        if (photo) {
+            press1 = now + backTicks;
+            holdB = 0;
+        } else if (hle_camera_following()) {
+            holdB = now + 3 * PPC_TB_HZ;
+        }
+    }
+    if (holdB && (photo || now >= holdB)) holdB = 0;
+    if (press1 && now >= press1) press1 = 0;
+    if (holdB) held |= HOST_PAD_B;
+    if (press1) held |= HOST_PAD_1;
+    wasB = (held & HOST_PAD_B) != 0;
+    return held;
+}
+
+/* The photo mode looks around while B is held, turning toward where the
+ * pointer is (the further out, the faster). A pointer moved by a stick
+ * stays where it was pushed to and the view goes on turning, and B had
+ * to be held with it; so there the right stick looks around by itself:
+ * pushed, it holds B, and the pointer goes where it points (hle_motion.c),
+ * back to the middle when let go. */
+static int sStickLook;
+
+int hle_photo_stick_look(void) { return sStickLook; }
+
+static uint32_t photo_stick(uint32_t held) {
+    float rx, ry;
+    sStickLook = 0;
+    if (!photo || !hle_in_park() || hle_in_menu() || hle_in_minigame()) return held;
+    hle_right_stick(sReports, &rx, &ry);
+    if (rx == 0 && ry == 0) return held;
+    sStickLook = 1;
+    return held | HOST_PAD_B;
+}
+
+/* Whether the remote is being shaken. A portal charges while it is
+ * (hle_game.c), and holding a shake key shook it all along; there the two
+ * keys go by turns instead, as in the minigames: each press of the other
+ * key from the last shakes it for PORTAL_BURST reports, so by turns at
+ * four presses a second or more it shakes all along, and one key held
+ * shakes it once. Elsewhere (Shake Sprint, the partners' moves) a shake
+ * key shakes it while held. */
+#define PORTAL_BURST (REPORT_HZ / 4)
+static int shaking(uint32_t held) {
+    enum { BOTH = HOST_PAD_SHAKE | HOST_PAD_SHAKE2 };
+    static uint32_t last, until;
+    static int side;
+    uint32_t pressed = held & ~last & BOTH;
+    last = held;
+    if (!hle_portal_charging()) {
+        side = 0;
+        return (held & BOTH) != 0;
+    }
+    if (pressed) {
+        int which = pressed == BOTH ? 3 - side : pressed == HOST_PAD_SHAKE ? 1 : 2;
+        if (which != side) {
+            side = which;
+            until = sReports + PORTAL_BURST;
+        }
+    }
+    return (int32_t)(until - sReports) > 0;
+}
+
 /* What the first remote has held, as last read. */
 static uint32_t sHeld;
 
@@ -223,17 +321,28 @@ void F_WPADRead(ppc_t* c) {
     int16_t acc[3], dots[4][2];
     hle_prompts_update();
     if (on && g_host_pad_read && !g_host_pad_read(chan, &held)) held = 0;
+    /* In a minigame, the remote's buttons as the minigames have them bound. */
+    if (on && hle_in_minigame() && g_host_game_read && !g_host_game_read(chan, &held)) held = 0;
     if (on && chan == 0) {
-        uint32_t scripted = script_held();
-        if (!g_host_script_input || !g_host_script_input(scripted)) held |= scripted;
+        uint32_t scripted = script_held(), menu = held;
+        if (g_host_menu_read && !g_host_menu_read(chan, &menu)) menu = 0;
+        if (!g_host_script_input || !g_host_script_input(scripted)) held |= scripted, menu |= scripted;
+        /* In the game's menus, their own 2, 1, A and B (the rest as in the
+         * park, which the menus' bindings keep). */
+        if (hle_in_menu()) {
+            enum { OWN = HOST_PAD_2 | HOST_PAD_1 | HOST_PAD_A | HOST_PAD_B };
+            held = (held & ~(uint32_t)OWN) | (menu & OWN);
+        }
+        held = photo_stick(first_person(held));
         sHeld = held;
+        sMenuHeld = menu;
     }
     if (on && chan == 0 && (motion = hle_motion(held, sReports, acc, dots)) != 0) {
         /* In minigames, the remote's motion as each asks (hle_motion.c). */
         ax = acc[0];
         ay = acc[1];
         az = acc[2];
-    } else if (held & (HOST_PAD_SHAKE | HOST_PAD_SHAKE2)) {
+    } else if (on && chan == 0 && shaking(held)) {
         /* Swing along the remote's length, which is left-right on screen
          * held sideways, and out of its face, up and down: +-2.5 g, about
          * 17 times a second. The partners' moves and Shake Sprint took

@@ -8,6 +8,7 @@
 #include "host_input.h"
 
 void hle_modifiers_frame(ppc_t* c, int inPark); /* hle_modifiers.c */
+void hle_sound_frame(ppc_t* c);                 /* hle_sound.c */
 
 /* Scenes, as indexed by the scene table (0x80469360). */
 enum {
@@ -70,6 +71,9 @@ void F_EndScene(ppc_t* c) {
 }
 
 int hle_in_minigame(void) { return sScene == SCENE_ATTRACTION; }
+/* Whether the button prompts in text should show the minigames' bindings:
+ * in an attraction's scene, its instructions among it. */
+int hle_minigame_text(void) { return hle_in_minigame(); }
 
 /* The scripts and menus pass the attraction on from scene to scene as a
  * parameter, its index (0-3). */
@@ -123,6 +127,7 @@ void F_SceneManager_RunBegin(ppc_t* c) {
     int at;
     F_SceneManager_RunBegin_orig(c);
     hle_modifiers_frame(c, sScene == SCENE_PARK);
+    hle_sound_frame(c);
     if (sScene == SCENE_STRAP && !sLeftStrap && LD32(PARK_PREPARE_STATE) == PARK_PREPARE_DONE &&
         !keep_boot_screens()) {
         sLeftStrap = 1;
@@ -188,6 +193,40 @@ void F_MenuUIPartsPause_Update(ppc_t* c) {
     sPauseSeen = ppc_timebase();
     hle_pad_art_load();
     F_MenuUIPartsPause_Update_orig(c);
+}
+
+/* Whether the scene is the park (hle_wpad.c's first person). */
+int hle_in_park(void) { return sScene == SCENE_PARK; }
+
+/* void fn_80136AA0(BOOL in): an event script's command, sliding the
+ * portal's "shake the Wii Remote" icon (MnEvFurifuriWiicon) in or out.
+ * It is up while a portal is being charged (hle_wpad.c's shake keys by
+ * turns). */
+static int sPortal;
+
+void F_PortalShakeIcon(ppc_t* c) {
+    sPortal = c->r[3] == 1;
+    HLE_LOG("portal: %s", sPortal ? "charging" : "done");
+    F_PortalShakeIcon_orig(c);
+}
+
+int hle_portal_charging(void) { return sPortal && sScene == SCENE_PARK; }
+
+/* Whether one of the game's menus has the remote (the menus' own 2, 1, A
+ * and B, settings ACT_MENU_*): the title and its menus, the save check,
+ * the attractions' lobby and the other menu scenes, and the Pad while it
+ * is up. Talking, in the park, has the park's. */
+int hle_in_menu(void) {
+    switch (sScene) {
+    case SCENE_CHECK_DATA:
+    case SCENE_LOBBY:
+    case SCENE_START_MENU:
+    case SCENE_COLOSSEUM_MENU:
+    case SCENE_ACHIEVEMENT_MENU:
+    case SCENE_MUMA_MENU: return 1;
+    case SCENE_PARK: return sPause && ppc_timebase() - sPauseSeen < PPC_TB_HZ / 8;
+    default: return 0;
+    }
 }
 
 int hle_pause_main_page(void) {

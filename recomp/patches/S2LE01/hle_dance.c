@@ -331,7 +331,7 @@ static void draw_key(const Picture* b, uint32_t button) {
     static int stack[BADGE * BADGE];
     const int s = BADGE - 2 * EDGE, x0 = ICON_W - BADGE, y0 = ICON_H - BADGE;
     int x, y, i, n = 0, dark = 0, darkness = -1;
-    if (!g_host_prompt_icon || !g_host_prompt_icon(button | HOST_PROMPT_ALONE, cov, s, s)) return;
+    if (!g_host_prompt_icon || !g_host_prompt_icon(button | HOST_PROMPT_ALONE, 2 /* LAYER_GAMES */, cov, s, s)) return;
     for (i = 0; i < b->colours; i++) {
         const uint8_t* p = b->rgba[i];
         int v = p[3] == 255 ? 765 - p[0] - p[1] - p[2] : -1;

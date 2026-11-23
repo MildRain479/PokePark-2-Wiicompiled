@@ -30,6 +30,11 @@
  *     the screen's sides it turns Rotom's view.
  *
  * Which minigame takes what is minigames.h, one for each game.
+ * With a gyroscope (a DualSense, a Switch controller, the handheld itself;
+ * boot/motion.h), the settings can have turning it move the pointer too
+ * (gyro aiming), and tilting it steer, like a wheel, and climb and dive
+ * (gyro steering: tilted back climbs, from how it was held as the
+ * minigame began); the keys and sticks still go first.
  *
  * The d-pad still goes to the game as well. RECOMP_TILT_FLIP=lr, fb or
  * lrfb turns tilting the other way, and RECOMP_POINTER_FLIP=y moves the
@@ -43,6 +48,8 @@
 #include "host_input.h"
 
 void (*g_host_pointer_read)(float* dx, float* dy);
+int (*g_host_gyro_read)(float* yaw, float* pitch);
+int (*g_host_tilt_read)(float* roll, float* pitch);
 
 /* One g in the accelerometer's units (hle_wpad.c's), and a swing. */
 #define G 104
@@ -70,6 +77,9 @@ int hle_dance_swing(uint32_t held, uint32_t report);
  * as fast at 50 degrees as at 70, and at 30 too slowly. */
 #define MAX_PITCH (50.0f * PI / 180.0f)
 #define EASE 0.15f
+/* Gyro steering: the tilt that steers or climbs all the way. */
+#define TILT_STEER_FULL (30.0f * PI / 180.0f)
+#define TILT_PITCH_FULL (25.0f * PI / 180.0f)
 
 /* The pointer: how far a pixel of mouse movement and a second of full
  * stick move it (the screen is -1 to 1 across), and where its dots sit in
@@ -80,6 +90,8 @@ int hle_dance_swing(uint32_t held, uint32_t report);
 #define POINTER_PER_PIXEL (1.0f / 600.0f)
 #define POINTER_PER_STICK_SECOND 3.5f
 #define DOT_SPREAD 100 /* each dot from the middle */
+/* Gyro aiming: across half the screen for 20 degrees of turn. */
+#define POINTER_PER_RADIAN (180.0f / PI / 20.0f)
 
 /* How far the pointer goes across, past the screen's edges: Rotom's game
  * turns to look around while it points past them (from about 1.4; the
@@ -91,6 +103,8 @@ static int flip(const char* env, const char* what) {
     const char* e = getenv(env);
     return e && strstr(e, what) != NULL;
 }
+
+static float clamp1(float v) { return v > 1 ? 1 : v < -1 ? -1 : v; }
 
 static int16_t clamp16(float v) { return (int16_t)(v > 511 ? 511 : v < -512 ? -512 : v); }
 
@@ -148,12 +162,10 @@ static int gesture(Gesture* g, uint32_t held, uint32_t mask, uint32_t report, in
 /* The pointer, as the IR camera sees the sensor bar: the dots move the
  * other way to the pointer (pointing right puts the bar to the left of the
  * view, pointing up puts it lower). */
-static void pointer_dots(float rx, float ry, uint32_t report, int16_t dots[4][2]) {
-    static float px, py;
+void hle_right_stick(uint32_t report, float* rx, float* ry) {
     static int env = -1;
     static float ex, ey, ep;
-    float dx = 0, dy = 0, yUp;
-    int mx, my;
+    float lx, ly;
     if (env < 0) {
         /* RECOMP_POINTER_STICK=<x>,<y>[,<seconds>]: the right stick held
          * there, for unattended runs; with seconds, turned the other way
@@ -161,14 +173,52 @@ static void pointer_dots(float rx, float ry, uint32_t report, int16_t dots[4][2]
         const char* e = getenv("RECOMP_POINTER_STICK");
         env = e && sscanf(e, "%f,%f,%f", &ex, &ey, &ep) >= 2;
     }
+    *rx = *ry = 0;
     if (env) {
         int back = ep > 0 && (int)(report / (200.0f * ep)) & 1;
-        rx = back ? -ex : ex;
-        ry = back ? -ey : ey;
+        *rx = back ? -ex : ex;
+        *ry = back ? -ey : ey;
+    } else if (g_host_sticks_read) {
+        g_host_sticks_read(&lx, &ly, rx, ry);
     }
+}
+
+/* The photo mode looks around only with the pointer past about 0.55 of
+ * the way out from the middle, either way, and turns faster the further
+ * out: about 22 degrees a second at 0.6, 45 at 0.64, 60 from there to the
+ * edge. The stick's push, however light, goes into that band. */
+#define LOOK_FROM 0.55f
+#define LOOK_TO 0.68f
+
+static float look_place(float v) {
+    if (v == 0) return 0;
+    return v > 0 ? LOOK_FROM + v * (LOOK_TO - LOOK_FROM) : -LOOK_FROM + v * (LOOK_TO - LOOK_FROM);
+}
+
+/* With place set, the stick puts the pointer where it points instead of
+ * moving it (the photo mode's look around, hle_wpad.c). */
+static void pointer_dots(float rx, float ry, int16_t dots[4][2], int place) {
+    static float px, py;
+    float dx = 0, dy = 0, yUp;
+    int mx, my;
     if (g_host_pointer_read) g_host_pointer_read(&dx, &dy);
-    px += dx * POINTER_PER_PIXEL + rx * fabsf(rx) * POINTER_PER_STICK_SECOND / 200.0f;
-    py += -dy * POINTER_PER_PIXEL + ry * fabsf(ry) * POINTER_PER_STICK_SECOND / 200.0f;
+    {
+        /* Gyro aiming: the controller turned moves it too. */
+        float gyaw, gpitch;
+        if (g_host_gyro_read && g_host_gyro_read(&gyaw, &gpitch)) {
+            px += gyaw * POINTER_PER_RADIAN;
+            py += gpitch * POINTER_PER_RADIAN;
+        }
+    }
+    if (place) {
+        px = look_place(rx);
+        py = look_place(ry);
+    } else {
+        px += rx * fabsf(rx) * POINTER_PER_STICK_SECOND / 200.0f;
+        py += ry * fabsf(ry) * POINTER_PER_STICK_SECOND / 200.0f;
+    }
+    px += dx * POINTER_PER_PIXEL;
+    py += -dy * POINTER_PER_PIXEL;
     px = px > POINTER_X_LIMIT ? POINTER_X_LIMIT : px < -POINTER_X_LIMIT ? -POINTER_X_LIMIT : px;
     py = py > 1 ? 1 : py < -1 ? -1 : py;
     yUp = flip("RECOMP_POINTER_FLIP", "y") ? -py : py;
@@ -187,13 +237,16 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     static float steer, pitch;
     static Gesture push, bat;
     static KeyPair leftRight, upDown;
-    int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing;
-    float lx = 0, ly = 0, rx = 0, ry = 0, x, y, z, wantSteer = 0, wantPitch = 0;
+    static float level;            /* gyro steering: the tilt taken as level */
+    static int levelAt;            /* the minigame it was taken in */
+    static uint32_t lastTilt;      /* the report it was last read at */
+    int at = hle_minigame(), i, use = -1, hold = HOLD_SIDEWAYS, swing, tilt = 0;
+    float lx = 0, ly = 0, rx = 0, ry = 0, x, y, z, wantSteer = 0, wantPitch = 0, roll = 0, tiltPitch = 0;
     if (!at) {
         /* Outside minigames: the pointer alone, where the game asks for it. */
         if (!hle_pointer_wanted(held)) return 0;
-        if (g_host_sticks_read) g_host_sticks_read(&lx, &ly, &rx, &ry);
-        pointer_dots(rx, ry, report, dots);
+        hle_right_stick(report, &rx, &ry);
+        pointer_dots(rx, ry, dots, hle_photo_stick_look());
         acc[0] = acc[1] = 0;
         acc[2] = G;
         return 2;
@@ -206,6 +259,16 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     }
     if (use < 0) use = USE_SHAKE; /* not one we know: shaking, which is common */
     if (g_host_sticks_read) g_host_sticks_read(&lx, &ly, &rx, &ry);
+    if ((use & USE_STEER) && g_host_tilt_read && g_host_tilt_read(&roll, &tiltPitch)) {
+        /* Level as it was held when the minigame began (or the tilt
+         * came back after a second without it). */
+        if (levelAt != at || report - lastTilt > 200) {
+            levelAt = at;
+            level = tiltPitch;
+        }
+        lastTilt = report;
+        tilt = 1;
+    }
 
     /* Tilt, toward where the keys or the stick put it. */
     if (use & USE_STEER) {
@@ -213,12 +276,20 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
          * the minigames turn right: lifting it turned them left. */
         wantSteer = key_pair(&leftRight, held, HOST_PAD_SCREEN_LEFT, HOST_PAD_SCREEN_RIGHT);
         if (lx != 0) wantSteer = -lx;
+        else if (wantSteer == 0 && tilt) wantSteer = clamp1(-roll / TILT_STEER_FULL);
         if (flip("RECOMP_TILT_FLIP", "lr")) wantSteer = -wantSteer;
     }
     if (use & USE_PITCH) {
         /* Up climbs: the remote tilted back. */
         wantPitch = key_pair(&upDown, held, HOST_PAD_SCREEN_DOWN, HOST_PAD_SCREEN_UP);
         if (ly != 0) wantPitch = -ly;
+        if (wantPitch == 0 && tilt) {
+            /* The far edge up from level (tilted back) climbs, as the stick
+             * pulled back. */
+            float d = tiltPitch - level;
+            d = d > PI ? d - 2 * PI : d < -PI ? d + 2 * PI : d;
+            wantPitch = clamp1(-d / TILT_PITCH_FULL);
+        }
         if (flip("RECOMP_TILT_FLIP", "fb")) wantPitch = -wantPitch;
     }
     steer += (wantSteer * MAX_STEER - steer) * EASE;
@@ -287,6 +358,7 @@ int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2
     acc[2] = clamp16(z);
 
     if (!(use & USE_POINTER)) return 1;
-    pointer_dots(rx, ry, report, dots);
+    hle_right_stick(report, &rx, &ry);
+    pointer_dots(rx, ry, dots, 0);
     return 3;
 }

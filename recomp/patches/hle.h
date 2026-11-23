@@ -34,12 +34,27 @@ enum { HLE_TIMER_AUDIO = 0, HLE_TIMER_PAD = 1 };
 /* The emulated video refresh rate (RECOMP_VI_HZ, default 60). */
 double hle_vi_hz(void);
 
+/* The remote's buttons (WPAD_*) as the game's menus have them bound
+ * (g_host_menu_read), at the last read; hle_menu_input.c. */
+uint32_t hle_wpad_menu_buttons(void);
+
 /* Whether the console is set up for a 16:9 TV (RECOMP_WIDESCREEN, default
  * on; 0 for 4:3). The game then draws 16:9 pictures squeezed into its
  * 640-pixel-wide frame, as the Wii does for a TV to stretch out. */
 int hle_widescreen(void);
 /* hle_game.c: whether the scene is a minigame (an attraction). */
 int hle_in_minigame(void);
+int hle_minigame_text(void);
+/* hle_game.c: whether one of the game's menus has the remote. */
+int hle_in_menu(void);
+/* hle_game.c: whether the scene is the park (the field, not a menu scene or a minigame). */
+int hle_in_park(void);
+/* hle_game.c: whether a portal is being charged (its shake icon is up). */
+int hle_portal_charging(void);
+/* hle_camera.c: whether the following camera is on screen, and whether
+ * one of the two the cutscenes and the photo mode use is. */
+int hle_camera_following(void);
+int hle_camera_other(void);
 /* hle_game.c: the minigame being played (its At number, 1-16), or 0. */
 int hle_minigame(void);
 /* hle_game.c: enters minigame at (1-16) for testing, from the park. */
@@ -52,6 +67,12 @@ void hle_request_minigame(int at);
 int hle_motion(uint32_t held, uint32_t report, int16_t acc[3], int16_t dots[4][2]);
 /* Whether the game wants the pointer now, outside a minigame. */
 int hle_pointer_wanted(uint32_t held);
+/* hle_motion.c: the right stick (RECOMP_POINTER_STICK in its place, for
+ * unattended runs), -1 to 1, up positive, for report number report. */
+void hle_right_stick(uint32_t report, float* rx, float* ry);
+/* hle_wpad.c: whether the right stick is looking around in the photo mode
+ * (the pointer then goes where the stick points). */
+int hle_photo_stick_look(void);
 /* hle_prompts.c: redraws the button prompt glyphs if they should change. */
 void hle_prompts_update(void);
 uint32_t hle_wpad_held(void); /* the first remote's HOST_PAD_* bits, as last read */
@@ -90,9 +111,13 @@ int hle_dvd_read(uint64_t offset, uint32_t len, uint32_t dst);
 int hle_dvd_read_async(uint64_t offset, uint32_t len, uint32_t dst, void (*done)(int ok, uint32_t a, uint32_t b),
                        uint32_t a, uint32_t b);
 void hle_dvd_poll(void);
+int hle_dvd_overlay(const char* dir);
+const char* hle_dvd_root(void);
 uint32_t hle_dvd_tmd(uint32_t dst, uint32_t max);
 const uint8_t* hle_dvd_disc_id(void);
 uint8_t* hle_dvd_load(const char* path, uint32_t* size);
+/* The one disc file with that ending and size, or "". */
+const char* hle_dvd_file_sized(const char* ext, uint32_t size);
 
 /* Copies a NUL-terminated guest string (at most n - 1 bytes). */
 void hle_read_str(uint32_t addr, char* out, size_t n);

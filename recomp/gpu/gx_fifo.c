@@ -739,9 +739,16 @@ static uint32_t texture_for_map(int map) {
             levels++;
         }
     }
-    key = ((uint64_t)addr << 32) ^ ((uint64_t)fmt << 28) ^ ((uint64_t)width << 14) ^ (uint64_t)height ^
-          ((uint64_t)(tlut & 0xFFF) << 40) ^ ((uint64_t)(mode0 & 0x1F) << 52) ^
-          ((uint64_t)((mode0 >> 5) & 0xFFFF) << 18) ^ ((uint64_t)levels << 59);
+    /* The address, format, size and levels exactly, and the sampler mode
+     * and the palette (paletted formats only: the others don't read it,
+     * and the register keeps whatever was set last) mixed in. These were
+     * once all XORed together, overlapping: the palette's bits fell on
+     * the address's, so a font sheet drawn just after a paletted texture
+     * could take the key of another sheet 256 KB away and be drawn with
+     * its glyphs (the Japanese font's, 64 KB each). */
+    key = ((uint64_t)addr << 32 | (uint64_t)levels << 28 | (uint64_t)fmt << 24 | (uint64_t)(width - 1) << 12 |
+           (uint64_t)(height - 1)) ^
+          mix64((uint64_t)(fmt >= 8 && fmt <= 10 ? tlut & 0xFFF : 0) << 32 | (mode0 & 0x1FFFFF));
     {
         /* Four ways per set, so textures used together (a movie's Y, U and
          * V planes) don't evict each other; a miss takes the way used

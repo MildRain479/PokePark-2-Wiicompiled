@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "hle.h"
+#include "tr.h"
 
 enum { ARC_MENU, ARC_ICONS, ARC_MESSAGES, ARCS };
 static const char* const kArcPath[ARCS] = {"Archive/MenuField.dac", "Archive/PokemonIcon.dac",
@@ -291,7 +292,7 @@ int hle_friend_has_icon(const char* name) {
     return arc_file_of(ARC_ICONS, file, &size) != NULL;
 }
 
-/* Its English name, in the font's Latin-1, into out: 0 if the messages
+/* Its name in the game's language, in UTF-8, into out: 0 if the messages
  * have none labelled for it (MSBT: LBL1's labels give TXT2's texts, in
  * UTF-16, with tags 0x0E group, kind, size and data). */
 int hle_friend_name(const char* name, char* out, int size) {
@@ -333,7 +334,7 @@ int hle_friend_name(const char* name, char* out, int size) {
                 t += 4 + be16(t + 4) + 2;
                 continue;
             }
-            if (ch >= 32 && o < size - 1) out[o++] = (char)(ch < 256 ? ch : '?');
+            if (ch >= 32 && o < size - 4) o += tr_put(ch, out + o);
         }
         out[o] = 0;
         return o > 0;

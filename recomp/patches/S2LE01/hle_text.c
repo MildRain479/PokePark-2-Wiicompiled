@@ -26,10 +26,11 @@
 
 #include "hle.h"
 #include "host_input.h"
+#include "tr.h"
 
 void (*g_host_button_name)(uint32_t button, char* out, int n);
 
-#define TEXT_SIZE 0x4000
+#define TEXT_SIZE 0x6000
 static uint32_t sBase;
 
 /* Called at boot, after the FST has taken the top of MEM1's arena. */
@@ -65,10 +66,10 @@ static const struct {
     {"AT_30_11_020", "Hold the Wii Remote",
      "Press the button on each move's\nicon as it comes up, and hold it\nto its bar's end, to dance\njust like Lopunny."},
     /* Power Bash */
-    {"AT_30_02_020", "When a Pok", "When a Pok\xe9mon appears,\npress [shake] by turns\nto swing at it!"},
-    {"AT_30_12_020", "When a Pok", "When a Pok\xe9mon appears,\npress [shake] by turns\nto swing at it!"},
-    {"AT_30_02_030", "Swing the Wii Remote", "Swing when the Pok\xe9mon is close to\nthe center to get a high score."},
-    {"AT_30_12_030", "Swing the Wii Remote", "Swing when the Pok\xe9mon is close to\nthe center to get a high score."},
+    {"AT_30_02_020", "When a Pok", "When a Pokémon appears,\npress [shake] by turns\nto swing at it!"},
+    {"AT_30_12_020", "When a Pok", "When a Pokémon appears,\npress [shake] by turns\nto swing at it!"},
+    {"AT_30_02_030", "Swing the Wii Remote", "Swing when the Pokémon is close to\nthe center to get a high score."},
+    {"AT_30_12_030", "Swing the Wii Remote", "Swing when the Pokémon is close to\nthe center to get a high score."},
     /* Flight of Fancy */
     {"AT_30_03_020", "When you want to fly to the side", "When you want to fly to the side,\npress [left] or [right].",
      "When you want to fly to the side,\npush the left stick left or right.",
@@ -106,12 +107,12 @@ static const struct {
      "But be careful--it's hard to turn\nwhen you're going full speed!"},
     /* The portals */
     {"T_FURIFURI_00_030", "You'll have to shake",
-     "You'll have to shake more\nto open the portal. Keep holding\n[either shake] next time!"},
+     "You'll have to shake more\nto open the portal. Next time,\npress [shake] by turns!"},
     {"T_FURIFURI_00_031", "You'll have to shake",
-     "You'll have to shake more\nto open the portal. Keep holding\n[either shake] next time!"},
+     "You'll have to shake more\nto open the portal. Next time,\npress [shake] by turns!"},
     {"T_FURIFURI_00_032", "You'll have to shake",
-     "You'll have to shake a little more\nto open the portal. Keep holding\n[either shake] next time!"},
-    {"T_FURIFURI_00_070", "Shake the Wii Remote", "Hold [either shake] to charge!"},
+     "You'll have to shake a little more\nto open the portal. Next time,\npress [shake] by turns!"},
+    {"T_FURIFURI_00_070", "Shake the Wii Remote", "Press [shake] by turns to charge!"},
     /* Photos */
     {"T_SYSTEM_00_020", "Press ",
      "Press [-] to take Photos.\nThere are two ways to do this.[page]You can simply press [-] to take\n"
@@ -132,6 +133,58 @@ static const struct {
 };
 #define TEXTS ((int)(sizeof(kText) / sizeof(kText[0])))
 
+/* In the other languages (tr.h), how those messages begin there (the
+ * same labels name other messages in other files): Japanese, French,
+ * German, Italian and Spanish, from the discs' own messages; the new text
+ * is tr()'s of the English. */
+static const struct {
+    const char* label;
+    const char* was[5];
+} kWas[] = {
+    {"AT_30_00_020", {"Wiiリモコンを　縦", "Joue en te", "Zeige mit ", "Punta il t", "Sujeta el "}},
+    {"AT_30_10_020", {"Wiiリモコンを　縦", "Joue en te", "Zeige mit ", "Punta il t", "Sujeta el "}},
+    {"AT_30_04_020", {"Wiiリモコンを　縦", "Joue en te", "Zeige mit ", "Punta il t", "Sujeta el "}},
+    {"AT_30_00_030", {"ケーキの　材料に　\n", "Vise les i", "Ziele mit ", "Punta il c", "Sitúa el c"}},
+    {"AT_30_10_030", {"ケーキの　材料に　\n", "Vise les i", "Ziele mit ", "Punta il c", "Sitúa el c"}},
+    {"AT_30_04_030", {"ケーキの　材料に　\n", "Vise les i", "Ziele mit ", "Punta il c", "Sitúa el c"}},
+    {"AT_30_01_020", {"Wiiリモコンを　縦", "Joue en te", "Halte die ", "Punta il t", "Sujeta el "}},
+    {"AT_30_11_020", {"Wiiリモコンを　縦", "Joue en te", "Halte die ", "Punta il t", "Sujeta el "}},
+    {"AT_30_02_020", {"ポケモンが　現れたら", "Donne un c", "Erscheint ", "Quando com", "¡Agita el "}},
+    {"AT_30_12_020", {"ポケモンが　現れたら", "Donne un c", "Erscheint ", "Quando com", "¡Agita el "}},
+    {"AT_30_02_030", {"真ん中に　近いときに", "Si tu le b", "Schüttelst", "Totalizzi ", "Cuanto más"}},
+    {"AT_30_12_030", {"真ん中に　近いときに", "Si tu le b", "Schüttelst", "Totalizzi ", "Cuanto más"}},
+    {"AT_30_03_020", {"横に　飛びたいときは", "Pour te dé", "Neige die ", "Se vuoi vi", "Cuando qui"}},
+    {"AT_30_13_020", {"横に　飛びたいときは", "Pour te dé", "Neige die ", "Se vuoi vi", "Cuando qui"}},
+    {"AT_30_03_030", {"上下に　飛びたいとき", "Pour te dé", "Kippe die ", "Se vuoi pr", "Cuando qui"}},
+    {"AT_30_13_030", {"上下に　飛びたいとき", "Pour te dé", "Kippe die ", "Se vuoi pr", "Cuando qui"}},
+    {"AT_30_03_040", {"Wiiリモコンを　か", "Pour te dé", "Wenn du ", "Se premi ", "Pulsa "}},
+    {"AT_30_13_040", {"Wiiリモコンを　か", "Pour te dé", "Wenn du ", "Se premi ", "Pulsa "}},
+    {"C1146_SYSTEM_020", {"ミジュマルは　水の技", "Moustillon", "Ottaro set", "Oshawott u", "Oshawott p"}},
+    {"C3080_SYSTEM_010", {"ツタージャは　ジャン", "Vipélierre", "Serpifeu k", "Snivy è br", "Snivy es m"}},
+    {"C4020_SYSTEM_010", {"ポカブの　たいあたり", "Gruikui po", "Floink ver", "Tepig è in", "Tepig pued"}},
+    {"C3090_SYSTEM_020", {"このエレベーターは　", "Cet ascens", "Du kannst ", "Puoi attiv", "Puedes mov"}},
+    {"T_SYSTEM_040", {"下にあるブロックは\n", "Ce bloc pe", "Du kannst ", "Puoi distr", "Puedes rom"}},
+    {"C1090_SYSTEM_010", {"いつもとちがう　バト", "Certains d", "Gilt für e", "Alcune vol", "Cuando las"}},
+    {"T_SYSTEM_00_040", {"おいかけっこの　勝負", "Pendant la", "Wenn du wä", "Mentre gio", "Agita el m"}},
+    {"T_FURIFURI_00_030", {"とびらを　開けるには", "L'ouvertur", "Die ", "Per aprire", "También es"}},
+    {"T_FURIFURI_00_031", {"とびらを　開けるには", "L'ouvertur", "Die ", "Per aprire", "También es"}},
+    {"T_FURIFURI_00_032", {"とびらを　開けるには", "L'ouvertur", "Die ", "Per aprire", "También es"}},
+    {"T_FURIFURI_00_070", {"Wiiリモコンを　ふ", "Secoue la ", "Schüttele ", "Scuoti il ", "¡Agita el "}},
+    {"T_SYSTEM_00_020", {"ボタンを　おすと\n写", "En appuyan", "Um ein Fot", "Per scatta", "Para hacer"}},
+    {"C0500_SYSTEM_010", {"ポッチャマに　近づい", "Approche-t", "Geh zu Pli", "Avvicinati", "Acércate a"}},
+    {"TITLE_01_070", {"Wiiリモコンのしん", "Activer la", "Schaltet d", "Regola la ", "¿Quieres a"}},
+};
+
+static const char* was_of(int i) {
+    int k, lang = g_tr_language - 1;
+    if (lang < 0) return kText[i].was;
+    if (lang >= 5) return NULL;
+    for (k = 0; k < (int)(sizeof(kWas) / sizeof(kWas[0])); k++) {
+        if (!strcmp(kWas[k].label, kText[i].label)) return kWas[k].was[lang];
+    }
+    return NULL;
+}
+
 enum { MODE_KEY, MODE_PAD, MODE_TOUCH };
 
 static uint32_t sAt[TEXTS]; /* where each is written */
@@ -142,8 +195,10 @@ static uint32_t put(uint32_t at, uint32_t end, uint16_t ch) {
     return at + 2;
 }
 
+/* UTF-8 text, as the messages' UTF-16. */
 static uint32_t put_str(uint32_t at, uint32_t end, const char* s) {
-    for (; *s; s++) at = put(at, end, (uint8_t)*s);
+    uint32_t ch;
+    while ((ch = tr_next(&s)) != 0) at = put(at, end, (uint16_t)(ch < 0x10000 ? ch : '?'));
     return at;
 }
 
@@ -157,11 +212,17 @@ static uint32_t put_tag(uint32_t at, uint32_t end, uint16_t group, uint16_t type
 static void button_name(uint32_t button, int mode, char* out, int n) {
     *out = 0;
     if (mode == MODE_TOUCH) { /* the touch controls' labels (input_android.c) */
-        snprintf(out, n, "%s", button == HOST_PAD_SHAKE ? "Shake" : button == HOST_PAD_SHAKE2 ? "Shake 2" : "the stick");
+        snprintf(out, n, "%s", tr(button == HOST_PAD_SHAKE ? "Shake" : button == HOST_PAD_SHAKE2 ? "Shake 2" : "the stick"));
         return;
     }
     if (g_host_button_name) g_host_button_name(button, out, n);
-    if (!*out) snprintf(out, n, "nothing"); /* unbound */
+    if (*out) {
+        char name[48];
+        snprintf(name, sizeof(name), "%s", out);
+        snprintf(out, n, "%s", tr(name)); /* "D-pad up" */
+    } else {
+        snprintf(out, n, "%s", tr("nothing")); /* unbound */
+    }
 }
 
 /* Writes the new text, as the controls now stand. */
@@ -173,7 +234,7 @@ static void write_all(void) {
         {"[up]", HOST_PAD_SCREEN_UP}, {"[down]", HOST_PAD_SCREEN_DOWN},
         {"[left]", HOST_PAD_SCREEN_LEFT}, {"[right]", HOST_PAD_SCREEN_RIGHT},
     };
-    char one[24], two[24], shake[64], either[64], move[112], k[4][24];
+    char one[48], two[48], shake[128], either[128], move[224], k[4][48];
     /* The generation's low bit: the controller was used last (prompts.c). */
     int mode = g_host_prompt_generation && (g_host_prompt_generation() & 1) ? MODE_PAD : MODE_KEY, i, j;
     uint32_t at = sBase, end = sBase + TEXT_SIZE;
@@ -182,14 +243,15 @@ static void write_all(void) {
 #endif
     button_name(HOST_PAD_SHAKE, mode, one, sizeof(one));
     button_name(HOST_PAD_SHAKE2, mode, two, sizeof(two));
-    snprintf(shake, sizeof(shake), "%s and %s", one, two);
-    snprintf(either, sizeof(either), "%s or %s", one, two);
+    snprintf(shake, sizeof(shake), tr("%s and %s"), one, two);
+    snprintf(either, sizeof(either), tr("%s or %s"), one, two);
     for (j = 0; j < 4; j++) button_name(kName[j].button, mode, k[j], sizeof(k[j]));
-    snprintf(move, sizeof(move), "%s, %s, %s and %s", k[0], k[2], k[1], k[3]);
+    snprintf(move, sizeof(move), tr("%s, %s, %s and %s"), k[0], k[2], k[1], k[3]);
     for (i = 0; i < TEXTS; i++) {
         const char* s = kText[i].key;
         if (mode != MODE_KEY && kText[i].pad) s = kText[i].pad;
         if (mode == MODE_TOUCH && kText[i].touch) s = kText[i].touch;
+        s = tr(s);
         sAt[i] = at;
         while (*s) {
             size_t t, n = 0;
@@ -217,7 +279,8 @@ static void write_all(void) {
                 at = put_str(at, end, move);
                 s += 6;
             } else {
-                at = put(at, end, (uint8_t)*s++);
+                uint32_t ch = tr_next(&s);
+                at = put(at, end, (uint16_t)(ch < 0x10000 ? ch : '?'));
             }
         }
         at = put(at, end, 0);
@@ -229,11 +292,13 @@ static void write_all(void) {
     }
 }
 
-/* Whether the string at s (UTF-16) begins with prefix, after any tags. */
+/* Whether the string at s (UTF-16) begins with prefix (UTF-8), after any
+ * tags. */
 static int begins(uint32_t s, const char* prefix) {
+    uint32_t ch;
     while (LD16(s) == 0x0E) s += 8 + LD16(s + 6);
-    for (; *prefix; prefix++, s += 2) {
-        if (LD16(s) != (uint8_t)*prefix) return 0;
+    for (; (ch = tr_next(&prefix)) != 0; s += 2) {
+        if (LD16(s) != ch) return 0;
     }
     return 1;
 }
@@ -267,7 +332,8 @@ void f_803D7670(ppc_t* c) {
     f_803D7670_orig(c);
     if (!sBase || !c->r[3]) return;
     for (i = 0; i < TEXTS; i++) {
-        if (!begins(c->r[3], kText[i].was) || !labelled(msg, index, kText[i].label)) continue;
+        const char* was = was_of(i);
+        if (!was || !begins(c->r[3], was) || !labelled(msg, index, kText[i].label)) continue;
         gen = g_host_prompt_generation ? g_host_prompt_generation() : 0;
         if (gen != sGeneration) {
             sGeneration = gen;

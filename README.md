@@ -1,5 +1,7 @@
 # PokePark 2 Wiicompiled
 
+<a href="https://recomplauncher.com/game/pokepark-2-wiicompiled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 A native Windows and Android port of *PokéPark 2: Wonders Beyond*
 (USA, S2LE01).
 The game's PowerPC code is statically recompiled into C and runs natively,
@@ -199,6 +201,36 @@ Optional changes to the game's balance, all off (100%) by default:
 | Damage taken | none, 50% to 300% |
 | Chase speed | 50% to 150% of the speed of the Pokémon you chase |
 
+### Language and audio
+
+- **Japanese, French, German, Italian and Spanish text**, from your own
+  disc of that language: the Japanese one (S2LJ01) or the European one
+  (S2LP01). In Options > Gameplay > Language, choose the language; until
+  its pack is made the row says "pick its disc", and selecting it asks
+  for the disc image (.iso, .rvz, .wbfs and others). The game makes the
+  pack while you play (the European disc makes all four of its
+  languages), into the `languages` folder beside it (on Android, beside
+  `S2LE01`), and the text changes at the next start. Options > Gameplay
+  > Language pack makes them again from a disc. The menus' pictures
+  with words on them (the title screen's "Please Press") come from that
+  disc too. Japanese uses the kanji version of the text and the
+  Japanese font.
+- **Voices.** French and German have their own voices on the European
+  disc, and Japanese on the Japanese disc. Options > Audio > Voices
+  language chooses them, at the next start, apart from the text (English
+  text with Japanese voices, say); as with the text, a language without
+  its pack asks for its disc.
+
+  On a PC, `tools/recomp/langpack.py` builds the same packs from the
+  extracted discs:
+
+  ```
+  python tools/recomp/langpack.py S2LE01/files <European disc>/files languages
+  python tools/recomp/langpack.py S2LE01/files <Japanese disc>/files languages
+  ```
+- **Volumes.** Options > Audio sets the music, the sound effects and
+  the voices apart, from 0% to 100%, as you play.
+
 ### Quality of life
 
 - **Faster start-up.** The wrist strap screen is cut short.
@@ -248,7 +280,15 @@ releases it, and a click captures it again.
 ## Known gaps
 
 - **Graphics:** a few rare effects may still be wrong.
-- **Sound:** the Wii Remote speaker is silent.
+- **Sound:** the Wii Remote speaker is silent. The cutscene movies keep
+  their own volume, outside the volume settings.
+- **Languages:** the Japanese voices have none of the English ones'
+  extra lines, so some of the Pokémon are silent in Japanese. In
+  Japanese the staff roll and the team nicknames stay English (the
+  Japanese game builds both differently), as do a few pictures with
+  words whose size differs from the English ones. Text the port changes
+  to name your keys (How to Play pages and the like) is changed in
+  English only.
 - **Input:** no Wii Remote pointer or Nunchuk. The game is played
   sideways, so neither is needed.
 - **Android:** no rumble yet.

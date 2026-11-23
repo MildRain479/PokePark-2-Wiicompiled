@@ -13,10 +13,14 @@
 
 #include "game.h"
 #include "gx.h"
+#include "host_settings.h"
+#include "langpack.h"
 #include "recomp_funcs.h"
+#include "tr.h"
 
 int hle_dvd_init(const char* root);
 void hle_dvd_boot_setup(void);
+int hle_dvd_overlay(const char* dir);
 void hle_text_boot_setup(void);
 void hle_nand_set_root(const char* root);
 #ifdef __ANDROID__
@@ -137,7 +141,13 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS* info) {
         if (a < (uintptr_t)g_mem || a >= (uintptr_t)g_mem + 0x40000000u) return EXCEPTION_CONTINUE_SEARCH;
         fprintf(stderr, "boot: guest memory fault at physical %08X (%s)\n", (unsigned)(a - (uintptr_t)g_mem),
                 r->ExceptionInformation[0] ? "write" : "read");
-        if (gCpu) ppc_backtrace(gCpu);
+        if (gCpu) {
+            int i;
+            for (i = 0; i < 32; i += 4)
+                fprintf(stderr, "  r%-2d %08X %08X %08X %08X\n", i, gCpu->r[i], gCpu->r[i + 1], gCpu->r[i + 2],
+                        gCpu->r[i + 3]);
+            ppc_backtrace(gCpu);
+        }
         ppc_dump_trace();
         fflush(stderr);
         ExitProcess(3);
@@ -563,12 +573,44 @@ static void start_profiler(int after) {
 }
 #endif
 
+#ifdef _WIN32
+int import_image(const char* image, char* mainDol, size_t n); /* import_win32.c */
+
+/* What a launcher passes (RecompLauncher): --game <disc image> and
+ * --prepare, taken out of argv so the arguments below are as before. */
+static void launcher_args(int* argc, char** argv, const char** image, int* prepare) {
+    int i, kept = 1;
+    for (i = 1; i < *argc; i++) {
+        if (!strcmp(argv[i], "--prepare")) {
+            *prepare = 1;
+        } else if (!strcmp(argv[i], "--game") && i + 1 < *argc) {
+            *image = argv[++i];
+        } else {
+            argv[kept++] = argv[i];
+        }
+    }
+    *argc = kept;
+}
+#endif
+
 int main(int argc, char** argv) {
     ppc_t* c;
     uint32_t entry;
     static char found[1024];
     static char* defaultArgs[2];
 #ifdef _WIN32
+    const char* image = NULL;
+    int prepare = 0;
+    launcher_args(&argc, argv, &image, &prepare);
+    if (prepare && !image) {
+        printf("--prepare needs --game <disc image>\n");
+        return 2;
+    }
+    /* --game: set up from that disc image, with no window, if the game isn't
+     * set up yet (or always, with --prepare, as the player may have changed
+     * their copy), and with --prepare that is all. */
+    if (image && (prepare || !find_game(found, sizeof(found))) && !import_image(image, found, sizeof(found))) return 3;
+    if (prepare) return 0;
     /* Not set up yet: the player's disc image, extracted beside the
      * program (import_win32.c). */
     if (argc < 2 && !find_game(found, sizeof(found)) && !import_game(found, sizeof(found))) return 0;
@@ -693,6 +735,26 @@ int main(int argc, char** argv) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
     settings_load();
+    /* The text and voices of another language, from its pack (the FST is
+     * changed before the game reads it). */
+    {
+        char dir[1100];
+        int lang;
+        /* A pack made while the game used the one before it (langpack.h). */
+        for (lang = 0; lang < LANGUAGES; lang++)
+            if (lang != LANGUAGE_EN) langpack_promote(lang);
+        if (g_settings.language != LANGUAGE_EN && LANGUAGE_HAS_TEXT(g_settings.language)) {
+            snprintf(dir, sizeof(dir), "%s/text", settings_language_dir(g_settings.language));
+            if (hle_dvd_overlay(dir)) g_language_started = g_tr_language = g_settings.language;
+        }
+        if (g_settings.cries != LANGUAGE_EN && LANGUAGE_HAS_VOICES(g_settings.cries)) {
+            snprintf(dir, sizeof(dir), "%s/voices", settings_language_dir(g_settings.cries));
+            if (hle_dvd_overlay(dir)) g_cries_started = g_settings.cries;
+        }
+    }
+    /* Tests: making a pack as the game runs; with RECOMP_LANGPACK_PICK=1 the
+     * image only stands in for the picker (Options asks for it). */
+    if (getenv("RECOMP_LANGPACK_IMAGE") && !getenv("RECOMP_LANGPACK_PICK")) langpack_choose();
     update_check();
     gx_init();
     input_init();

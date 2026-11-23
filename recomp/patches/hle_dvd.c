@@ -33,8 +33,10 @@ typedef pthread_cond_t Cond;
 #endif
 
 #ifndef _WIN32
+#include <strings.h>
 #define _strdup strdup
 #define _fseeki64 fseeko
+#define _stricmp strcasecmp
 #endif
 
 typedef struct Region {
@@ -115,6 +117,10 @@ static void add_fst_files(void) {
     }
 }
 
+/* The extracted disc's folder (holding sys/ and files/), or "" when the
+ * game is read from a disc image. */
+const char* hle_dvd_root(void) { return sImageRead ? "" : sRoot; }
+
 int hle_dvd_init(const char* root) {
     uint8_t* boot;
     char path[600];
@@ -185,16 +191,117 @@ static struct {
 } sOpen[OPEN_FILES];
 static unsigned sOpenNext;
 
-static FILE* open_region(int i) {
+static FILE* open_cached(int key, const char* path) {
     int k;
     for (k = 0; k < OPEN_FILES; k++) {
-        if (sOpen[k].f && sOpen[k].region == i) return sOpen[k].f;
+        if (sOpen[k].f && sOpen[k].region == key) return sOpen[k].f;
     }
     k = (int)(sOpenNext++ % OPEN_FILES);
     if (sOpen[k].f) fclose(sOpen[k].f);
-    sOpen[k].f = fopen(sRegions[i].path, "rb");
-    sOpen[k].region = i;
+    sOpen[k].f = fopen(path, "rb");
+    sOpen[k].region = key;
     return sOpen[k].f;
+}
+
+static FILE* open_region(int i) { return open_cached(i, sRegions[i].path); }
+
+/* Files that replace the disc's own (a language pack, hle_dvd_overlay):
+ * their FST entries, the game's and this file's copy, point past the end
+ * of the disc, here. */
+#define OVERLAY_BASE 0x200000000ull /* 8 GB */
+#define OVERLAY_KEY 0x40000000      /* their open files' keys */
+static Region* sOverlays;
+static int sOverlayCount;
+static uint64_t sOverlayNext = OVERLAY_BASE;
+
+static void put32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static uint64_t file_size(const char* path) {
+    FILE* f = fopen(path, "rb");
+    int64_t n;
+    if (!f) return 0;
+    _fseeki64(f, 0, SEEK_END);
+#ifdef _WIN32
+    n = _ftelli64(f);
+#else
+    n = ftello(f);
+#endif
+    fclose(f);
+    return n > 0 ? (uint64_t)n : 0;
+}
+
+/* Every file under <dir>/files at a path the disc has (spelled as the
+ * disc spells it) is read in place of the disc's. The FST in guest memory
+ * is changed, so this runs before the game starts (after
+ * hle_dvd_boot_setup); returns how many files were replaced. */
+int hle_dvd_overlay(const char* dir) {
+    uint32_t fst = LD32(0x80000038), count, i;
+    const char* names;
+    uint32_t dir_end[64];
+    char dir_path[64][256];
+    int depth = 0, made = 0;
+    uint64_t next = sOverlayNext;
+    if (!sFst || !fst || !dir || !*dir) return 0;
+    count = be32(sFst + 8);
+    names = (const char*)sFst + count * 12;
+    dir_path[0][0] = '\0';
+    dir_end[0] = count;
+    for (i = 1; i < count; i++) {
+        uint8_t* e = sFst + i * 12;
+        const char* name = names + (be32(e) & 0xFFFFFF);
+        char path[1024];
+        uint64_t size;
+        while (depth > 0 && i >= dir_end[depth]) depth--;
+        if (e[0]) {
+            if (depth + 1 < 64) {
+                depth++;
+                snprintf(dir_path[depth], sizeof(dir_path[depth]), "%s/%s", dir_path[depth - 1], name);
+                dir_end[depth] = be32(e + 8);
+            }
+            continue;
+        }
+        snprintf(path, sizeof(path), "%s/files%s/%s", dir, dir_path[depth], name);
+        size = file_size(path);
+        if (!size || size > 0xFFFFFFFFu) continue;
+        sOverlays = (Region*)realloc(sOverlays, (sOverlayCount + 1) * sizeof(Region));
+        sOverlays[sOverlayCount].offset = next;
+        sOverlays[sOverlayCount].size = size;
+        sOverlays[sOverlayCount].path = _strdup(path);
+        sOverlayCount++;
+        ST32(fst + i * 12 + 4, (uint32_t)(next >> 2));
+        ST32(fst + i * 12 + 8, (uint32_t)size);
+        put32(e + 4, (uint32_t)(next >> 2));
+        put32(e + 8, (uint32_t)size);
+        next = (next + size + 0x7FFF) & ~0x7FFFull;
+        made++;
+    }
+    sOverlayNext = next;
+    fprintf(stderr, "disc: %d files from %s\n", made, dir);
+    return made;
+}
+
+/* A replacement's bytes, into out (the caller holds the read lock). */
+static int read_overlay(uint64_t offset, uint32_t len, void* out) {
+    uint64_t end = offset + len;
+    int i;
+    memset(out, 0, len);
+    for (i = 0; i < sOverlayCount; i++) {
+        const Region* r = &sOverlays[i];
+        uint64_t hi = end < r->offset + r->size ? end : r->offset + r->size;
+        FILE* f;
+        if (offset < r->offset || offset >= r->offset + r->size) continue;
+        if (!(f = open_cached(OVERLAY_KEY + i, r->path))) break;
+        _fseeki64(f, (int64_t)(offset - r->offset), SEEK_SET);
+        HLE_LOG("disc read %08llX+%X: %s", (unsigned long long)offset, (unsigned)(hi - offset), r->path);
+        return fread(out, 1, (size_t)(hi - offset), f) == hi - offset;
+    }
+    HLE_WARN("disc read %08llX+%X: no replacement file there", (unsigned long long)offset, (unsigned)len);
+    return 0;
 }
 
 /* Copies len bytes at a data-partition offset to guest memory. */
@@ -322,6 +429,7 @@ static int read_now(uint64_t offset, uint32_t len, uint32_t dst) {
     uint64_t end = offset + len;
     int i, ok = 1;
     ppc_mem_host_write(dst, len);
+    if (offset >= OVERLAY_BASE) return read_overlay(offset, len, MA(dst));
     if (sImageRead) {
         HLE_LOG("disc read %08llX+%X", (unsigned long long)offset, (unsigned)len);
         if (sImageRead(offset, MA(dst), len)) return 1;
@@ -347,6 +455,30 @@ static int read_now(uint64_t offset, uint32_t len, uint32_t dst) {
         HLE_LOG("disc read %08llX+%X: %s", (unsigned long long)lo, (unsigned)(hi - lo), r->path + strlen(sRoot) + 1);
     }
     return ok;
+}
+
+/* The name of the disc file (its last part, "S_Field_BGM.acb") that ends
+ * in ext and is size bytes, or "" if there isn't just one. */
+const char* hle_dvd_file_sized(const char* ext, uint32_t size) {
+    static char name[128];
+    uint32_t count, i;
+    size_t n = strlen(ext);
+    int found = 0;
+    name[0] = 0;
+    if (!sFst) return name;
+    count = be32(sFst + 8);
+    for (i = 1; i < count; i++) {
+        const uint8_t* e = sFst + i * 12;
+        const char* nm = (const char*)sFst + count * 12 + (be32(e) & 0xFFFFFF);
+        size_t len = strlen(nm);
+        if (e[0] || be32(e + 8) != size || len < n || _stricmp(nm + len - n, ext)) continue;
+        if (found++) {
+            name[0] = 0;
+            break;
+        }
+        snprintf(name, sizeof(name), "%s", nm);
+    }
+    return name;
 }
 
 /* A disc file by its path under files/ ("Archive/MenuField.dac"), read
@@ -380,6 +512,19 @@ uint8_t* hle_dvd_load(const char* path, uint32_t* size) {
         }
     }
     if (!len) return NULL;
+    if ((uint64_t)offset << 2 >= OVERLAY_BASE) {
+        int ok;
+        if (!(data = (uint8_t*)malloc(len))) return NULL;
+        read_lock();
+        ok = read_overlay((uint64_t)offset << 2, len, data);
+        mutex_unlock(&sReadLock);
+        if (!ok) {
+            free(data);
+            return NULL;
+        }
+        *size = len;
+        return data;
+    }
     if (!sImageRead) {
         snprintf(host, sizeof(host), "%s/files/%s", sRoot, path);
         data = read_file(host, size);

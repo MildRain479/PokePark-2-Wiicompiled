@@ -42,7 +42,7 @@ const uint32_t* hle_friend_icon(const char* name, int* w, int* h);
 
 static struct {
     char name[24];    /* the icon's character's internal name */
-    char english[24]; /* "" if none found */
+    char english[48]; /* its name, UTF-8 ("" if none found) */
     int friend_;
 } sRows[POKEMON];
 static int sCount = -1; /* rows; -1 until set up */
@@ -132,7 +132,7 @@ void hle_friends_update(ppc_t* c) {
 }
 
 /* For options.c, on the presenting thread: the rows (0 until known), each
- * one's name (English, else internal), whether it's a friend, and its
+ * one's name (the game's, else internal), whether it's a friend, and its
  * icon; and a count that changes whenever any of that may have. */
 int hle_friends_rows(void) {
 #ifdef __GNUC__

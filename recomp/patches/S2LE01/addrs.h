@@ -175,3 +175,5 @@
 #define F_fn_80195F70 f_802330F0
 #define F_fn_80196200 f_80233380
 #define F_fn_80196030 f_802331B0
+#define F_PortalShakeIcon f_80136AA0
+#define F_PortalShakeIcon_orig f_80136AA0_orig
