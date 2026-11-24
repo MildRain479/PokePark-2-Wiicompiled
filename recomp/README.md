@@ -146,8 +146,10 @@ git-ignored, and is created on first run.
    keyboard or an Xbox-style controller. Pressing 2 leads to the save
    slots, picture choice and the following menus.
 
-Sound plays through waveOut (`recomp/boot/audio_win32.c`, about 85 ms
-buffered): the title movie's soundtrack, menu music and sound effects.
+Sound plays through WASAPI (`recomp/boot/audio_win32.c`, about 85 ms
+buffered), on the default output device, following it when it changes;
+waveOut is used if WASAPI can't start. It covers the title movie's
+soundtrack, menu music and sound effects.
 The aux buses that feed the game's own effects (such as reverb) are
 mixed, though no area tested so far uses them; the Wii Remote speaker is
 silent.
@@ -329,7 +331,8 @@ Diagnostics:
   10 s and right at 22 s. Buttons: up down left right a b 1 2 plus minus
   home shake, joined with `+`; times count from the remote's first
   report.
-- `RECOMP_AUDIO=0` turns sound off; `RECOMP_AUDIO_DUMP=<file.wav>` also
+- `RECOMP_AUDIO=0` turns sound off, and `RECOMP_AUDIO=waveout` plays it
+  through waveOut instead of WASAPI; `RECOMP_AUDIO_DUMP=<file.wav>` also
   records the mix.
 - `RECOMP_CALLS=<n>` lists the n functions called most in the last 5 s
   before the watchdog stops a run (for finding what a stuck game is

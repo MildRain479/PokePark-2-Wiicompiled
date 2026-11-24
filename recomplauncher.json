@@ -39,6 +39,7 @@
   "groups": [
     { "id": "Display" },
     { "id": "Gameplay" },
+    { "id": "Audio" },
     { "id": "Controls" },
     { "id": "More", "advanced": true }
   ],
@@ -241,6 +242,24 @@
       "advanced": true
     },
     {
+      "id": "music", "label": "Music volume", "group": "Audio",
+      "help": "The music, in percent.",
+      "slider": { "key": "audio/music", "min": 0, "max": 100, "step": 10, "format": "%d" },
+      "defaults": { "audio/music": "100" }
+    },
+    {
+      "id": "effects", "label": "Effects volume", "group": "Audio",
+      "help": "The sounds that aren't music or the Pokémon's voices, in percent.",
+      "slider": { "key": "audio/effects", "min": 0, "max": 100, "step": 10, "format": "%d" },
+      "defaults": { "audio/effects": "100" }
+    },
+    {
+      "id": "cries_volume", "label": "Cries volume", "group": "Audio",
+      "help": "The Pokémon's voices, in percent.",
+      "slider": { "key": "audio/cries_volume", "min": 0, "max": 100, "step": 10, "format": "%d" },
+      "defaults": { "audio/cries_volume": "100" }
+    },
+    {
       "id": "sensitivity", "label": "Mouse camera speed", "group": "Controls",
       "help": "How fast the mouse turns the camera, times the default.",
       "slider": { "key": "mouse/sensitivity", "min": 0.1, "max": 3, "step": 0.1, "format": "%.2f" },
@@ -250,10 +269,10 @@
       "id": "invert_tilt", "label": "Invert camera", "group": "Controls",
       "help": "Flips the camera's up and down.",
       "choices": [
-        { "label": "Off", "set": { "mouse/invert_tilt": "0" } },
-        { "label": "On", "set": { "mouse/invert_tilt": "1" } }
+        { "label": "Off", "set": { "mouse/invert_tilt": "0", "controller/invert_tilt": "0" } },
+        { "label": "On", "set": { "mouse/invert_tilt": "1", "controller/invert_tilt": "1" } }
       ],
-      "defaults": { "mouse/invert_tilt": "0" }
+      "defaults": { "mouse/invert_tilt": "0", "controller/invert_tilt": "0" }
     },
     {
       "id": "rumble", "label": "Rumble", "group": "Controls",

@@ -21,14 +21,27 @@ Steam Deck
 
 Settings
 - Options are on the PokePark Pad (and on the save files screen):
-  display, keyboard, controller and gameplay. They are saved in
+  display, keyboard, controller, gameplay and audio. They are saved in
   settings.ini beside the program.
 - Renderer: Vulkan by default; OpenGL in Options > Display (from the
   next start). If Vulkan can't start, OpenGL is used.
 - Controllers: Xbox, PlayStation, Switch Pro, 8BitDo and most others,
   over USB or Bluetooth (read through SDL3), and keyboard and mouse.
   Buttons go by position: the bottom face button is A. Button prompts
-  in the game show the key or button you have bound.
+  in the game show the key or button you have bound, with Xbox,
+  PlayStation or Nintendo symbols for the controller in hand.
+- Gyro controls (Options > Controller, off by default): aim in the
+  pointer attractions and steer by tilting a controller with a
+  gyroscope (DualShock 4, DualSense, Switch Pro).
+- Languages: Options > Gameplay > Language. English is built in. For
+  Japanese, French, German, Italian or Spanish, choose it, then
+  Language pack: it asks for your Japanese (S2LJ01) or European
+  (S2LP01) disc image and makes a language pack from it. The game
+  itself still runs from the USA disc.
+- Audio (Options > Audio): music, sound effects and voices volumes,
+  and the voices' language (English, Japanese, French or German).
+- RecompLauncher: recomplauncher.json lets RecompLauncher set the game
+  up, start it and show its settings.
 - Aspect ratio (Options > Display): 16:9 by default; 16:10 and 21:9
   show more of the world around the picture; 4:3 is the game's own
   4:3 mode (from the next start).
@@ -48,7 +61,7 @@ Settings
 - The attractions need no Wii Remote: aim Cake Contraption with the
   mouse or right stick; in Dance Inferno press and hold the key shown
   on each move's icon; swing in Power Bash with Q and E (LB and RB) by
-  turns.
+  turns. Wish Park portals open with Q and E (LB and RB) by turns too.
 - Autosave (Options > Gameplay, off by default): the game saves to
   the slot it was loaded from whenever you make a friend or enter
   another area, once any scene or conversation is over.
